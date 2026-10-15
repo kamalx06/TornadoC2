@@ -1,0 +1,62 @@
+name: Unpublish container image
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to delete (e.g. edge, 1.2.3). Leave blank to delete every version.'
+        required: false
+        default: ''
+      package:
+        description: 'Package name'
+        required: true
+        default: 'tornadoc2'
+
+jobs:
+  delete:
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+      contents: read
+
+    steps:
+      - name: Resolve versions to delete
+        id: resolve
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OWNER: ${{ github.repository_owner }}
+          PKG: ${{ inputs.package }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ -z "$TAG" ]; then
+            echo "selecting every version of ${PKG}"
+            IDS=$(gh api "/users/${OWNER}/packages/container/${PKG}/versions" \
+                    --paginate --jq '.[].id')
+          else
+            echo "selecting versions tagged ${TAG}"
+            IDS=$(gh api "/users/${OWNER}/packages/container/${PKG}/versions" \
+                    --paginate \
+                    --jq ".[] | select(.metadata.container.tags | index(\"${TAG}\")) | .id")
+          fi
+          if [ -z "$IDS" ]; then
+            echo "no matching versions"
+            echo "ids=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "$IDS" | tr '\n' ' '
+          echo "ids=$(echo "$IDS" | tr '\n' ' ')" >> "$GITHUB_OUTPUT"
+
+      - name: Delete
+        if: steps.resolve.outputs.ids != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OWNER: ${{ github.repository_owner }}
+          PKG: ${{ inputs.package }}
+        run: |
+          set -euo pipefail
+          for vid in ${{ steps.resolve.outputs.ids }}; do
+            echo "deleting version ${vid}"
+            gh api --method DELETE \
+                "/users/${OWNER}/packages/container/${PKG}/versions/${vid}"
+          done

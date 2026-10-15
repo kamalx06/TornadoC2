@@ -1,0 +1,66 @@
+{
+  "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+  "linux_user_agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+
+  "beacon_path":  "/mybucket/beacon",
+  "tasks_path":   "/mybucket/tasks",
+  "results_path": "/mybucket/results",
+
+  "extra_headers": {
+    "Accept": "application/xml",
+    "x-amz-content-sha256": "UNSIGNED-PAYLOAD",
+    "x-amz-date": "20260101T000000Z"
+  },
+  "request_headers": {},
+
+  "response_headers": {
+    "Server": "AmazonS3",
+    "x-amz-request-id": "0000000000000000",
+    "x-amz-id-2": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  },
+
+  "shaping": {
+    "checkin_response": {
+      "template": {
+        "ListBucketResult": {
+          "Name": "mybucket",
+          "Contents": [
+            {
+              "Key": "{{payload}}",
+              "LastModified": "{{ts}}",
+              "Size": 1024
+            }
+          ],
+          "IsTruncated": false
+        }
+      },
+      "extract": "ListBucketResult.Contents[0].Key"
+    },
+    "tasks_response": {
+      "template": {
+        "ListBucketResult": {
+          "Name": "mybucket",
+          "Contents": [
+            {
+              "Key": "{{payload}}",
+              "LastModified": "{{ts}}",
+              "Size": 1024
+            }
+          ],
+          "IsTruncated": false
+        }
+      },
+      "extract": "ListBucketResult.Contents[0].Key"
+    },
+    "results_request": {
+      "template": {
+        "PutObjectRequest": {
+          "Key": "{{nonce}}.dat",
+          "Body": "{{payload}}",
+          "ContentLength": 1024
+        }
+      },
+      "extract": "PutObjectRequest.Body"
+    }
+  }
+}

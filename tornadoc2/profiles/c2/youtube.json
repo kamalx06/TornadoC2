@@ -1,0 +1,86 @@
+{
+  "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+  "linux_user_agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+
+  "beacon_path":  "/youtubei/v1/browse",
+  "tasks_path":   "/youtubei/v1/next",
+  "results_path": "/youtubei/v1/comment/create_comment",
+
+  "extra_headers": {
+    "Accept": "application/json",
+    "X-YouTube-Client-Name": "1",
+    "X-YouTube-Client-Version": "2.20240101.00.00"
+  },
+  "request_headers": {},
+
+  "cookie_name": "SAPISID",
+  "response_headers": {
+    "Server": "ESF",
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "SAMEORIGIN",
+    "X-XSS-Protection": "0"
+  },
+
+  "shaping": {
+    "checkin_response": {
+      "template": {
+        "responseContext": { "visitorData": "{{nonce}}" },
+        "contents": {
+          "sectionListRenderer": {
+            "contents": [
+              {
+                "itemSectionRenderer": {
+                  "contents": [
+                    {
+                      "videoRenderer": {
+                        "videoId": "dQw4w9WgXcQ",
+                        "title": { "runs": [ { "text": "{{payload}}" } ] }
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      },
+      "extract": "contents.sectionListRenderer.contents[0].itemSectionRenderer.contents[0].videoRenderer.title.runs[0].text"
+    },
+    "tasks_response": {
+      "template": {
+        "responseContext": { "visitorData": "{{nonce}}" },
+        "contents": {
+          "singleColumnWatchNextResults": {
+            "results": {
+              "results": {
+                "contents": [
+                  {
+                    "commentThreadRenderer": {
+                      "comment": {
+                        "commentRenderer": {
+                          "contentText": {
+                            "runs": [ { "text": "{{payload}}" } ]
+                          }
+                        }
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        }
+      },
+      "extract": "contents.singleColumnWatchNextResults.results.results.contents[0].commentThreadRenderer.comment.commentRenderer.contentText.runs[0].text"
+    },
+    "results_request": {
+      "template": {
+        "responseContext": { "visitorData": "{{nonce}}" },
+        "comment": {
+          "snippet": { "textDisplay": "{{payload}}" }
+        }
+      },
+      "extract": "comment.snippet.textDisplay"
+    }
+  }
+}

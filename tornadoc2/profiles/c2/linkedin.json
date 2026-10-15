@@ -1,0 +1,57 @@
+{
+  "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+  "linux_user_agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+
+  "beacon_path":  "/voyager/api/me",
+  "tasks_path":   "/voyager/api/feed/updates",
+  "results_path": "/voyager/api/feed/comments",
+
+  "extra_headers": {
+    "Accept": "application/vnd.linkedin.normalized+json+2.1",
+    "csrf-token": "ajax:0000000000000000000",
+    "x-restli-protocol-version": "2.0.0"
+  },
+  "request_headers": {},
+
+  "cookie_name": "li_at",
+  "response_headers": {
+    "Server": "Play",
+    "X-Li-Fabric": "prod-lva1",
+    "X-Li-Pop": "prod-lva1-h2",
+    "X-Li-Proto": "http/1.1"
+  },
+
+  "shaping": {
+    "checkin_response": {
+      "template": {
+        "data": {
+          "id": "u000001",
+          "localizedFirstName": "{{payload}}",
+          "localizedLastName": "User"
+        }
+      },
+      "extract": "data.localizedFirstName"
+    },
+    "tasks_response": {
+      "template": {
+        "included": [
+          {
+            "entityUrn": "urn:li:activity:7000000000000000001",
+            "commentary": { "text": { "text": "{{payload}}" } },
+            "created": { "time": 1700000000000 }
+          }
+        ]
+      },
+      "extract": "included[0].commentary.text.text"
+    },
+    "results_request": {
+      "template": {
+        "data": {
+          "entityUrn": "urn:li:comment:7000000000000000002",
+          "commentary": { "text": "{{payload}}" }
+        }
+      },
+      "extract": "data.commentary.text"
+    }
+  }
+}

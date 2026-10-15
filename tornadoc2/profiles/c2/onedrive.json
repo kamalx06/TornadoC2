@@ -1,0 +1,63 @@
+{
+  "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+  "linux_user_agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+
+  "beacon_path":  "/v1.0/me/drive/root/children",
+  "tasks_path":   "/v1.0/me/drive/items/01ABCDEF/children",
+  "results_path": "/v1.0/me/drive/items/01ABCDEF/content",
+
+  "extra_headers": {
+    "Accept": "application/json",
+    "Authorization": "Bearer eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9...",
+    "client-request-id": "{{nonce}}"
+  },
+  "request_headers": {
+    "results": { "Content-Type": "application/octet-stream" }
+  },
+
+  "response_headers": {
+    "Server": "Microsoft-HTTPAPI/2.0",
+    "request-id": "00000000-0000-0000-0000-000000000000",
+    "client-request-id": "00000000-0000-0000-0000-000000000000"
+  },
+
+  "shaping": {
+    "checkin_response": {
+      "template": {
+        "@odata.context": "https://graph.microsoft.com/v1.0/$metadata#drives",
+        "value": [
+          {
+            "id": "01ABCDEF",
+            "name": "{{payload}}",
+            "size": 1024,
+            "folder": { "childCount": 0 }
+          }
+        ]
+      },
+      "extract": "value[0].name"
+    },
+    "tasks_response": {
+      "template": {
+        "@odata.context": "https://graph.microsoft.com/v1.0/$metadata#drives",
+        "value": [
+          {
+            "id": "01ABCDEG",
+            "name": "{{nonce}}.dat",
+            "size": 1024,
+            "file": { "mimeType": "application/octet-stream" },
+            "description": "{{payload}}"
+          }
+        ]
+      },
+      "extract": "value[0].description"
+    },
+    "results_request": {
+      "template": {
+        "name": "{{nonce}}.dat",
+        "file": { "mimeType": "application/octet-stream" },
+        "content": "{{payload}}"
+      },
+      "extract": "content"
+    }
+  }
+}

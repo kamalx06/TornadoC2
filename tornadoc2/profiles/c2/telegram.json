@@ -1,0 +1,57 @@
+{
+  "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+  "linux_user_agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+
+  "beacon_path":  "/bot000000000:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/getMe",
+  "tasks_path":   "/bot000000000:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/getUpdates",
+  "results_path": "/bot000000000:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/sendMessage",
+
+  "extra_headers": {
+    "Accept": "application/json"
+  },
+  "request_headers": {},
+
+  "response_headers": {
+    "Server": "nginx",
+    "X-Content-Type-Options": "nosniff"
+  },
+
+  "shaping": {
+    "checkin_response": {
+      "template": {
+        "ok": true,
+        "result": {
+          "id": 123456789,
+          "is_bot": true,
+          "first_name": "{{payload}}",
+          "username": "bot"
+        }
+      },
+      "extract": "result.first_name"
+    },
+    "tasks_response": {
+      "template": {
+        "ok": true,
+        "result": [
+          {
+            "update_id": 100000001,
+            "message": {
+              "message_id": 1,
+              "text": "{{payload}}",
+              "date": 1700000000
+            }
+          }
+        ]
+      },
+      "extract": "result[0].message.text"
+    },
+    "results_request": {
+      "template": {
+        "chat_id": "123456789",
+        "text": "{{payload}}",
+        "disable_notification": true
+      },
+      "extract": "text"
+    }
+  }
+}

@@ -1,0 +1,64 @@
+{
+  "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+  "linux_user_agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+
+  "beacon_path":  "/rest/api/3/issue/PROJ-1",
+  "tasks_path":   "/rest/api/3/search",
+  "results_path": "/rest/api/3/issue",
+
+  "extra_headers": {
+    "Accept": "application/json",
+    "Authorization": "Basic YWxpY2U6cGFzc3dvcmQ="
+  },
+  "request_headers": {},
+
+  "cookie_name": "JSESSIONID",
+  "response_headers": {
+    "Server": "AtlassianEdge",
+    "X-AREQUESTID": "00000000-0000-0000-0000-000000000000",
+    "X-AACCOUNTID": "000000000000000000000000"
+  },
+
+  "shaping": {
+    "checkin_response": {
+      "template": {
+        "id": "10001",
+        "key": "PROJ-1",
+        "fields": {
+          "summary": "{{payload}}",
+          "description": "",
+          "status": { "name": "Open" }
+        }
+      },
+      "extract": "fields.summary"
+    },
+    "tasks_response": {
+      "template": {
+        "issues": [
+          {
+            "id": "10002",
+            "key": "PROJ-2",
+            "fields": {
+              "summary": "{{nonce}}",
+              "description": "{{payload}}",
+              "status": { "name": "Open" }
+            }
+          }
+        ],
+        "total": 1
+      },
+      "extract": "issues[0].fields.description"
+    },
+    "results_request": {
+      "template": {
+        "fields": {
+          "project": { "key": "PROJ" },
+          "summary": "{{nonce}}",
+          "description": "{{payload}}",
+          "issuetype": { "name": "Task" }
+        }
+      },
+      "extract": "fields.description"
+    }
+  }
+}

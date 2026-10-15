@@ -1,0 +1,68 @@
+{
+  "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+  "linux_user_agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+
+  "beacon_path":  "/api/v1/users/self/feed",
+  "tasks_path":   "/api/v1/direct_v2/inbox",
+  "results_path": "/api/v1/media/configure",
+
+  "extra_headers": {
+    "Accept": "application/json",
+    "X-IG-App-ID": "936619743392459",
+    "X-IG-Connection-Type": "WIFI"
+  },
+  "request_headers": {},
+
+  "cookie_name": "sessionid",
+  "response_headers": {
+    "Server": "IG",
+    "X-FB-Trace-ID": "AbCdEfGhIjKlMnOpQrStUvWxYz0123456",
+    "X-FB-Connection-Quality": "EXCELLENT"
+  },
+
+  "shaping": {
+    "checkin_response": {
+      "template": {
+        "items": [
+          {
+            "pk": 1,
+            "id": "1_1",
+            "caption": { "text": "{{payload}}", "created_at": "{{ts}}" },
+            "like_count": 0
+          }
+        ],
+        "num_results": 1,
+        "more_available": false
+      },
+      "extract": "items[0].caption.text"
+    },
+    "tasks_response": {
+      "template": {
+        "inbox": {
+          "threads": [
+            {
+              "thread_id": "t1",
+              "last_permanent_item": {
+                "item_id": "m1",
+                "text": "{{payload}}",
+                "timestamp": "{{ts}}"
+              }
+            }
+          ],
+          "has_more": false
+        }
+      },
+      "extract": "inbox.threads[0].last_permanent_item.text"
+    },
+    "results_request": {
+      "template": {
+        "media": {
+          "upload_id": "{{nonce}}",
+          "caption": "{{payload}}",
+          "device_timestamp": "{{ts}}"
+        }
+      },
+      "extract": "media.caption"
+    }
+  }
+}

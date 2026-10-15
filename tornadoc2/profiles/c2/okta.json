@@ -1,0 +1,55 @@
+{
+  "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+  "linux_user_agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+
+  "beacon_path":  "/api/v1/users/me",
+  "tasks_path":   "/api/v1/apps",
+  "results_path": "/api/v1/logs",
+
+  "extra_headers": {
+    "Accept": "application/json",
+    "Authorization": "SSWS 00abc0000def0000ghi0000jkl0000mno0000pq"
+  },
+  "request_headers": {},
+
+  "cookie_name": "sid",
+  "response_headers": {
+    "Server": "nginx",
+    "X-Okta-Request-Id": "00000000000000000000000000000000",
+    "X-Okta-Origin-Id": "00000000000000000000000000000000"
+  },
+
+  "shaping": {
+    "checkin_response": {
+      "template": {
+        "id": "00u1a2b3c4d5e6f7g8h9",
+        "status": "ACTIVE",
+        "profile": {
+          "login": "{{payload}}",
+          "firstName": "Alice",
+          "lastName": "Smith"
+        }
+      },
+      "extract": "profile.login"
+    },
+    "tasks_response": {
+      "template": {
+        "id": "0oa1a2b3c4d5e6f7g8h9",
+        "name": "{{nonce}}",
+        "label": "{{payload}}",
+        "status": "ACTIVE"
+      },
+      "extract": "label"
+    },
+    "results_request": {
+      "template": {
+        "eventType": "user.session.start",
+        "displayMessage": "{{nonce}}",
+        "target": [
+          { "id": "0oa1a2b3c4d5e6f7g8h9", "displayName": "{{payload}}" }
+        ]
+      },
+      "extract": "target[0].displayName"
+    }
+  }
+}

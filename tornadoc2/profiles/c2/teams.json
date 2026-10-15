@@ -1,0 +1,47 @@
+{
+  "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+  "linux_user_agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+
+  "beacon_path":  "/api/mt/part/emea-03/beta/users/8-orgid-1234/conversations",
+  "tasks_path":   "/api/mt/part/emea-03/beta/users/8-orgid-1234/threads",
+  "results_path": "/api/mt/part/emea-03/beta/users/8-orgid-1234/messages",
+
+  "extra_headers": {
+    "Accept": "application/json",
+    "x-ms-client-version": "1415/1.0.0.0",
+    "x-ms-client-type": "web"
+  },
+  "request_headers": {},
+
+  "cookie_name": "skypetoken_asm",
+  "response_headers": {
+    "Server": "Microsoft-IIS/10.0",
+    "X-Msedge-Ref": "Ref A: 00000000000000000000000000000000 Ref B: AMSEDGE0000 Ref C: 2026-01-01T00:00:00Z",
+    "X-Content-Type-Options": "nosniff"
+  },
+
+  "shaping": {
+    "checkin_response": {
+      "template": {
+        "users": [
+          { "id": "8-orgid-1234", "displayName": "{{payload}}", "type": "user" }
+        ]
+      },
+      "extract": "users[0].displayName"
+    },
+    "tasks_response": {
+      "template": {
+        "messages": [
+          { "id": "1", "body": { "content": "{{payload}}" }, "contentType": "text" }
+        ]
+      },
+      "extract": "messages[0].body.content"
+    },
+    "results_request": {
+      "template": {
+        "body": { "content": "{{payload}}", "contentType": "text" }
+      },
+      "extract": "body.content"
+    }
+  }
+}

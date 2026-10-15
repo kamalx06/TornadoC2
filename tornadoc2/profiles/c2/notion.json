@@ -1,0 +1,66 @@
+{
+  "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+  "linux_user_agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+
+  "beacon_path":  "/v1/search",
+  "tasks_path":   "/v1/blocks/abc123/children",
+  "results_path": "/v1/pages",
+
+  "extra_headers": {
+    "Accept": "application/json",
+    "Authorization": "Bearer secret_0000000000000000000000000000000000000000000",
+    "Notion-Version": "2022-06-28"
+  },
+  "request_headers": {},
+
+  "cookie_name": "token_v2",
+  "response_headers": {
+    "Server": "cloudflare",
+    "X-Request-Id": "00000000-0000-0000-0000-000000000000",
+    "CF-RAY": "0000000000000000-SJC"
+  },
+
+  "shaping": {
+    "checkin_response": {
+      "template": {
+        "results": [
+          {
+            "object": "page",
+            "id": "abc123",
+            "properties": {
+              "title": {
+                "title": [ { "type": "text", "plain_text": "{{payload}}" } ]
+              }
+            }
+          }
+        ]
+      },
+      "extract": "results[0].properties.title.title[0].plain_text"
+    },
+    "tasks_response": {
+      "template": {
+        "results": [
+          {
+            "object": "block",
+            "id": "blk123",
+            "paragraph": {
+              "rich_text": [ { "type": "text", "plain_text": "{{payload}}" } ]
+            }
+          }
+        ]
+      },
+      "extract": "results[0].paragraph.rich_text[0].plain_text"
+    },
+    "results_request": {
+      "template": {
+        "parent": { "database_id": "abc123" },
+        "properties": {
+          "title": {
+            "title": [ { "type": "text", "plain_text": "{{payload}}" } ]
+          }
+        }
+      },
+      "extract": "properties.title.title[0].plain_text"
+    }
+  }
+}

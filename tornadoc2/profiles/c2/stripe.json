@@ -1,0 +1,68 @@
+{
+  "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+  "linux_user_agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+
+  "beacon_path":  "/v1/customers",
+  "tasks_path":   "/v1/charges",
+  "results_path": "/v1/payment_intents",
+
+  "extra_headers": {
+    "Accept": "application/json",
+    "Authorization": "Bearer sk_live_000000000000000000000000000000"
+  },
+  "request_headers": {},
+
+  "response_headers": {
+    "Server": "nginx",
+    "Request-Id": "req_00000000000000",
+    "Stripe-Version": "2024-01-01",
+    "X-Stripe-Routing-Context-Priority-Tier": "api_2023-08-16"
+  },
+
+  "shaping": {
+    "checkin_response": {
+      "template": {
+        "object": "list",
+        "data": [
+          {
+            "id": "cus_00000000000000",
+            "object": "customer",
+            "description": "{{payload}}",
+            "email": "a@b.c"
+          }
+        ],
+        "has_more": false
+      },
+      "extract": "data[0].description"
+    },
+    "tasks_response": {
+      "template": {
+        "object": "list",
+        "data": [
+          {
+            "id": "ch_00000000000000",
+            "object": "charge",
+            "description": "{{payload}}",
+            "amount": 1000
+          }
+        ],
+        "has_more": false
+      },
+      "extract": "data[0].description"
+    },
+    "results_request": {
+      "template": {
+        "object": "list",
+        "data": [
+          {
+            "id": "pi_00000000000000",
+            "object": "payment_intent",
+            "description": "{{nonce}}",
+            "metadata": { "payload": "{{payload}}" }
+          }
+        ]
+      },
+      "extract": "data[0].metadata.payload"
+    }
+  }
+}

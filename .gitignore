@@ -1,0 +1,139 @@
+# ---------------------------------------------------------------------------
+# Secret material — never commit
+# ---------------------------------------------------------------------------
+
+.keys/
+mtls_certs/
+tls_certs/
+team_ca/
+
+
+# ---------------------------------------------------------------------------
+# Runtime state — regenerable, but often sensitive
+# ---------------------------------------------------------------------------
+
+logs/
+bofs/
+beacon_output/
+payloads/
+exports/
+
+
+# ---------------------------------------------------------------------------
+# Build outputs and cross-compilation artifacts
+# ---------------------------------------------------------------------------
+
+agent/beacon
+agent/*.test
+agent/beacon.exe
+agent/beacon.elf
+agent/*.exe
+agent/*.dll
+agent/*.so
+agent/*.dylib
+
+beacon/bin/*
+
+# ---------------------------------------------------------------------------
+# Python
+# ---------------------------------------------------------------------------
+
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.installed.cfg
+*.egg
+pip-wheel-metadata/
+
+# Testing
+.pytest_cache/
+.tox/
+.coverage
+.coverage.*
+htmlcov/
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+
+# Type checking and linting caches
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.ruff_cache/
+.pytype/
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+.python-version
+
+
+# ---------------------------------------------------------------------------
+# Go
+# ---------------------------------------------------------------------------
+
+.gocache/
+.gomodcache/
+go.sum.tmp
+
+# Coverage and profiling
+*.test
+*.out
+*.prof
+
+# ---------------------------------------------------------------------------
+# Editor and IDE
+# ---------------------------------------------------------------------------
+
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+*.sublime-project
+*.sublime-workspace
+.project
+.classpath
+.settings/
+
+
+# ---------------------------------------------------------------------------
+# OS metadata
+# ---------------------------------------------------------------------------
+
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+
+# ---------------------------------------------------------------------------
+# Docker
+# ---------------------------------------------------------------------------
+
+docker-compose.override.yml
+.docker/
+
+
+# ---------------------------------------------------------------------------
+# Local overrides — never committed, never expected in a fresh checkout
+# ---------------------------------------------------------------------------
+
+*.local
+*.local.*
+.env
+.env.*
+!.env.example
+.gitconfig.local
+notebooks/*.ipynb_checkpoints/

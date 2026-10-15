@@ -1,0 +1,54 @@
+{
+  "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+  "linux_user_agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+
+  "beacon_path":  "/api/v4/projects/1/issues",
+  "tasks_path":   "/api/v4/projects/1/issues/1/notes",
+  "results_path": "/api/v4/projects/1/issues/1/notes/post",
+
+  "extra_headers": {
+    "Accept": "application/json",
+    "PRIVATE-TOKEN": "glpat-00000000000000000000"
+  },
+  "request_headers": {},
+
+  "cookie_name": "_gitlab_session",
+  "response_headers": {
+    "Server": "nginx",
+    "X-Request-Id": "00000000000000000000000000000000",
+    "X-Gitlab-Meta": "{\"correlation_id\":\"00000000000000000000000000000000\",\"version\":\"1\"}"
+  },
+
+  "shaping": {
+    "checkin_response": {
+      "template": {
+        "id": 1,
+        "iid": 1,
+        "project_id": 1,
+        "title": "{{payload}}",
+        "description": "",
+        "state": "opened",
+        "created_at": "{{ts}}"
+      },
+      "extract": "title"
+    },
+    "tasks_response": {
+      "template": {
+        "id": 2,
+        "iid": 2,
+        "project_id": 1,
+        "title": "{{nonce}}",
+        "description": "{{payload}}",
+        "state": "opened"
+      },
+      "extract": "description"
+    },
+    "results_request": {
+      "template": {
+        "title": "{{nonce}}",
+        "description": "{{payload}}"
+      },
+      "extract": "description"
+    }
+  }
+}

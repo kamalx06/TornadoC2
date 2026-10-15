@@ -1,0 +1,52 @@
+{
+  "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+  "linux_user_agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+
+  "beacon_path":  "/api/v10/users/me/channels",
+  "tasks_path":   "/api/v10/channels/1234/messages",
+  "results_path": "/api/v10/channels/1234/messages/post",
+
+  "extra_headers": {
+    "Accept": "application/json",
+    "Authorization": "Bearer MTEuMDAwMDAwMDAwMDAwMDAwMDAwMA..."
+  },
+  "request_headers": {},
+
+  "response_headers": {
+    "Server": "cloudflare",
+    "via": "1.1 google",
+    "CF-RAY": "0000000000000000-LAX"
+  },
+
+  "shaping": {
+    "checkin_response": {
+      "template": {
+        "id": "1234",
+        "type": 1,
+        "name": "{{payload}}",
+        "recipients": [ { "username": "peer" } ]
+      },
+      "extract": "name"
+    },
+    "tasks_response": {
+      "template": {
+        "messages": [
+          {
+            "id": "9999",
+            "channel_id": "1234",
+            "content": "{{payload}}",
+            "timestamp": "{{ts}}"
+          }
+        ]
+      },
+      "extract": "messages[0].content"
+    },
+    "results_request": {
+      "template": {
+        "content": "{{payload}}",
+        "nonce": "{{nonce}}"
+      },
+      "extract": "content"
+    }
+  }
+}

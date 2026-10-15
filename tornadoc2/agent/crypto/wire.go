@@ -1,0 +1,163 @@
+package crypto
+
+import (
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/ecdh"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"sync"
+)
+
+const wireVersion = "v1"
+
+var wireInfo = []byte("tornadoc2-wire-v1")
+
+type WireSession struct {
+	mu   sync.Mutex
+	peer *ecdh.PublicKey   // server's long-lived public key
+	priv *ecdh.PrivateKey  // current ephemeral keypair
+	key  []byte            // shared secret for `priv`
+}
+
+func NewWireSession(serverPubB64 string) (*WireSession, error) {
+	if serverPubB64 == "" {
+		return nil, nil
+	}
+	raw, err := base64.StdEncoding.DecodeString(serverPubB64)
+	if err != nil {
+		return nil, err
+	}
+	peer, err := ecdh.P256().NewPublicKey(raw)
+	if err != nil {
+		return nil, err
+	}
+	w := &WireSession{peer: peer}
+	if _, err := w.RotateEphemeral(); err != nil {
+		return nil, err
+	}
+	return w, nil
+}
+
+func (w *WireSession) RotateEphemeral() (string, error) {
+	if w == nil {
+		return "", nil
+	}
+	priv, err := ecdh.P256().GenerateKey(rand.Reader)
+	if err != nil {
+		return "", err
+	}
+	shared, err := priv.ECDH(w.peer)
+	if err != nil {
+		return "", err
+	}
+	h := sha256.New()
+	h.Write(shared)
+	h.Write(wireInfo)
+	sum := h.Sum(nil)
+
+	w.mu.Lock()
+	w.priv = priv
+	w.key = sum
+	w.mu.Unlock()
+
+	return base64.StdEncoding.EncodeToString(
+		priv.PublicKey().Bytes()), nil
+}
+
+func (w *WireSession) EpkBase64() string {
+	if w == nil {
+		return ""
+	}
+	w.mu.Lock()
+	pub := w.priv.PublicKey().Bytes()
+	w.mu.Unlock()
+	return base64.StdEncoding.EncodeToString(pub)
+}
+
+func (w *WireSession) EncryptRequest(plaintext []byte) ([]byte, error) {
+	if w == nil {
+		return plaintext, nil
+	}
+	epk, err := w.RotateEphemeral()
+	if err != nil {
+		return nil, err
+	}
+	w.mu.Lock()
+	key := append([]byte(nil), w.key...)
+	w.mu.Unlock()
+
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+	iv := make([]byte, gcm.NonceSize())
+	if _, err := rand.Read(iv); err != nil {
+		return nil, err
+	}
+	ct := gcm.Seal(nil, iv, plaintext, nil)
+	env := map[string]string{
+		"enc": wireVersion,
+		"epk": epk,
+		"iv":  base64.StdEncoding.EncodeToString(iv),
+		"ct":  base64.StdEncoding.EncodeToString(ct),
+	}
+	return json.Marshal(env)
+}
+
+func (w *WireSession) DecryptResponse(body []byte) ([]byte, bool, error) {
+	if w == nil {
+		return body, false, nil
+	}
+	var env struct {
+		Enc string `json:"enc"`
+		IV  string `json:"iv"`
+		CT  string `json:"ct"`
+	}
+	if err := json.Unmarshal(body, &env); err != nil {
+		return nil, false, fmt.Errorf(
+			"wire: encrypted session, response is not JSON: %w", err)
+	}
+	if env.Enc == "" {
+		return nil, false, errors.New(
+			"wire: encrypted session, response has no enc field")
+	}
+	if env.Enc != wireVersion {
+		return nil, false, fmt.Errorf(
+			"wire: encrypted session, unsupported enc %q (want %q)",
+			env.Enc, wireVersion)
+	}
+	if env.IV == "" || env.CT == "" {
+		return nil, false, errors.New(
+			"wire: envelope missing iv or ct")
+	}
+	iv, err := base64.StdEncoding.DecodeString(env.IV)
+	if err != nil {
+		return nil, false, fmt.Errorf("wire: bad iv: %w", err)
+	}
+	ct, err := base64.StdEncoding.DecodeString(env.CT)
+	if err != nil {
+		return nil, false, fmt.Errorf("wire: bad ct: %w", err)
+	}
+	block, err := aes.NewCipher(w.key)
+	if err != nil {
+		return nil, false, err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, false, err
+	}
+	pt, err := gcm.Open(nil, iv, ct, nil)
+	if err != nil {
+		return nil, false, fmt.Errorf("wire: decrypt failed: %w", err)
+	}
+	return pt, true, nil
+}

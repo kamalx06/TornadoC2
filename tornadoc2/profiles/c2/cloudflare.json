@@ -1,0 +1,51 @@
+{
+  "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+  "linux_user_agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+
+  "beacon_path":  "/client/v4/accounts/abc123/workers/scripts",
+  "tasks_path":   "/client/v4/accounts/abc123/workers/routes",
+  "results_path": "/client/v4/accounts/abc123/workers/deployments",
+
+  "extra_headers": {
+    "Accept": "application/json",
+    "Authorization": "Bearer 00000000000000000000000000000000000000000"
+  },
+  "request_headers": {},
+
+  "response_headers": {
+    "Server": "cloudflare",
+    "CF-RAY": "0000000000000000-LAX"
+  },
+
+  "shaping": {
+    "checkin_response": {
+      "template": {
+        "result": [
+          { "id": "s1", "name": "{{payload}}", "modified_on": "{{ts}}" }
+        ],
+        "success": true,
+        "errors": [],
+        "messages": []
+      },
+      "extract": "result[0].name"
+    },
+    "tasks_response": {
+      "template": {
+        "result": [
+          { "id": "r1", "pattern": "{{nonce}}", "script": "{{payload}}" }
+        ],
+        "success": true,
+        "errors": [],
+        "messages": []
+      },
+      "extract": "result[0].script"
+    },
+    "results_request": {
+      "template": {
+        "script_name": "{{nonce}}",
+        "content": "{{payload}}"
+      },
+      "extract": "content"
+    }
+  }
+}

@@ -1,0 +1,50 @@
+# Secrets. Never baked into a layer.
+.keys/
+tls_certs/
+mtls_certs/
+team_ca/
+*.pem
+*.key
+*.crt
+
+# Runtime state.
+logs/
+beacon_output/
+payloads/
+bofs/*.o
+
+# Per-operator configs. Bearer credentials.
+*.cfg
+operator_cfg/
+
+# Python artifacts.
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+
+# Version control and editor state.
+.git/
+.gitignore
+.github/
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Documentation and dev scripts not needed in the image.
+LICENSE
+examples/
+tests/
+
+# The Docker build inputs themselves.
+docker-compose.yml
+Dockerfile
+.dockerignore

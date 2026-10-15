@@ -1,0 +1,64 @@
+{
+  "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+  "linux_user_agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+
+  "beacon_path":  "/gp/your-account/order-history",
+  "tasks_path":   "/gp/cart/view",
+  "results_path": "/gp/cart/add",
+
+  "extra_headers": {
+    "Accept": "application/json",
+    "X-Requested-With": "XMLHttpRequest"
+  },
+  "request_headers": {},
+
+  "cookie_name": "session-id",
+  "response_headers": {
+    "Server": "Server",
+    "X-Amz-Cf-Id": "0000000000000000000000000000000000000000000000000000"
+  },
+
+  "shaping": {
+    "checkin_response": {
+      "template": {
+        "orders": [
+          {
+            "orderId": "100-0000000-0000000",
+            "orderDate": "{{ts}}",
+            "summary": "{{payload}}",
+            "status": "DELIVERED"
+          }
+        ]
+      },
+      "extract": "orders[0].summary"
+    },
+    "tasks_response": {
+      "template": {
+        "cart": {
+          "items": [
+            {
+              "asin": "B000000001",
+              "title": "{{payload}}",
+              "qty": 1,
+              "price": "9.99"
+            }
+          ],
+          "subtotal": "9.99"
+        }
+      },
+      "extract": "cart.items[0].title"
+    },
+    "results_request": {
+      "template": {
+        "cart": {
+          "updated": {
+            "asin": "B000000001",
+            "note": "{{payload}}",
+            "qty": 1
+          }
+        }
+      },
+      "extract": "cart.updated.note"
+    }
+  }
+}

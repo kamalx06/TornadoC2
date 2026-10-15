@@ -1,0 +1,59 @@
+{
+  "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+  "linux_user_agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+
+  "beacon_path":  "/services/data/v59.0/sobjects/Account",
+  "tasks_path":   "/services/data/v59.0/query",
+  "results_path": "/services/data/v59.0/sobjects/Contact",
+
+  "extra_headers": {
+    "Accept": "application/json",
+    "Authorization": "Bearer 00D000000000000!AQcAQH..."
+  },
+  "request_headers": {},
+
+  "response_headers": {
+    "Sforce-Limit-Info": "api-usage=100/15000",
+    "X-Content-Type-Options": "nosniff",
+    "Cache-Control": "no-cache,must-revalidate"
+  },
+
+  "shaping": {
+    "checkin_response": {
+      "template": {
+        "records": [
+          {
+            "attributes": { "type": "Account" },
+            "Id": "001000000000001",
+            "Name": "{{payload}}"
+          }
+        ],
+        "totalSize": 1,
+        "done": true
+      },
+      "extract": "records[0].Name"
+    },
+    "tasks_response": {
+      "template": {
+        "records": [
+          {
+            "attributes": { "type": "Task" },
+            "Id": "00T000000000001",
+            "Subject": "{{nonce}}",
+            "Description": "{{payload}}"
+          }
+        ],
+        "totalSize": 1,
+        "done": true
+      },
+      "extract": "records[0].Description"
+    },
+    "results_request": {
+      "template": {
+        "LastName": "{{nonce}}",
+        "Description": "{{payload}}"
+      },
+      "extract": "Description"
+    }
+  }
+}

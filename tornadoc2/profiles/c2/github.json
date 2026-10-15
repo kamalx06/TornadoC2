@@ -1,0 +1,58 @@
+{
+  "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+  "linux_user_agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+
+  "beacon_path":  "/repos/octocat/Hello-World/issues",
+  "tasks_path":   "/repos/octocat/Hello-World/issues/1/comments",
+  "results_path": "/repos/octocat/Hello-World/issues/1/labels",
+
+  "extra_headers": {
+    "Accept": "application/vnd.github+json",
+    "Authorization": "Bearer ghp_0000000000000000000000000000000000",
+    "X-GitHub-Api-Version": "2022-11-28"
+  },
+  "request_headers": {},
+
+  "cookie_name": "_gh_sess",
+  "response_headers": {
+    "Server": "GitHub.com",
+    "X-GitHub-Request-Id": "0000:0000:0000:0000:000000000000:00000000"
+  },
+
+  "shaping": {
+    "checkin_response": {
+      "template": {
+        "issues": [
+          {
+            "id": 1,
+            "number": 1,
+            "title": "{{payload}}",
+            "body": "",
+            "state": "open",
+            "created_at": "{{ts}}"
+          }
+        ]
+      },
+      "extract": "issues[0].title"
+    },
+    "tasks_response": {
+      "template": {
+        "comments": [
+          {
+            "id": 2,
+            "user": { "login": "octocat" },
+            "body": "{{payload}}",
+            "created_at": "{{ts}}"
+          }
+        ]
+      },
+      "extract": "comments[0].body"
+    },
+    "results_request": {
+      "template": {
+        "labels": [ "{{payload}}" ]
+      },
+      "extract": "labels[0]"
+    }
+  }
+}

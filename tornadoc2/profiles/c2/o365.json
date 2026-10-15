@@ -1,0 +1,55 @@
+{
+  "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+  "linux_user_agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+
+  "beacon_path":  "/api/v2.0/me/messages",
+  "tasks_path":   "/api/v2.0/me/mailfolders/inbox/messages",
+  "results_path": "/api/v2.0/me/sendmail",
+
+  "extra_headers": {
+    "Accept": "application/json",
+    "Authorization": "Bearer eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9...",
+    "client-request-id": "{{nonce}}"
+  },
+  "request_headers": {},
+
+  "response_headers": {
+    "Server": "Microsoft-IIS/10.0",
+    "X-BEServer": "0000000000000000000000000000000",
+    "X-CalculatedBETarget": "00000000000000000000000000000",
+    "X-FEServer": "0000000000000000000000000000000"
+  },
+
+  "shaping": {
+    "checkin_response": {
+      "template": {
+        "value": [
+          { "id": "AAMkAGI2", "subject": "{{payload}}", "isRead": true }
+        ]
+      },
+      "extract": "value[0].subject"
+    },
+    "tasks_response": {
+      "template": {
+        "value": [
+          {
+            "id": "AAMkAGI3",
+            "subject": "{{nonce}}",
+            "body": { "contentType": "Text", "content": "{{payload}}" }
+          }
+        ]
+      },
+      "extract": "value[0].body.content"
+    },
+    "results_request": {
+      "template": {
+        "message": {
+          "subject": "{{nonce}}",
+          "body": { "contentType": "Text", "content": "{{payload}}" }
+        },
+        "saveToSentItems": true
+      },
+      "extract": "message.body.content"
+    }
+  }
+}

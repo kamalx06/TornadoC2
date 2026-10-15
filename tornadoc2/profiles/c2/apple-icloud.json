@@ -1,0 +1,58 @@
+{
+  "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+  "linux_user_agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+
+  "beacon_path":  "/ws/com.apple.calendar/calendars",
+  "tasks_path":   "/ws/com.apple.contacts/contacts",
+  "results_path": "/ws/com.apple.mail/messages",
+
+  "extra_headers": {
+    "Accept": "application/json",
+    "X-Apple-I-Client-Time": "{{ts}}",
+    "X-Apple-I-MD": "AAAABQAAABD"
+  },
+  "request_headers": {},
+
+  "response_headers": {
+    "Server": "AppleHttpServer"
+  },
+
+  "shaping": {
+    "checkin_response": {
+      "template": {
+        "calendars": [
+          {
+            "guid": "AAAA-0001",
+            "title": "{{payload}}",
+            "color": "#FF0000"
+          }
+        ]
+      },
+      "extract": "calendars[0].title"
+    },
+    "tasks_response": {
+      "template": {
+        "contacts": [
+          {
+            "contactId": "AAAA-0002",
+            "firstName": "{{nonce}}",
+            "lastName": "{{payload}}"
+          }
+        ]
+      },
+      "extract": "contacts[0].lastName"
+    },
+    "results_request": {
+      "template": {
+        "messages": [
+          {
+            "messageId": "AAAA-0003",
+            "subject": "{{nonce}}",
+            "body": "{{payload}}"
+          }
+        ]
+      },
+      "extract": "messages[0].body"
+    }
+  }
+}

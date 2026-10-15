@@ -1,0 +1,65 @@
+{
+  "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+  "linux_user_agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+
+  "beacon_path":  "/v1beta/properties/123456789:runReport",
+  "tasks_path":   "/v1beta/properties/123456789:batchRunReports",
+  "results_path": "/v1beta/properties/123456789:runPivotReport",
+
+  "extra_headers": {
+    "Accept": "application/json",
+    "Authorization": "Bearer ya29.a0AfH6SMB..."
+  },
+  "request_headers": {},
+
+  "response_headers": {
+    "Server": "ESF",
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "SAMEORIGIN"
+  },
+
+  "shaping": {
+    "checkin_response": {
+      "template": {
+        "dimensionHeaders": [ { "name": "eventName" } ],
+        "metricHeaders": [ { "name": "eventCount", "type": "TYPE_INTEGER" } ],
+        "rows": [
+          {
+            "dimensionValues": [ { "value": "{{payload}}" } ],
+            "metricValues": [ { "value": "1" } ]
+          }
+        ],
+        "rowCount": 1
+      },
+      "extract": "rows[0].dimensionValues[0].value"
+    },
+    "tasks_response": {
+      "template": {
+        "dimensionHeaders": [ { "name": "eventName" } ],
+        "metricHeaders": [ { "name": "eventCount", "type": "TYPE_INTEGER" } ],
+        "rows": [
+          {
+            "dimensionValues": [ { "value": "{{nonce}}" } ],
+            "metricValues": [ { "value": "{{payload}}" } ]
+          }
+        ],
+        "rowCount": 1
+      },
+      "extract": "rows[0].metricValues[0].value"
+    },
+    "results_request": {
+      "template": {
+        "dateRanges": [ { "startDate": "2026-01-01", "endDate": "2026-01-31" } ],
+        "dimensions": [ { "name": "eventName" } ],
+        "metrics": [ { "name": "eventCount" } ],
+        "dimensionFilter": {
+          "filter": {
+            "fieldName": "eventName",
+            "stringFilter": { "value": "{{payload}}" }
+          }
+        }
+      },
+      "extract": "dimensionFilter.filter.stringFilter.value"
+    }
+  }
+}

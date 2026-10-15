@@ -1,0 +1,61 @@
+{
+  "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+  "linux_user_agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+
+  "beacon_path":  "/v2/users/me",
+  "tasks_path":   "/v2/users/me/meetings",
+  "results_path": "/v2/users/me/webinars",
+
+  "extra_headers": {
+    "Accept": "application/json",
+    "Authorization": "Bearer eyJhbGciOiJIUzI1NiJ9..."
+  },
+  "request_headers": {},
+
+  "response_headers": {
+    "Server": "nginx",
+    "X-Zm-Trackingid": "WEB_00000000000000000000000000000000",
+    "X-Content-Type-Options": "nosniff",
+    "X-Ratelimit-Category": "Light",
+    "X-Ratelimit-Limit": "1000"
+  },
+
+  "shaping": {
+    "checkin_response": {
+      "template": {
+        "id": "AAAAA0000001",
+        "first_name": "{{payload}}",
+        "last_name": "User",
+        "email": "u@example.com",
+        "type": 2,
+        "status": "active"
+      },
+      "extract": "first_name"
+    },
+    "tasks_response": {
+      "template": {
+        "page_size": 30,
+        "total_records": 1,
+        "meetings": [
+          {
+            "id": 1000000001,
+            "topic": "{{nonce}}",
+            "agenda": "{{payload}}",
+            "type": 2,
+            "duration": 30
+          }
+        ]
+      },
+      "extract": "meetings[0].agenda"
+    },
+    "results_request": {
+      "template": {
+        "topic": "{{nonce}}",
+        "type": 2,
+        "duration": 30,
+        "agenda": "{{payload}}"
+      },
+      "extract": "agenda"
+    }
+  }
+}

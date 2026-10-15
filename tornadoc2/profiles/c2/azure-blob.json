@@ -1,0 +1,70 @@
+{
+  "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+  "linux_user_agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+
+  "beacon_path":  "/container-beacon/list",
+  "tasks_path":   "/container-tasks/list",
+  "results_path": "/container-results/upload",
+
+  "extra_headers": {
+    "Accept": "application/xml",
+    "x-ms-version": "2023-11-03"
+  },
+  "request_headers": {
+    "results": { "x-ms-blob-type": "BlockBlob" }
+  },
+
+  "response_headers": {
+    "Server": "Windows-Azure-Blob/1.0 Microsoft-HTTPAPI/2.0",
+    "x-ms-request-id": "00000000-0000-0000-0000-000000000000",
+    "x-ms-version": "2023-11-03"
+  },
+
+  "shaping": {
+    "checkin_response": {
+      "template": {
+        "EnumerationResults": {
+          "ContainerName": "container",
+          "Blobs": {
+            "Blob": [
+              {
+                "Name": "{{payload}}",
+                "Properties": {
+                  "Last-Modified": "{{ts}}",
+                  "Content-Length": "1024"
+                }
+              }
+            ]
+          }
+        }
+      },
+      "extract": "EnumerationResults.Blobs.Blob[0].Name"
+    },
+    "tasks_response": {
+      "template": {
+        "EnumerationResults": {
+          "ContainerName": "container",
+          "Blobs": {
+            "Blob": [
+              {
+                "Name": "{{payload}}",
+                "Properties": {
+                  "Last-Modified": "{{ts}}",
+                  "Content-Length": "1024"
+                }
+              }
+            ]
+          }
+        }
+      },
+      "extract": "EnumerationResults.Blobs.Blob[0].Name"
+    },
+    "results_request": {
+      "template": {
+        "Name": "{{nonce}}.dat",
+        "Content": "{{payload}}"
+      },
+      "extract": "Content"
+    }
+  }
+}

@@ -1,0 +1,50 @@
+{
+  "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+  "linux_user_agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+
+  "beacon_path":  "/api/conversations.list",
+  "tasks_path":   "/api/conversations.history",
+  "results_path": "/api/chat.postMessage",
+
+  "extra_headers": {
+    "Accept": "application/json",
+    "Authorization": "Bearer xoxb-0000-0000-000000000000-000000000000000000000000"
+  },
+  "request_headers": {},
+
+  "cookie_name": "d",
+  "response_headers": {
+    "Server": "Apache",
+    "X-Slack-Backend": "api_speed",
+    "X-Slack-Req-Id": "00000000-0000-0000-0000-000000000000",
+    "X-Content-Type-Options": "nosniff"
+  },
+
+  "shaping": {
+    "checkin_response": {
+      "template": {
+        "ok": true,
+        "channels": [
+          { "id": "C00000000", "name": "{{payload}}", "is_channel": true }
+        ]
+      },
+      "extract": "channels[0].name"
+    },
+    "tasks_response": {
+      "template": {
+        "ok": true,
+        "messages": [
+          { "type": "message", "text": "{{payload}}", "ts": "{{ts}}" }
+        ]
+      },
+      "extract": "messages[0].text"
+    },
+    "results_request": {
+      "template": {
+        "channel": "C00000000",
+        "text": "{{payload}}"
+      },
+      "extract": "text"
+    }
+  }
+}
