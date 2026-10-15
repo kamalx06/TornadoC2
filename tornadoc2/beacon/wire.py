@@ -43,8 +43,8 @@ except ImportError:
     _CRYPTO = False
 
 
-WIRE_VERSION = "v1"
-_INFO = b"tornadoc2-wire-v1"
+WIRE_VERSION = "v2"
+_INFO = b"tornadoc2-wire-v2"
 
 
 class ServerECDH:
@@ -88,8 +88,15 @@ class ServerECDH:
                     encryption_algorithm=serialization.NoEncryption(),
                 ))
             os.chmod(self.key_path, 0o600)
-        except OSError:
-            pass
+        except OSError as exc:
+            import sys
+            print(
+                f"[wire] failed to persist server ECDH key to "
+                f"{self.key_path!r}: {exc}. The key exists only "
+                f"in memory; a restart will invalidate every "
+                f"agent built against this run.",
+                file=sys.stderr,
+            )
         return priv
 
     def derive_shared(self, peer_pub_bytes):
@@ -112,7 +119,7 @@ def decrypt(shared, envelope):
     iv = base64.b64decode(envelope['iv'])
     ct = base64.b64decode(envelope['ct'])
     aes = AESGCM(_key_from_shared(shared))
-    return aes.decrypt(iv, ct, None)
+    return aes.decrypt(iv, ct, WIRE_VERSION.encode('ascii'))
 
 
 def encrypt(shared, plaintext):
@@ -121,7 +128,7 @@ def encrypt(shared, plaintext):
         raise RuntimeError('cryptography not installed')
     iv = secrets.token_bytes(12)
     aes = AESGCM(_key_from_shared(shared))
-    ct = aes.encrypt(iv, plaintext, None)
+    ct = aes.encrypt(iv, plaintext, WIRE_VERSION.encode('ascii'))
     return {
         'enc': WIRE_VERSION,
         'iv':  base64.b64encode(iv).decode('ascii'),

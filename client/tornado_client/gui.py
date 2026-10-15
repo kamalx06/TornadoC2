@@ -24,6 +24,15 @@ Same contract as the Tkinter version:
 
 Qt-specific notes:
 
+  * The theme is dark, GitHub-dark-inspired, and lives entirely in
+    the ``Palette`` class. Every QSS rule and every widget call
+    site references a ``Palette`` name — a hard-coded hex value
+    outside that class is a bug, because it will survive a theme
+    change and stick out. The five chat speaker colours are the
+    one exception: they are generated per-operator by
+    ``_chat_hue`` and tuned against the dark ``Palette.BG``
+    surface in ``_CHAT_HUES``.
+
   * ``QApplication`` must exist before any ``QWidget``. ``main_gui``
     therefore creates the app, sets the theme, then constructs the
     transport (whose ``__init__`` may prompt via ``getpass``), then
@@ -46,6 +55,7 @@ import builtins
 import getpass as _getpass_mod
 import hashlib
 import io
+import json
 import os
 import queue
 import re
@@ -86,39 +96,92 @@ from PySide6.QtWidgets import (
 # Palette
 
 class Palette:
-    BG            = '#ffffff'
-    BG_APP        = '#f6f8fa'
-    BG_PANEL      = '#ffffff'
-    BG_SOFT       = '#eff2f5'
-    BG_INPUT      = '#ffffff'
-    BG_SELECT     = '#ddf4ff'
-    BG_HOVER      = '#f3f4f6'
+    """GitHub-dark-inspired palette.
 
-    HEADER_BG      = '#0d1117'
+    Every QSS rule and every widget call site references a name
+    on this class, so the theme is defined here and nowhere else.
+    A widget that hard-codes a hex value outside this class will
+    be out of place after a theme change — keep the palette the
+    single source of truth.
+    """
+
+    # ── Surfaces ──────────────────────────────────────────
+    # BG is the main window and dialog background.
+    # BG_APP is the sidebar, which sits a shade darker for
+    #   visual separation.
+    # BG_PANEL is the tab pane — same as BG, so tabs feel like
+    #   they extend the main canvas.
+    # BG_SOFT is used for inline "quiet" regions: read-only
+    #   field fills, disabled button backgrounds, the input-bar
+    #   container when unfocused.
+    # BG_INPUT is the fill of actual text inputs, combo boxes,
+    #   and the main input bar.
+    # BG_SELECT is the tree / list / combo selection highlight.
+    # BG_HOVER is the hover state for tree rows and menu items.
+    BG            = '#0d1117'
+    BG_APP        = '#010409'
+    BG_PANEL      = '#0d1117'
+    BG_SOFT       = '#161b22'
+    BG_INPUT      = '#0d1117'
+    BG_SELECT     = '#1f3a5f'
+    BG_HOVER      = '#161b22'
+
+    # ── Header bar ────────────────────────────────────────
+    # Deliberately darker than the app body so the brand strip
+    # reads as a top rail rather than another panel.
+    HEADER_BG      = '#010409'
     HEADER_FG      = '#e6edf3'
     HEADER_MUTED   = '#7d8590'
-    HEADER_DIVIDER = '#21262d'
+    HEADER_DIVIDER = '#30363d'
 
-    BORDER        = '#d0d7de'
-    BORDER_SOFT   = '#eaeef2'
-    BORDER_STRONG = '#8c959f'
+    # ── Borders ───────────────────────────────────────────
+    # Three weights, all dim enough to sit on a dark surface
+    # without becoming visual noise. STRONG is reserved for
+    # hover states on scrollbars and splitter handles.
+    BORDER        = '#30363d'
+    BORDER_SOFT   = '#21262d'
+    BORDER_STRONG = '#6e7681'
 
-    TEXT          = '#1f2328'
-    TEXT_MUTED    = '#57606a'
-    TEXT_FAINT    = '#8c959f'
+    # ── Text ──────────────────────────────────────────────
+    # TEXT is the default foreground for log lines and body
+    # copy. TEXT_MUTED is for labels and secondary information.
+    # TEXT_FAINT is for hints and metadata.
+    # TEXT_INVERT stays light: it is the color of text on the
+    # accent-colored primary button and on selection highlight
+    # bands, both of which are coloured.
+    TEXT          = '#e6edf3'
+    TEXT_MUTED    = '#8b949e'
+    TEXT_FAINT    = '#6e7681'
     TEXT_INVERT   = '#ffffff'
 
-    ACCENT        = '#0969da'
-    ACCENT_HI     = '#0550ae'
-    ACCENT_SOFT   = '#ddf4ff'
-    ACCENT_FAINT  = '#b6e3ff'
+    # ── Accent ────────────────────────────────────────────
+    # ACCENT is the primary interactive colour — focus rings,
+    # selected tabs, the prompt glyph.
+    # ACCENT_HI is the higher-contrast variant used as text on
+    # an ACCENT_SOFT background (role badge, topic banner,
+    # summary strip).
+    # ACCENT_SOFT is the dark-navy fill those tinted regions
+    # use. It is a solid colour rather than an rgba tint so the
+    # same value renders identically on every Qt platform
+    # plugin; the visual effect is close enough.
+    # ACCENT_FAINT is the border on top of ACCENT_SOFT.
+    ACCENT        = '#58a6ff'
+    ACCENT_HI     = '#79c0ff'
+    ACCENT_SOFT   = '#0d2247'
+    ACCENT_FAINT  = '#1f6feb'
 
-    OK            = '#1a7f37';  OK_BG     = '#dafbe1';  OK_BORDER     = '#aceebb'
-    WARN          = '#9a6700';  WARN_BG   = '#fff8c5';  WARN_BORDER   = '#f5d878'
-    ERR           = '#cf222e';  ERR_BG    = '#ffebe9';  ERR_BORDER    = '#ffc1bc'
-    PURPLE        = '#8250df';  PURPLE_BG = '#fbefff'
-    CYAN          = '#0969da'
-    MAGENTA       = '#bf3989'
+    # ── Status ────────────────────────────────────────────
+    # OK / WARN / ERR are the foreground shades for success,
+    # warning, and error text. The _BG variants are the fill
+    # colours for badges and inline notices; the _BORDER
+    # variants are the outline. All three are used together,
+    # never independently.
+    OK            = '#3fb950';  OK_BG     = '#0f2417';  OK_BORDER     = '#1a7f37'
+    WARN          = '#d29922';  WARN_BG   = '#2d2212';  WARN_BORDER   = '#9a6700'
+    ERR           = '#f85149';  ERR_BG    = '#2d0e0e';  ERR_BORDER    = '#cf222e'
+    PURPLE        = '#bc8cff';  PURPLE_BG = '#1c1530'
+    CYAN          = '#58a6ff'
+    MAGENTA       = '#db61a2'
 
 
 class Sp:
@@ -578,7 +641,12 @@ def _chat_day_label(ts: float) -> str:
     return d.strftime('%A %d %B %Y').upper()
 
 
-_CHAT_HUES = ('#0969da', '#1a7f37', '#9a6700', '#8250df', '#bf3989')
+# Speaker colours for chat. Indexed by a stable hash of the
+# operator name, so the same operator always renders in the same
+# colour on every client. Values are tuned for the dark surface
+# in Palette — light enough to read against #0d1117, saturated
+# enough to be distinguishable from each other at a glance.
+_CHAT_HUES = ('#58a6ff', '#3fb950', '#d29922', '#bc8cff', '#db61a2')
 
 
 def _chat_hue(name: str) -> str:
@@ -1524,6 +1592,7 @@ class _BuildDialog(QDialog):
             'wg_inner_port': '8881',
             'failover_after': '3',
             'pivot_key_path': 'mtls_certs/pivot.pem',
+            'identity_role': '',
             'opsec_profile': 'stealth',
             'c2_profile': '',
             'tls_profile': 'go',
@@ -1576,6 +1645,10 @@ class _BuildDialog(QDialog):
         outer.addWidget(self.summary)
 
         btns = QHBoxLayout()
+        load = QPushButton('Load config…')
+        load.setObjectName('ghost')
+        load.setMinimumWidth(110)
+        btns.addWidget(load)
         btns.addStretch(1)
         cancel = QPushButton('Cancel')
         cancel.setMinimumWidth(90)
@@ -1587,6 +1660,7 @@ class _BuildDialog(QDialog):
         btns.addWidget(build)
         outer.addLayout(btns)
 
+        load.clicked.connect(self._load_from_json)
         cancel.clicked.connect(self.reject)
         build.clicked.connect(self._ok)
         QShortcut(QKeySequence(Qt.Key.Key_Escape), self,
@@ -2057,6 +2131,27 @@ class _BuildDialog(QDialog):
                 f'background: {Palette.BG_SOFT};')
         self._row('Pivot keypair (fixed)', key_entry)
 
+        # ---------- [3a] IDENTITY ----------
+        self._heading('3a', 'IDENTITY')
+        self._hint(
+            'Optional disambiguator, mixed into the server\'s '
+            'session fingerprint. Two agents built from the same '
+            'tree that run on the same host under the same user '
+            'report identical (machine_id, hostname, username, os) '
+            'tuples and would resolve to one session — one cookie, '
+            'one task queue, one row in the beacon list. The '
+            'builder already defaults the role for the three pivot '
+            'child transports (smb-child, tcp-bind, tcp-rev); '
+            'leave this blank to accept that default. Set an '
+            'explicit value only when a pivot child needs a name '
+            'other than the transport default, or when two '
+            'non-pivot builds will run side by side on the same '
+            'host under the same user. The role travels in its own '
+            'wire field — the beacon list still shows the '
+            'machine\'s real hostname.')
+        self._row('Identity role (blank = transport default)',
+                  self._entry('identity_role', 32))
+
         # ---------- [2b] ENDPOINT ----------
         end_rows = []
         if ('http' in modes or 'quic' in modes
@@ -2231,6 +2326,137 @@ class _BuildDialog(QDialog):
         self._rebuild()
 
     # ------------------------------------------------------------------
+    # Load from JSON
+
+    def _load_from_json(self) -> None:
+        """Populate the form from a JSON build config.
+
+        The file schema is the same one `beacon-build -c` reads on
+        the CLI and the same one `beacon-handler._load_build_config`
+        accepts on the server side. This method only maps JSON keys
+        onto the widget model; it does not validate — the builder
+        on the server remains the source of truth, and any field
+        the JSON sets to something the server rejects produces the
+        same error the CLI would.
+
+        The picker is delegated to the main window so both JSON
+        entry points share the same starting directory and the
+        same session-level last-used cache.
+        """
+        parent = self.parent()
+        if parent is not None and hasattr(parent, 'pick_json_config'):
+            path = parent.pick_json_config('Load build config')
+        else:
+            from PySide6.QtWidgets import QFileDialog
+            path, _ = QFileDialog.getOpenFileName(
+                self, 'Load build config',
+                os.getcwd(),
+                'JSON config (*.json);;All files (*)')
+        if not path:
+            return
+        try:
+            with open(path, 'r', encoding='utf-8') as fh:
+                data = json.load(fh)
+        except (OSError, ValueError) as exc:
+            QMessageBox.critical(
+                self, 'Load failed',
+                f'Could not read {path}:\n\n{exc}')
+            return
+        if not isinstance(data, dict):
+            QMessageBox.critical(
+                self, 'Load failed',
+                'The top-level JSON must be an object.')
+            return
+
+        self._apply_json(data)
+        self._rebuild()
+        QMessageBox.information(
+            self, 'Loaded',
+            f'Populated the form from '
+            f'{os.path.basename(path)}.\n\n'
+            f'Review the fields and click Build.')
+
+    def _apply_json(self, data: dict) -> None:
+        """Map the JSON schema onto the widget model.
+
+        Most keys share a name; a handful differ (`target_os` vs
+        `os`, `transport_mode` vs `transport`, the four WireGuard
+        fields, `transport_failover_after` vs `failover_after`).
+        `work_hours_start` and `work_hours_end` are recombined
+        into the single `wh_spec` field the form uses, and the
+        JSON `mtls` object collapses to the boolean the checkbox
+        carries.
+
+        A missing or null key is left untouched, so a partial
+        config only overwrites the fields it names.
+        """
+        v = self._v
+
+        def take(json_key: str, v_key: str, cast=None) -> None:
+            if json_key not in data:
+                return
+            val = data[json_key]
+            if val is None or val == '':
+                return
+            if cast is not None:
+                try:
+                    val = cast(val)
+                except (TypeError, ValueError):
+                    return
+            v[v_key] = val
+
+        take('target_os',              'os')
+        take('target_arch',            'arch')
+        take('output_format',          'fmt')
+        take('transport_mode',         'transport')
+        take('url',                    'url')
+        take('dns_domain',             'dns_domain')
+        take('dns_resolver',           'dns_resolver')
+        take('doh_resolver',           'doh_resolver')
+        take('doh_host_header',        'doh_host_header')
+        take('icmp_host',              'icmp_host')
+        take('smb_pipe',               'smb_pipe')
+        take('smb_relay_pipe',         'smb_relay_pipe')
+        take('tcp_bind_addr',          'tcp_bind_addr')
+        take('tcp_bind_token',         'tcp_bind_token')
+        take('tcp_relay_target',       'tcp_relay_target')
+        take('tcp_relay_token',        'tcp_relay_token')
+        take('tcp_rev_listen',         'tcp_rev_listen')
+        take('tcp_rev_target',         'tcp_rev_target')
+        take('tcp_rev_token',          'tcp_rev_token')
+        take('wireguard_server_pubkey',    'wg_server_pubkey')
+        take('wireguard_server_addr',      'wg_server_addr')
+        take('wireguard_agent_privkey',    'wg_agent_privkey')
+        take('wireguard_tunnel_ip',        'wg_tunnel_ip')
+        take('wireguard_server_tunnel_ip', 'wg_server_tunnel_ip')
+        take('wireguard_inner_port',       'wg_inner_port')
+        take('transport_failover_after', 'failover_after',
+             cast=lambda x: str(int(x)))
+        take('pivot_key_path',         'pivot_key_path')
+        take('identity_role',          'identity_role')
+        take('opsec_profile',          'opsec_profile')
+        take('c2_profile',             'c2_profile')
+        take('tls_profile',            'tls_profile')
+        take('kill_days',              'kill_days',
+             cast=lambda x: str(int(x)))
+        take('stage_name',             'stage_name')
+        take('stage_key_hex',          'stage_key_hex')
+        take('inject',                 'inject', cast=bool)
+        take('inject_method',          'inject_method')
+        take('verbose',                'verbose', cast=bool)
+
+        mtls = data.get('mtls')
+        if isinstance(mtls, dict):
+            v['mtls'] = bool(mtls.get('enabled'))
+        elif isinstance(mtls, bool):
+            v['mtls'] = mtls
+
+        wh_start = data.get('work_hours_start')
+        wh_end = data.get('work_hours_end')
+        if wh_start and wh_end:
+            v['wh_spec'] = f'{wh_start}-{wh_end}'
+
+    # ------------------------------------------------------------------
     # Payload assembly
 
     def _ok(self) -> None:
@@ -2331,6 +2557,9 @@ class _BuildDialog(QDialog):
                     or p.get('tcp_rev_listen'))
         if is_pivot and v['pivot_key_path'].strip():
             p['pivot_key_path'] = v['pivot_key_path'].strip()
+
+        if v.get('identity_role', '').strip():
+            p['identity_role'] = v['identity_role'].strip()
 
         if v['fmt'] == 'stager':
             if v['stage_name'].strip():
@@ -2438,6 +2667,12 @@ class GuiApp(QMainWindow):
         # Input history
         self._history: list[str] = []
 
+        # Session-level cache of the last directory a JSON build
+        # config was loaded from. Used to default both the File
+        # menu picker and the in-dialog "Load config…" picker to
+        # wherever the operator last found a file.
+        self._last_build_dir: Optional[str] = None
+
         # 5. Window setup
         self.setWindowTitle(
             f"TornadoC2 — {cfg.get('name', '?')} @ "
@@ -2523,6 +2758,12 @@ class GuiApp(QMainWindow):
         act.setShortcut(QKeySequence('Ctrl+B'))
         act.triggered.connect(self._menu_build)
         m_file.addAction(act)
+
+        act = QAction('Build from JSON config…', self)
+        act.setShortcut(QKeySequence('Ctrl+Shift+B'))
+        act.triggered.connect(self._menu_build_from_json)
+        m_file.addAction(act)
+
         m_file.addSeparator()
         m_file.addAction('Export my config…',
                          lambda: self._submit('operators export'))
@@ -2614,7 +2855,7 @@ class GuiApp(QMainWindow):
         splitter.addWidget(self._build_main_pane())
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
-        splitter.setSizes([340, 940])
+        splitter.setSizes([480, 800])
 
     # ------------------------------------------------------------------
     # Header bar
@@ -2692,7 +2933,7 @@ class GuiApp(QMainWindow):
     def _build_sidebar(self) -> QWidget:
         side = QWidget()
         side.setObjectName('sidebar')
-        side.setMinimumWidth(280)
+        side.setMinimumWidth(380)
         lay = QVBoxLayout(side)
         lay.setContentsMargins(Sp.L, Sp.L, Sp.L, Sp.L)
         lay.setSpacing(Sp.S)
@@ -2724,11 +2965,10 @@ class GuiApp(QMainWindow):
         search_lay.addWidget(self.search_entry, 1)
         lay.addWidget(search_wrap)
 
-        # Beacon tree
         self.tree = QTreeWidget()
-        self.tree.setColumnCount(6)
-        self.tree.setHeaderLabels(['ID', 'ALIAS', 'HOST',
-                                   'PLATFORM', 'LAST', 'VIEW'])
+        self.tree.setColumnCount(5)
+        self.tree.setHeaderLabels(['BEACON', 'USER@HOST', 'OS',
+                                   'LAST', 'VIEW'])
         self.tree.setRootIsDecorated(False)
         self.tree.setUniformRowHeights(True)
         self.tree.setSelectionMode(
@@ -2741,19 +2981,18 @@ class GuiApp(QMainWindow):
             self._on_tree_context)
         self.tree.itemDoubleClicked.connect(
             lambda *_: self._attach_selected())
+        self.tree.setTextElideMode(Qt.TextElideMode.ElideMiddle)
 
         hdr = self.tree.header()
         hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
-        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
-        hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
         hdr.setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
         hdr.setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
-        hdr.setSectionResizeMode(5, QHeaderView.ResizeMode.Fixed)
-        self.tree.setColumnWidth(0, 60)
-        self.tree.setColumnWidth(1, 76)
-        self.tree.setColumnWidth(3, 80)
-        self.tree.setColumnWidth(4, 52)
-        self.tree.setColumnWidth(5, 66)
+        self.tree.setColumnWidth(0, 110)
+        self.tree.setColumnWidth(2, 72)
+        self.tree.setColumnWidth(3, 52)
+        self.tree.setColumnWidth(4, 62)
         hdr.sectionClicked.connect(self._sort_by)
         hdr.setSectionsClickable(True)
 
@@ -3217,7 +3456,7 @@ class GuiApp(QMainWindow):
         self._render_beacon_tree()
 
     def _sort_by(self, col: int) -> None:
-        keys = ['id', 'alias', 'host', 'plat', 'age', 'view']
+        keys = ['id', 'host', 'plat', 'age', 'view']
         if 0 <= col < len(keys):
             key = keys[col]
             if self._sort_col == key:
@@ -3273,36 +3512,113 @@ class GuiApp(QMainWindow):
             else:
                 age_s = f"{age // 86400}d"
 
+            # Viewers column. The count is what matters at a
+            # glance; the name is a bonus when there is exactly
+            # one. Two or more is a "+N" because the operator
+            # will hover for the full list, and squeezing names
+            # into 62px is worse than a compact count.
             viewers = b.get('viewers') or []
             if not viewers:
-                view_names = '—'
+                view_text = '—'
             elif len(viewers) == 1:
-                view_names = viewers[0].get('name', '?')
-            elif len(viewers) == 2:
-                view_names = ', '.join(v.get('name', '?')
-                                       for v in viewers)
+                view_text = viewers[0].get('name', '?')
             else:
-                view_names = f"{len(viewers)} viewers"
+                view_text = f"+{len(viewers)}"
+
+            # Platform as a compact win/amd64, lin/arm64, mac/…
+            # The full string lives in the tooltip.
+            os_raw = (b.get('os') or '').lower()
+            os_short = {
+                'windows': 'win',
+                'linux':   'lin',
+                'darwin':  'mac',
+                'freebsd': 'bsd',
+            }.get(os_raw, os_raw[:3] if os_raw else '?')
+            arch_raw = (b.get('arch') or '')
+            plat = f"{os_short}/{arch_raw}" if arch_raw else os_short
 
             live = b.get('alive')
-            id_str = f"{'●' if live else '○'}  {b['id']}"
+            dot = '●' if live else '○'
+
+            # ID cell carries the alias as a suffix when one is
+            # set: "● 1001 dc01". No separate column, no wasted
+            # horizontal space on an empty column.
+            alias = (b.get('alias') or '').strip()
+            if alias:
+                beacon_cell = f"{dot}  {b['id']}  {alias}"
+            else:
+                beacon_cell = f"{dot}  {b['id']}"
+
             item = QTreeWidgetItem([
-                id_str,
-                (b.get('alias') or '')[:14],
-                (b.get('display_name') or '?')[:22],
-                f"{b.get('os','?')[:3]} · {b.get('arch','')[:5]}",
+                beacon_cell,
+                b.get('display_name') or '?',
+                plat,
                 age_s,
-                view_names,
+                view_text,
             ])
             item.setData(0, Qt.ItemDataRole.UserRole, b['id'])
-            color = QColor(Palette.TEXT if live
-                           else Palette.TEXT_FAINT)
-            for c in range(6):
-                item.setForeground(c, QBrush(color))
+
+            # ── Tooltip: full identity on every column ───────
+            addr = b.get('last_addr') or '—'
+            sleep = b.get('sleep_interval', 0)
+            fp = (b.get('fingerprint') or '')[:16]
+            checkins = b.get('checkins', 0)
+            tip = (
+                f"beacon #{b['id']}\n"
+                f"alias       : {alias or '—'}\n"
+                f"host        : {b.get('display_name', '?')}\n"
+                f"platform    : {b.get('os','?')}/"
+                f"{arch_raw}\n"
+                f"address     : {addr}\n"
+                f"sleep       : {sleep}s\n"
+                f"check-ins   : {checkins}\n"
+                f"last seen   : {age_s} ago\n"
+                f"fingerprint : {fp}…"
+            )
+
+            # ── Colours ──────────────────────────────────────
+            # The BEACON cell carries the liveness signal: green
+            # for an alive beacon, dim grey for stale. Everything
+            # else is standard body text so the eye lands on the
+            # dot first.
+            if live:
+                beacon_color = QColor(Palette.OK)
+            else:
+                beacon_color = QColor(Palette.TEXT_FAINT)
+            body_color = QColor(Palette.TEXT)
+
+            # Viewers: empty is dim, one viewer is a cyan name,
+            # two or more is a bright amber +N. Matches the CLI's
+            # beacons table so an operator who has used one
+            # recognises the other.
+            if not viewers:
+                view_color = QColor(Palette.TEXT_FAINT)
+            elif len(viewers) == 1:
+                view_color = QColor(Palette.CYAN)
+            else:
+                view_color = QColor(Palette.WARN)
+
+            for c in range(5):
+                item.setToolTip(c, tip)
+
+            item.setForeground(0, QBrush(beacon_color))
+            item.setForeground(1, QBrush(body_color))
+            item.setForeground(2, QBrush(QColor(Palette.TEXT_MUTED)))
+            item.setForeground(3, QBrush(QColor(Palette.TEXT_MUTED)))
+            item.setForeground(4, QBrush(view_color))
+
             self.tree.addTopLevelItem(item)
 
-        self.beacon_count_lbl.setText(
-            f"·  {len(rows)} / {len(self._beacon_rows)}")
+        alive_n = sum(1 for b in self._beacon_rows if b.get('alive'))
+        stale_n = len(self._beacon_rows) - alive_n
+        if self._filter_text:
+            self.beacon_count_lbl.setText(
+                f"·  {len(rows)} / {len(self._beacon_rows)} shown")
+        elif stale_n:
+            self.beacon_count_lbl.setText(
+                f"·  {alive_n} live  ·  {stale_n} stale")
+        else:
+            self.beacon_count_lbl.setText(f"·  {alive_n}")
 
     def _selected_id(self) -> str:
         sel = self.tree.selectedItems()
@@ -3321,16 +3637,46 @@ class GuiApp(QMainWindow):
             return
         self.tree.setCurrentItem(item)
 
+        sel = self._selected_id()
+        fp = self._selected_fingerprint()
+
         menu = QMenu(self)
         menu.addAction('Attach', self._attach_selected)
         menu.addAction('Show info',
-                       lambda: self._submit(f"use {self._selected_id()}"))
+                       lambda: self._submit(f"use {sel}"))
+        menu.addSeparator()
+
+        act = menu.addAction('Copy ID')
+        act.setEnabled(bool(sel))
+        act.triggered.connect(
+            lambda: QApplication.clipboard().setText(sel))
+        act = menu.addAction('Copy fingerprint')
+        act.setEnabled(bool(fp))
+        act.triggered.connect(
+            lambda: QApplication.clipboard().setText(fp))
+
         menu.addSeparator()
         menu.addAction('Set alias…', self._ctx_set_alias)
         menu.addSeparator()
         menu.addAction('Kill', lambda: self._ctx_action('kill'))
         menu.addAction('Forget', lambda: self._ctx_action('forget'))
         menu.exec(self.tree.viewport().mapToGlobal(pos))
+
+    def _selected_fingerprint(self) -> str:
+        """Return the fingerprint of the selected beacon, or ''.
+
+        Reads from the in-memory cache rather than stashing the
+        value on the tree item, so a beacon forgotten and re-added
+        between renders does not leave a stale fingerprint behind
+        on an old QTreeWidgetItem.
+        """
+        sel = self._selected_id()
+        if not sel:
+            return ''
+        for b in self._beacon_rows:
+            if str(b.get('id')) == sel:
+                return b.get('fingerprint') or ''
+        return ''
 
     def _ctx_action(self, verb: str) -> None:
         sel = self._selected_id()
@@ -3570,6 +3916,89 @@ class GuiApp(QMainWindow):
             self._log('(busy — try again when idle)', 'warn')
             return
         self._submit('build')
+
+    def _menu_build_from_json(self) -> None:
+        """Build an agent from a JSON config file.
+
+        Mirrors the CLI's `build -c <file.json>` path: the file
+        picker is native, but the JSON parser, the payload
+        assembly, and the remote-build dispatch are the same code
+        the CLI uses (`Client._cmd_build`). Nothing about the
+        config schema, validation, or server contract is
+        re-implemented here.
+        """
+        if self._busy:
+            self._log('(a command is already running — wait for it)',
+                      'warn')
+            return
+        path = self.pick_json_config('Build from JSON config')
+        if not path:
+            return
+        self._log(f'build from config: {path}', 'meta')
+        self._command_q.put(
+            ('callable',
+             lambda: self.client._cmd_build(['build', '-c', path])))
+
+    def _build_dir_candidates(self) -> list:
+        """Directories the file picker tries before falling back
+        to CWD.
+
+        Order:
+
+          1. The last directory a config was loaded from.
+          2. The repository root, if the current working
+             directory looks like a checkout subdirectory — a
+             `client/` or `beacon/` child.
+          3. The operator's home directory.
+          4. The current working directory, as a last resort.
+
+        The first candidate that exists as a directory is used.
+        Nothing walks the tree or scans file contents; the list
+        is cheap to evaluate and correct for the common case of
+        the operator launching the client from the checkout
+        root.
+        """
+        cands = []
+        if self._last_build_dir:
+            cands.append(self._last_build_dir)
+        cwd = os.getcwd()
+        # If we are one level under the repo root — the usual
+        # `client/` or `beacon/` subdirectory — offer the parent.
+        parent = os.path.dirname(cwd)
+        if parent and os.path.isdir(parent):
+            cands.append(parent)
+        home = os.path.expanduser('~')
+        if home:
+            cands.append(home)
+        cands.append(cwd)
+
+        seen = set()
+        out = []
+        for c in cands:
+            rc = os.path.abspath(c)
+            if rc in seen:
+                continue
+            seen.add(rc)
+            if os.path.isdir(rc):
+                out.append(rc)
+        return out
+
+    def pick_json_config(self, title: str) -> Optional[str]:
+        """Open a native file picker filtered to JSON configs.
+
+        Returns the selected path, or None if the operator
+        cancels. Updates `_last_build_dir` on success so the next
+        invocation opens in the same place.
+        """
+        from PySide6.QtWidgets import QFileDialog
+        start = self._build_dir_candidates()[0]
+        path, _ = QFileDialog.getOpenFileName(
+            self, title, start,
+            'JSON config (*.json);;All files (*)')
+        if not path:
+            return None
+        self._last_build_dir = os.path.dirname(path) or start
+        return path
 
     def _run_build_dialog(self) -> None:
         done = threading.Event()

@@ -488,6 +488,7 @@ class BuildManager:
         cfg.inject = bool(params.get('inject', False))
         cfg.inject_method = (
             params.get('inject_method') or 'default')
+        cfg.identity_role = params.get('identity_role') or ''
 
         ALLOWED_OVERRIDES = frozenset({
             'antisanbox', 'amsi_bypass', 'etw_patch',

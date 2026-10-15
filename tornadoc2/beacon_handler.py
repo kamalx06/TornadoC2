@@ -1704,6 +1704,7 @@ class BeaconHandler:
             'doh_host_header':  doh_host_header,
             'doh_user_agent':   doh_user_agent,
             'icmp_host':        icmp_host,
+            'identity_role':    '',
         }
 
     # ------------------------------------------------------------------
@@ -2247,6 +2248,7 @@ class BeaconHandler:
             'inject_method':    (raw.get('inject_method')
                                  or 'default'),
             'agent_keypair_path': raw.get('agent_keypair_path') or '',
+            'identity_role':    raw.get('identity_role') or '',
             '_evasion_overrides': evasion,
         }, None
 
@@ -2325,6 +2327,38 @@ class BeaconHandler:
                 per-engagement file only when the engagement
                 policy requires a key that does not survive
                 across deployments.
+
+          Agent identity role:
+            --identity-role <name>                default: empty
+                Disambiguates two agents built from the same
+                tree that run on the same host under the same
+                user. Without a role, both report an identical
+                (machine_id, hostname, username, os) tuple and
+                the server hashes them to the same session —
+                they share one cookie, one task queue, and one
+                row in the beacon list. Setting a role gives
+                the agent its own session, its own cookie, its
+                own task queue, and its own row.
+
+                The builder sets a role automatically for the
+                three pivot child transports:
+
+                    smb     -> 'smb-child'
+                    tcp     -> 'tcp-bind'
+                    tcprev  -> 'tcp-rev'
+
+                Set this flag explicitly when you need to
+                disambiguate two non-pivot builds, or when you
+                want a name other than the transport default.
+                Empty is the default and reproduces the
+                pre-role fingerprint, so an agent built
+                without a role checks in as it always did.
+
+                The role travels in the check-in identity and
+                is mixed into the server's fingerprint. The
+                beacon's displayed hostname is unchanged —
+                the role is a fingerprint input, not a display
+                name.
 
           OPSEC and lifecycle:
             --profile <default|stealth|opsec|paranoid>
@@ -2423,6 +2457,7 @@ class BeaconHandler:
                       f"[--mtls [--mtls-dir <dir>] "
                       f"[--mtls-cert <path>] [--mtls-key <path>] "
                       f"[--mtls-ca <path>]] "
+                      f"[--identity-role <name>] "
                       f"[--verbose]{c['end']}")
                 print(f"{c['yellow']}Run `help` from the console "
                       f"for the full flag list, or `beacon-build` "
@@ -2473,6 +2508,7 @@ class BeaconHandler:
                 'inject':           False,
                 'inject_method':    'default',
                 'agent_keypair_path': '',
+                'identity_role':    '',
                 'wireguard_server_pubkey': '',
                 'wireguard_server_addr':   '',
                 'wireguard_agent_privkey': '',
@@ -2693,6 +2729,9 @@ class BeaconHandler:
                 elif flag == '--agent-keypair-path' and val:
                     params['agent_keypair_path'] = val
                     i += 2
+                elif flag == '--identity-role' and val:
+                    params['identity_role'] = val
+                    i += 2
                 elif flag == '--wireguard-server-pubkey' and val:
                     params['wireguard_server_pubkey'] = val
                     i += 2
@@ -2824,6 +2863,7 @@ class BeaconHandler:
         cfg.stage_name = params.get('stage_name') or ''
         cfg.inject = bool(params.get('inject', False))
         cfg.inject_method = params.get('inject_method') or 'default'
+        cfg.identity_role = params.get('identity_role') or ''
         ev = params.get('_evasion_overrides') or {}
         for key, value in ev.items():
             if hasattr(cfg, key):
@@ -4690,6 +4730,30 @@ class BeaconHandler:
                                  is refused as an impersonation
                                  attempt. Leave unset unless a
                                  per-engagement key is required.
+
+{c['green']}AGENT IDENTITY ROLE:{c['end']}
+  --identity-role <name>         Disambiguate two agents built
+                                 from the same tree that run on
+                                 the same host under the same
+                                 user. Without a role, both
+                                 report an identical fingerprint
+                                 and share one session, one
+                                 cookie, one task queue, and one
+                                 row in the beacon list. Setting
+                                 a role gives the agent its own
+                                 session.
+                                 The builder defaults the role
+                                 for the three pivot child
+                                 transports:
+                                     smb    -> 'smb-child'
+                                     tcp    -> 'tcp-bind'
+                                     tcprev -> 'tcp-rev'
+                                 Set this flag explicitly to
+                                 name two non-pivot builds, or to
+                                 override the transport default.
+                                 Empty is the default and
+                                 reproduces the pre-role
+                                 fingerprint.
 
   --profile <default|stealth|opsec|paranoid>
   --kill-days <N>                (0 = no deadline)

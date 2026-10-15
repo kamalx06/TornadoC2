@@ -52,6 +52,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         iproute2 \
         procps \
         netcat-openbsd \
+        mono-devel \
         tini \
     && rm -rf /var/lib/apt/lists/*
 

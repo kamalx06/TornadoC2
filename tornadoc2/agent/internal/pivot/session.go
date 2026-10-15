@@ -39,6 +39,13 @@ type Frame struct {
 	CT  string `json:"ct"`
 }
 
+// String redacts the session keys. Without this, any %v/%+v format
+// anywhere in the process would dump both 32-byte keys as decimal
+// byte slices into a log file.
+func (s *Session) String() string {
+	return fmt.Sprintf("pivot.Session{role=%d}", s.role)
+}
+
 func (s *Session) Close() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -89,9 +96,12 @@ func (s *Session) EncryptChildToParent(plaintext []byte) (
 		return nil, err
 	}
 	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.childToParent == nil {
+		return nil, errors.New("pivot: session closed")
+	}
 	seq := s.sendSeq
 	s.sendSeq++
-	s.mu.Unlock()
 	return sealFrame(s.childToParent, seq, plaintext)
 }
 
@@ -103,9 +113,12 @@ func (s *Session) EncryptParentToChild(plaintext []byte) (
 		return nil, err
 	}
 	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.parentToChild == nil {
+		return nil, errors.New("pivot: session closed")
+	}
 	seq := s.sendSeq
 	s.sendSeq++
-	s.mu.Unlock()
 	return sealFrame(s.parentToChild, seq, plaintext)
 }
 
@@ -117,8 +130,7 @@ func (s *Session) DecryptChildToParent(f *Frame) ([]byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if f.Seq != s.recvSeq {
-		return nil, fmt.Errorf("%w: expected %d, got %d",
-			ErrReplay, s.recvSeq, f.Seq)
+		return nil, seqErr(s.recvSeq, f.Seq)
 	}
 	pt, err := openFrame(s.childToParent, f)
 	if err != nil {
@@ -136,8 +148,7 @@ func (s *Session) DecryptParentToChild(f *Frame) ([]byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if f.Seq != s.recvSeq {
-		return nil, fmt.Errorf("%w: expected %d, got %d",
-			ErrReplay, s.recvSeq, f.Seq)
+		return nil, seqErr(s.recvSeq, f.Seq)
 	}
 	pt, err := openFrame(s.parentToChild, f)
 	if err != nil {

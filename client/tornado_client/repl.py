@@ -3601,6 +3601,43 @@ class Client:
                 f"console.{c['reset']}")
             return 'mtls_certs/pivot.pem'
 
+        def section_identity_role(state):
+            """Optional disambiguator, mixed into the server's
+            session fingerprint.
+
+            Two agents built from the same tree that run on the
+            same host under the same user report identical
+            (machine_id, hostname, username, os) tuples and would
+            resolve to one session — one cookie, one task queue,
+            one row in the beacon list. Setting a role gives each
+            its own.
+
+            The builder already defaults the role for the three
+            pivot child transports ('smb-child', 'tcp-bind',
+            'tcp-rev'). Leave the prompt blank to accept that
+            default. Set an explicit value only when a pivot child
+            needs a name other than the transport default, or when
+            two non-pivot builds will run side by side on the same
+            host under the same user.
+            """
+            print(f"    {c['dim']}leave blank to use the builder's "
+                f"transport default:{c['reset']}")
+            print(f"      {c['cyan']}smb     → smb-child{c['reset']}")
+            print(f"      {c['cyan']}tcp     → tcp-bind{c['reset']}")
+            print(f"      {c['cyan']}tcprev  → tcp-rev{c['reset']}")
+            print(f"      {c['dim']}every other transport → empty"
+                f"{c['reset']}")
+            print(f"    {c['dim']}set an explicit value only when two "
+                f"agents will run on the same host under the same "
+                f"user and must appear as two beacons. The role "
+                f"travels in its own wire field — the beacon list "
+                f"still shows the machine's real hostname."
+                f"{c['reset']}")
+            v = ask('Identity role (blank = transport default)', '')
+            if v in ('BACK', 'CANCEL'):
+                return v
+            return v.strip()
+
         def section_opsec(state):
             return choose(
                 'OPSEC profile',
@@ -3965,6 +4002,8 @@ class Client:
                 section_transport_opts, _always,  '4b/9'),
             ('pivot_key_path', 'Pivot keypair',
                 section_pivot_key,     _is_pivot, '4e/9'),
+            ('identity_role', 'Identity role',
+                section_identity_role, _always,   '4f/9'),
             (None,            'Endpoint',
                 section_endpoint,      _always,   '5/9'),
             ('opsec_profile', 'OPSEC profile',
@@ -4127,9 +4166,6 @@ class Client:
         if state.get('tcp_bind_addr'):
             payload['tcp_bind_addr'] = state['tcp_bind_addr']
             payload['tcp_bind_token'] = state['tcp_bind_token']
-        if state.get('tcp_bind_addr'):
-            payload['tcp_bind_addr'] = state['tcp_bind_addr']
-            payload['tcp_bind_token'] = state['tcp_bind_token']
         if state.get('tcp_relay_target'):
             payload['tcp_relay_target'] = state['tcp_relay_target']
             payload['tcp_relay_token'] = state['tcp_relay_token']
@@ -4141,6 +4177,8 @@ class Client:
             payload['tcp_rev_token'] = state['tcp_rev_token']
         if state.get('pivot_key_path'):
             payload['pivot_key_path'] = state['pivot_key_path']
+        if state.get('identity_role'):
+            payload['identity_role'] = state['identity_role']
         if state['output_format'] == 'stager':
             payload['stage_name'] = state['stager_name']
             if state.get('stager_key'):

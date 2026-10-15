@@ -85,7 +85,7 @@ func ClientHandshake(io FrameIO,
 		return nil, fmt.Errorf("pivot: parse ack: %w", err)
 	}
 
-	if ack.Version != "" && ack.Version != PivotVersion {
+	if ack.Version != PivotVersion {
 		return nil, fmt.Errorf(
 			"pivot: parent sent version %q, expected %q",
 			ack.Version, PivotVersion)

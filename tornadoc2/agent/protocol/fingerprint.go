@@ -13,5 +13,9 @@ func (i Identity) Fingerprint() string {
 		h.Write([]byte(s))
 		h.Write([]byte{0})
 	}
+	if i.IdentityRole != "" {
+		h.Write([]byte(i.IdentityRole))
+		h.Write([]byte{0})
+	}
 	return hex.EncodeToString(h.Sum(nil))[:32]
 }

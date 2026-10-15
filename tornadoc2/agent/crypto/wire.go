@@ -13,9 +13,9 @@ import (
 	"sync"
 )
 
-const wireVersion = "v1"
+const wireVersion = "v2"
 
-var wireInfo = []byte("tornadoc2-wire-v1")
+var wireInfo = []byte("tornadoc2-wire-v2")
 
 type WireSession struct {
 	mu   sync.Mutex
@@ -103,7 +103,7 @@ func (w *WireSession) EncryptRequest(plaintext []byte) ([]byte, error) {
 	if _, err := rand.Read(iv); err != nil {
 		return nil, err
 	}
-	ct := gcm.Seal(nil, iv, plaintext, nil)
+	ct := gcm.Seal(nil, iv, plaintext, []byte(wireVersion))
 	env := map[string]string{
 		"enc": wireVersion,
 		"epk": epk,
@@ -111,6 +111,40 @@ func (w *WireSession) EncryptRequest(plaintext []byte) ([]byte, error) {
 		"ct":  base64.StdEncoding.EncodeToString(ct),
 	}
 	return json.Marshal(env)
+}
+
+// IsEnvelope reports whether body parses as a wire envelope.
+//
+// It answers one question only: did the server choose to encrypt
+// this response, or did it send plaintext? It does not validate
+// the enc version, the IV, the ciphertext, or the GCM tag — that
+// is DecryptResponse's job.
+//
+// The distinction matters on pivot transports. A child's tasks
+// request carries no epk (there is no header channel through a
+// pivot), so the server has no shared secret to encrypt with and
+// responds in plaintext. The pivot tunnel's own AEAD is the
+// integrity layer for that hop; the wire envelope is absent by
+// design, not by tampering. Without this helper, DecryptResponse
+// raises "encrypted session, response has no enc field" and the
+// child treats a legitimate plaintext response as a failure.
+//
+// The check is deliberately lenient: any non-empty "enc" field
+// counts as an envelope, and DecryptResponse then decides whether
+// the version and ciphertext are acceptable. A future v3 envelope
+// would answer true here and be rejected with a version error
+// inside DecryptResponse, which is the correct diagnostic.
+func IsEnvelope(body []byte) bool {
+	if len(body) == 0 {
+		return false
+	}
+	var probe struct {
+		Enc string `json:"enc"`
+	}
+	if err := json.Unmarshal(body, &probe); err != nil {
+		return false
+	}
+	return probe.Enc != ""
 }
 
 func (w *WireSession) DecryptResponse(body []byte) ([]byte, bool, error) {
@@ -147,7 +181,10 @@ func (w *WireSession) DecryptResponse(body []byte) ([]byte, bool, error) {
 	if err != nil {
 		return nil, false, fmt.Errorf("wire: bad ct: %w", err)
 	}
-	block, err := aes.NewCipher(w.key)
+	w.mu.Lock()
+	key := append([]byte(nil), w.key...)
+	w.mu.Unlock()
+	block, err := aes.NewCipher(key)
 	if err != nil {
 		return nil, false, err
 	}
@@ -155,7 +192,7 @@ func (w *WireSession) DecryptResponse(body []byte) ([]byte, bool, error) {
 	if err != nil {
 		return nil, false, err
 	}
-	pt, err := gcm.Open(nil, iv, ct, nil)
+	pt, err := gcm.Open(nil, iv, ct, []byte(wireVersion))
 	if err != nil {
 		return nil, false, fmt.Errorf("wire: decrypt failed: %w", err)
 	}

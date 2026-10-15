@@ -26,10 +26,29 @@ def _fingerprint(identity: dict) -> str:
     /etc/machine-id are stable across reboots but not across some
     imaging operations. Including hostname and username makes the
     fingerprint resilient while still unique.
+
+    IdentityRole is mixed in only when the agent sends a non-empty
+    value. An agent that predates the field, or one built without a
+    role, produces the same fingerprint it always did. An agent
+    built with a role produces a distinct fingerprint from an
+    otherwise-identical agent without one, which is what lets two
+    builds from the same tree on the same host resolve to two
+    sessions.
+
+    The role is appended after the four stable fields rather than
+    in the middle, so a future change that adds another field to
+    the identity does not silently shift the position of the role
+    in the hash input. The empty-string case emits nothing, which
+    preserves byte-for-byte compatibility with the pre-role
+    fingerprint.
     """
     h = hashlib.sha256()
     for key in ('machine_id', 'hostname', 'username', 'os'):
         h.update(str(identity.get(key, '')).encode('utf-8', 'replace'))
+        h.update(b'\x00')
+    role = str(identity.get('identity_role', '') or '')
+    if role:
+        h.update(role.encode('utf-8', 'replace'))
         h.update(b'\x00')
     return h.hexdigest()[:32]
 
@@ -86,18 +105,26 @@ class BeaconEngine:
     def handle_relayed_checkin(self, parent_session, child_payload: dict):
         """Handle a check-in that arrived over a relay.
 
-        `parent_session` is the beacon that relayed the payload.
-        `child_payload` is the child's identity and optional pubkey,
-        identical in shape to a direct HTTP check-in.
-
-        The engine treats the relayed check-in exactly like a
-        direct one: the child gets its own session id, its own
-        cookie, its own log directory. The parent's session is
-        untouched.
+        Refuses a child whose computed fingerprint matches the
+        parent's. A same-host, same-user deployment produces
+        identical fingerprints on both sides; without this guard,
+        the child would silently share the parent's session and
+        cookie, and every request would race the other's cookie
+        rotation. Run the child under a different user or on a
+        different host to give it its own session.
         """
-
         if parent_session is None:
             return None
+        child_identity = child_payload.get('identity') or {}
+        child_fp = _fingerprint(child_identity)
+        if child_fp == parent_session.fingerprint:
+            import logging
+            logging.getLogger(__name__).warning(
+                "pivot: relayed child has the same fingerprint as "
+                "its parent (%s); the child will share the parent's "
+                "session and cookie. Run the child under a different "
+                "user or on a different host to give it its own "
+                "session.", child_fp[:16])
         return self.handle_checkin(child_payload)
 
     # ------------------------------------------------------------------
@@ -149,14 +176,30 @@ class BeaconEngine:
     # Cookie issue / verify
 
     def issue_cookie(self, session_id: int) -> str:
-        """Return a fresh cookie for `session_id` and record the
-        mapping. Called at the end of every successful check-in, so
-        the cookie rotates on each check-in the way real session
-        cookies do."""
+        """Return a cookie for `session_id`.
+
+        On the first call for a session, a fresh cookie is minted
+        and stored. On subsequent calls, the existing cookie is
+        returned unchanged. Explicit rotation is available via
+        `rotate_cookies`, which clears every session's cookie and
+        rotates the signing key.
+
+        This is deliberately not "rotate on every check-in." A
+        beacon that shares a session with a pivoted child — because
+        they share a fingerprint, e.g. same host, same user —
+        would otherwise invalidate its own cookie the moment the
+        child checked in, and every subsequent request from either
+        side would fail session resolution with a 404.
+        """
         import base64 as _b64
         import hmac as _hmac
         import hashlib as _hashlib
         import secrets as _secrets
+
+        with self._lock:
+            sess = self.sessions.get(session_id)
+            if sess is not None and sess.cookie:
+                return sess.cookie
 
         nonce = _secrets.token_bytes(16)
         mac = _hmac.new(self._cookie_key, nonce, _hashlib.sha256).digest()
@@ -167,10 +210,12 @@ class BeaconEngine:
         )
         with self._lock:
             sess = self.sessions.get(session_id)
-            if sess is not None and sess.cookie:
-                self._by_cookie.pop(sess.cookie, None)
-            self._by_cookie[cookie] = session_id
             if sess is not None:
+                if sess.cookie:
+                    # Race: another thread minted one between our
+                    # two lock acquisitions. Return the winner.
+                    return sess.cookie
+                self._by_cookie[cookie] = session_id
                 sess.cookie = cookie
         return cookie
 

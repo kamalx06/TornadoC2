@@ -307,8 +307,10 @@ The rest of this document describes how it works. This section describes why it 
 - **Chunked file transfer** with SHA-256 verification.
 - **In-memory PE (Windows) and ELF (Linux) execution.**
 - **In-memory .NET assembly execution** (`execute-assembly`) on
-  Windows, via Donut-generated shellcode hosted inside the agent
-  process.
+  Windows, via an in-process CLR host. A fixed managed bootstrap
+  loads the target assembly with `Assembly.Load(byte[])`; the target
+  never touches disk. Donut remains a fallback for
+  `--format shellcode` builds.
 - **Two injection backends for `migrate <pid>`.** The default is
   `CreateRemoteThread` on Windows and `ptrace` on Linux — the
   historical path. `--method apc` selects remote APC injection on
@@ -319,8 +321,10 @@ The rest of this document describes how it works. This section describes why it 
   instrumented — but it moves the beacon out of the category an EDR
   watches for by default. See
   [Migration › Injection backends](#injection-backends).
-- **Windows BOF execution** through an embedded C# COFF loader, with
-  a shared server-side registry that any operator can browse.
+- **Windows BOF execution** through an in-process Go COFF loader
+  (AMD64 and I386 relocations, full Beacon API surface), with a
+  shared server-side registry that any operator can browse. No
+  PowerShell, no `csc`, no `Add-Type`, no temp file.
 - **Inline script execution** (`pyexec`, `psexec`, `shexec`) with
   the source piped through stdin.
 - **Sandboxed WASM extension host** for capabilities the operator
@@ -333,12 +337,7 @@ The rest of this document describes how it works. This section describes why it 
   and `hwbp` are Windows-amd64 only and encrypt the same
   segment via a fiber context switch or a hardware
   breakpoint plus VEH handler, so the encrypt/decrypt
-  window never runs Go code. `cronos` and `hwbp` avoid the
-  kernel timer and APC artifacts that EDRs hook on Ekko
-  and Foliage. The `ekko` name is not accepted — it was
-  never implemented and the dispatcher refuses it with a
-  message naming the two working alternatives. Indirect
-  syscalls bypass userland hooks on the ntdll stub entry.
+  window never runs Go code.
 - **Named C2 profiles** that decouple the HTTP fingerprint from the
   build, with a `c2-profiles` command that lists them from the
   operator console.
@@ -376,7 +375,7 @@ BOF and .NET assembly execution are Windows-only.
 |----------|-------------|
 | **Implant** | Go binary, cross-compiled from the operator machine · No runtime config file, no environment variables, no command-line arguments — every property is baked in at build time · Windows PE, Windows DLL, Linux ELF, Donut shellcode, or stager output · amd64 and arm64 · Migration via `migrate --self` (detach a copy of the on-disk binary) or `migrate <pid>` / `migrate <name> --method default\|apc` (inject the agent's loader-wrapped shellcode into a foreign process) — the session survives either way, with the same machine fingerprint and the same beacon ID · `--method apc` selects remote APC injection on Windows; the default remains `CreateRemoteThread` / `ptrace` |
 | **Transports** | **HTTP**: HTTPS with server-authenticated TLS by default, optional mTLS, optional RootCA pinning, uTLS browser ClientHello · **QUIC**: HTTP/3 over UDP, same C2 protocol as HTTP on a different carriage; reaches networks that permit HTTP/3 but block or proxy direct TCP; requires `aioquic` on the handler and pulls `quic-go` into the agent · **WebSocket**: one wss:// connection per check-in cycle, same JSON body as HTTP inside the frame; reaches networks where a browser-shaped client is expected and a raw HTTPS GET is not; requires `simple-websocket` on the handler and pulls `coder/websocket` into the agent · **DNS**: TXT queries to an authoritative zone, payload base64url in the QNAME · **DoH**: the DNS wire format POSTed to a public resolver over HTTPS; blends with browser DoH, escapes UDP/53 filters · **ICMP**: echo request/response carrying a base64url JSON envelope with larger per-chunk payloads than DNS; works when only `ping` is allowed outbound · **WireGuard**: the C2 protocol carried over a userspace WireGuard device; reaches networks that permit UDP/51820 but filter or proxy TCP/443; requires `pyroute2` and `CAP_NET_ADMIN` on the handler and pulls a userspace WireGuard stack into the agent · **HTTP+DNS / HTTP+DoH / DNS+DoH**: two transports in one binary with automatic failover after N transport-level failures · **SMB**: Windows named pipe carrying an AEAD-encrypted pivot session, tunnelled through a parent beacon over the parent's own transport · **TCP bind**: child listens, parent dials, same pivot session tunnel · **TCP reverse**: parent listens, child dials, same pivot session tunnel · Transports coexist; a single handler runs all of them simultaneously. WebSocket, QUIC, and WireGuard are single-transport in this version. **Adding a new transport is two classes plus mechanical glue.** The two classes — one Python listener, one Go client, both inheriting from the existing base — hold the entire design. The glue is a fixed template that every transport follows across seven files: a config field, a package var, one switch case, a stageless linker receiver and copy, a builder flag emitter, a build-manager copy, and a handler flag. No engine code changes, and the operator client is unaffected |
-| **Pivot model** | A parent beacon carries traffic for one or more children that cannot reach the team server directly · Peer-to-peer handshake with an engagement-wide ECDSA P-256 pivot keypair · The parent proves possession of the pivot private key; the child proves possession of its own identity signing key · A fresh ECDH exchange derives independent per-direction session keys (HKDF-SHA256, info string `tornadoc2-pivot-v1`) · Every subsequent C2 frame is an AES-256-GCM AEAD frame with a monotonic sequence number in the additional data · Transparent to the operator: pivoted children appear with normal beacon IDs · Wire encryption on the child's own C2 envelope is preserved — the parent carries it opaquely · The parent's own transport to the team server continues to use server-ECDH wire encryption |
+| **Pivot model** | A parent beacon carries traffic for one or more children that cannot reach the team server directly · Peer-to-peer handshake with an engagement-wide ECDSA P-256 pivot keypair · The parent proves possession of the pivot private key; the child proves possession of its own identity signing key · A fresh ECDH exchange derives independent per-direction session keys (HKDF-SHA256, info string `tornadoc2-pivot-v2`) · Every subsequent C2 frame is an AES-256-GCM AEAD frame with a monotonic sequence number in the additional data · Transparent to the operator: pivoted children appear with normal beacon IDs · Wire encryption on the child's own C2 envelope is preserved — the parent carries it opaquely · The parent's own transport to the team server continues to use server-ECDH wire encryption |
 | **Wire encryption** | AES-256-GCM envelope on every request and response body · Key derived from a P-256 ECDH exchange · Backward-compatible: an agent built without the embedded ECDH public key speaks plaintext |
 | **Identity signing** | Every check-in carries an ECDSA signature over `machine_id\|hostname\|username\|os\|ts` · Server verifies before pinning · Closes first-contact impersonation on plaintext builds · Signed payload excluded from the machine fingerprint |
 | **Malleable shaping** | C2 profile `shaping` block controls the JSON structure of check-in, tasks, and results · Payload encoding is selectable per shape: `base64`, `base64url`, `hex`, or `netbios` · Payload placement is selectable per shape: body, an HTTP response header, or a `Set-Cookie` value · Per-role HTTP status codes (`status` block), the session cookie name (`cookie_name`), and additional response headers (`response_headers`) are all profile-controlled · The DNS and DoH transports read a `dns_label` block that renames the three verb characters and changes the per-chunk payload length · The stager honours a `stager.path` block as its payload fetch URL · Proxy inspection sees a fake but well-formed JSON blob |
@@ -384,9 +383,9 @@ BOF and .NET assembly execution are Windows-only.
 | **Native execution** | `cat`, `ls`, `find`, `grep`, `head`, `tail`, `stat`, `strings`, `hexdump`, `sha1`, `sha256`, `md5`, `cksum`, `wc`, `nl`, `rev`, `sort`, `uniq`, `tr`, `base64`, `gzip`, `gunzip`, `which`, `readlink`, `realpath`, `du`, `ps`, `id`, `env`, `pwd`, `whoami` (with `/priv` on Windows), `hostname`, `uname`, `df`, `uptime`, `date`, `getpid`, `getppid`, `ifconfig`, `netstat`, `arp`, `route`, `users`, `groups`, `av-list`, `screenshot`, `mkdir`, `rm`, `cp`, `mv`, `chmod`, `ln`, `touch`, `curl`, `resolve`, `nc`, `hashdump`, `enablepriv`, `lsassdump` execute in-process · `readfile` as an alias for `cat` · Windows identity: `make_token` builds a NEW_CREDENTIALS token and holds it for subsequent `exec`; `rev2self` drops it; `runas` spawns a child in a fresh logon session under supplied credentials |
 | **Network verbs (in-process)** | `curl` — HTTP/HTTPS client with `-X`, `-H`, `-d`, `-k`, `-i`, `-L`, `-o`, `-m`, `--max-size` · `resolve` — DNS lookups for A, AAAA, CNAME, MX, NS, TXT, PTR · `nc` — TCP connect/banner grab with `-z`, `-w`, `--send` · No `/bin/curl`, no `dig`, no `/bin/nc` |
 | **Command execution** | `exec` spawns a child process · `sh` routes a command through a stdin-piped shell so the command never appears in argv |
-| **In-memory payloads** | `execmem <path> exe` on Windows · `execmem <path> elf` on Linux (`memfd_create`, `/dev/shm` fallback) · `execute-assembly <local.exe>` runs a .NET assembly via Donut-generated shellcode · On-disk source unlinked before invocation on every path |
+| **In-memory payloads** | `execmem <path> exe` on Windows — in-process Go PE loader: maps the image, resolves imports, applies base relocations, walks the TLS directory, executes the entry point; no PowerShell, no temp file · `execmem <path> elf` on Linux (`memfd_create`, `/dev/shm` fallback) · `execute-assembly <local.exe>` runs a .NET assembly through an in-process CLR host that loads the target with `Assembly.Load(byte[])`; only a fixed, non-secret bootstrap touches disk, and only under `%TEMP%` with `FILE_FLAG_DELETE_ON_CLOSE` · On-disk source unlinked before invocation on every path |
 | **Inline scripts** | `pyexec`, `psexec`, `shexec` deliver script source base64-encoded in the task and pipe it to `python3 -`, `powershell.exe -Command -`, or `/bin/sh -s` via stdin · Source never appears in argv · `--stdin` variant reads the source from the operator's terminal in paste mode |
-| **BOF / COFF** | Windows-only execution · `bofs` (main-scope) manages the **shared server-side registry** — `list`, `add`, `remove` · `bof` (beacon-scope) runs a registered BOF by name, or a local `.o` file by path · Arguments packed according to the BOF's declared `bof_pack` format when one is registered, falling back to a single space-joined `z` string · The registry is persisted to `logs/.tornadoc2_bofs.json`, with raw COFF bytes under `bofs/<name>.o` · Server never executes the bytes — the beacon's embedded C# loader does |
+| **BOF / COFF** | Windows-only execution · `bofs` (main-scope) manages the **shared server-side registry** — `list`, `add`, `remove` · `bof` (beacon-scope) runs a registered BOF by name, or a local `.o` file by path · Arguments packed according to the BOF's declared `bof_pack` format when one is registered, falling back to a single space-joined `z` string · The registry is persisted to `logs/.tornadoc2_bofs.json`, with raw COFF bytes under `bofs/<name>.o` · Server never executes the bytes — the beacon's in-process Go COFF loader does |
 | **C2 profile catalogue** | `c2-profiles` (alias `c2p`) lists every profile the server can build against, with the fields an operator needs to pick one — the three request paths, the User-Agent, and the shaping roles the profile declares · `c2-profiles <name>` prints the raw JSON so it can be copied as a starting point for a new profile or pasted into a build config · Thirty profiles ship in-tree covering enterprise SaaS (Teams, Slack, Salesforce, ServiceNow-adjacent APIs), developer infrastructure (GitHub, GitLab, Stripe, Sentry-adjacent APIs), and consumer applications (Instagram, TikTok, Netflix, YouTube), plus a dedicated DNS-transport profile · **Multi-profile handler.** The listener builds a per-path shape map at startup and serves every profile under `profiles/c2/` concurrently. Agents built against different profiles coexist on one handler, each getting the shape its own profile declared — same port, same certificate, same process. No team-server restart to change profiles, no second listener for a second fingerprint,
 no "active profile" state. Contrast with Cobalt Strike, Sliver, Havoc, and Brute Ratel, which all bind one profile per team server. Thirty profiles ship in-tree; the handler scales to any number without architectural change
 | **Scheduling** | Configurable sleep interval and jitter · Re-check-in on session expiry · Kill date enforcement · Working-hours window · Server-side recurring tasks with persistent storage and optional output retention |
@@ -776,13 +775,6 @@ syscall, decrypts, and adjusts `RIP` to return past the
 breakpoint. No timer, no APC, no new thread, and no kernel event
 that a detection rule can pattern on.
 
-**`ekko` is not accepted.** The name was reserved in earlier
-documentation for a technique the framework never implemented. The
-dispatcher now refuses `--sleep-mask ekko` at build time with a
-message naming `cronos` and `hwbp` as the working alternatives.
-The check exists so an operator does not ship a binary whose mask
-mode silently falls back to AES-CTR.
-
 **The goroutine stack is not encrypted.** All four modes encrypt
 the executable segment. None of them encrypt the goroutine stack,
 because the Go runtime may be preempted by a `SIGURG`-delivered
@@ -830,11 +822,10 @@ beacon's presence from a scanner that runs while the beacon is
 awake, and it does not encrypt the goroutine stack — the call
 chain and local variables remain readable in the moments between
 check-ins. The Windows `cronos` and `hwbp` modes avoid the kernel
-timer and APC artifacts that EDRs hook on Ekko and Foliage, but
-the `cronos` fiber API and the `hwbp` debug-register writes are
-themselves observable. `hwbp` in particular touches `DR0` and
-`DR7`, and a security product that watches debug-register state
-will see the writes.
+timer and APC artifacts,  but the `cronos` fiber API and the 
+`hwbp` debug-register writes are themselves observable. `hwbp`
+in particular touches `DR0` and `DR7`, and a security product 
+that watches debug-register state will see the writes.
 
 The HTTP transport's uTLS ClientHello mimicry does not carry over to
 **QUIC** or **WireGuard**. Both are explicitly listed below because
@@ -995,10 +986,39 @@ Stated so the above is read with the right scope:
 ### Session lifecycle
 
 A beacon session is identified by a **fingerprint** derived from the
-machine ID, hostname, username, and OS reported at check-in. The
-fingerprint is stable across reboots and reconnects but unique per
-machine. It does **not** include the identity signature or
-timestamp — those are per-check-in values, not per-machine.
+machine ID, hostname, username, OS, and (when set) the identity role
+reported at check-in. The fingerprint is stable across reboots and
+reconnects but unique per machine. It does **not** include the
+identity signature or timestamp — those are per-check-in values, not
+per-machine.
+
+The **identity role** is an optional build-time string that
+disambiguates two agents which would otherwise share a fingerprint.
+Two agents built from the same tree, run on the same host, under the
+same user, report identical `machine_id` / `hostname` / `username` /
+`os` tuples and resolve to one session, one cookie, one task queue,
+and one row in the beacon list. Setting a role gives each its own
+session.
+
+The builder defaults the role for the three pivot child transports:
+
+| Transport | Default role |
+|---|---|
+| `smb` | `smb-child` |
+| `tcp` | `tcp-bind` |
+| `tcprev` | `tcp-rev` |
+
+Every other build defaults to an empty role, which reproduces the
+pre-role fingerprint exactly — an agent built without a role checks
+in as it always did, and no deployed session is invalidated by the
+field's existence. An operator who wants a role on a non-pivot
+build, or who wants a name other than the transport default, sets
+it explicitly with `--identity-role <name>` on `beacon-build` or
+`"identity_role": "<name>"` in a JSON build config.
+
+The role travels in its own field on the wire (not in the
+hostname), so the beacon list continues to show the machine's real
+hostname. It is a fingerprint input, not a display name.
 
 On first check-in, the engine:
 
@@ -1010,9 +1030,24 @@ On first check-in, the engine:
    trust-on-first-use with a warning. If the signature is present
    but invalid, the check-in is rejected.
 4. Pins the agent's public key if one was presented.
-5. Issues a fresh HMAC-signed cookie, rotating any prior cookie.
+5. Issues an HMAC-signed cookie only if the session does not already
+   have one. It does **not** rotate the cookie on every check-in;
+   explicit rotation is available through `rotate-cookies`.
 6. Returns the session ID, current scheduling parameters, kill
    deadline, and cookie.
+
+The cookie behaviour is deliberate. A parent and a child in a
+same-host pivot share the same `machine_id` / `hostname` /
+`username` / `os` tuple unless the child carries a non-empty
+`identity_role`, and even with distinct roles the two can transiently
+present the same session under a fast reconnect. Rotating on every
+check-in meant that the second of the two — parent or child — would
+invalidate the other's cookie on each cycle, producing a 404 on the
+next `/tasks` poll for whichever side had not just checked in. The
+cookie is now stable for the life of a session. An operator who
+believes a cookie has leaked runs `rotate-cookies` from the local
+console; the rotation invalidates every cached cookie at once and is
+audited.
 
 A background reaper thread runs every 5 minutes and forgets sessions
 that have been silent for `100 × BEACON_TTL_FACTOR × sleep` seconds.
@@ -1807,70 +1842,6 @@ arrived on.
 
 ## Pivot Transports
 
-> **Stability notice.** The three pivot transports — SMB, TCP bind,
-> and TCP reverse — are under active development. The wire format,
-> the peer-to-peer handshake, and the AEAD frame layer are
-> specified and implemented. The connection management around them
-> is not yet at the operational stability of the direct transports
-> (HTTP, DNS, DoH, QUIC, WebSocket, WireGuard, ICMP). Two failure
-> modes are visible today, and an operator should know both before
-> deploying a pivot.
->
-> **1. A pivot session does not always establish on the first
-> attempt.** A child deployed against a running parent sometimes
-> fails to complete the handshake on its initial connection. The
-> failure is intermittent rather than deterministic: a rebuild, a
-> redeploy, or a restart of either side often produces a working
-> connection on the next try. The child's own retry loop sometimes
-> succeeds on a later poll cycle and sometimes does not. In the
-> worst observed case, the child never appears in the beacon list
-> at all until the parent is restarted.
->
-> This is the more disruptive of the two issues, because a child
-> that never establishes the pivot session has no fallback — the
-> pivot session is the only path between the child and the team
-> server. There is no second transport for a child on a segmented
-> network to rotate to.
->
-> **2. An established pivot session occasionally misses a poll
-> cycle.** The less serious of the two. The parent's dial loop and
-> the child's accept loop are correct in isolation, but a parent
-> that is relaying for multiple children while its own poll cycle
-> is in flight occasionally loses a frame during the overlap. The
-> frame is retransmitted on the next cycle, so the C2 session
-> survives and no task is lost. The operator sees a task take
-> twice its normal round trip.
->
-> **What is stable.** The wire format (`v2`), the peer-to-peer
-> handshake, the AEAD frame layer, and the cryptographic model are
-> not changing. A parent or child built today will not have to be
-> rebuilt when the connection-management work lands. The
-> improvements are internal to the transport's connection handling,
-> not to the protocol.
->
-> **What this means for an engagement.** Pivot transports are
-> usable for engagements where a child that must be retried once,
-> or occasionally re-deployed, is tolerable. They are not
-> recommended for an engagement where a child on a segmented
-> network is the only path to a critical target and cannot be
-> re-deployed if the first connection fails. On a high-stakes
-> pivot, prefer a direct transport on the child — HTTP over a
-> SOCKS proxy through the parent, or a WireGuard tunnel through
-> the parent's network — until the stability work lands.
->
-> **What to report.** If a pivot session fails to establish on
-> the first attempt, capture the child's stderr from the
-> connection window and the parent's stderr from the same window.
-> The parent logs the handshake on success but not on failure; a
-> child that never reaches the handshake is silent on the parent's
-> side, which is itself a diagnostic. The pivot transports are the
-> one part of the framework where the operator is expected to help
-> find the remaining edge cases.
->
-> The work is tracked in-tree. A follow-up section of this README
-> will replace this notice when the transports reach parity with
-> the direct set.
-
 SMB, TCP bind, and TCP reverse solve the same problem: **the target
 has no path to the team server, or the team server has no path to
 the target**. A parent beacon that does have reachable transport
@@ -1918,6 +1889,17 @@ directly-connected beacon.
 The parent never inspects or modifies the child's C2 body. The child's
 C2 body may itself be a server-ECDH envelope; the parent carries it
 verbatim.
+
+**A relayed child whose fingerprint matches its parent's is
+refused.** Two agents reporting the same `machine_id` / `hostname` /
+`username` / `os` and the same `identity_role` are, from the
+server's perspective, the same session — the parent would be
+forwarding frames on behalf of itself. The engine refuses the
+relayed check-in with a log line naming the fix: set a distinct
+`identity_role` on the child, or rebuild one of the two with a
+role. This is a deliberate refusal rather than a silent collision,
+because a silent collision produces two processes fighting over one
+task queue with no diagnostic surface.
 
 ### The pivot keypair
 
@@ -1983,6 +1965,30 @@ handshake to bind a specific child binary to a specific keypair
 must supply a per-build `agent_keypair_path`. The build config
 accepts it; the handler does not set it by default.
 
+**Same-host pivots and the identity role.** A parent and child
+that run on the same host under the same user report identical
+`machine_id` / `hostname` / `username` / `os` tuples. Without
+intervention, both would resolve to one session, one cookie, one
+task queue, and one row in the beacon list — and the server has no
+way to tell them apart. This is a deployment property, not a bug,
+but it produces confusing behavior: tasks queued for one process
+may be popped by the other, and the console shows one beacon where
+two are running.
+
+The fix is the **identity role**, documented in
+[Session lifecycle](#session-lifecycle). The builder defaults the
+role to `smb-child`, `tcp-bind`, or `tcp-rev` for the three pivot
+child transports, so a child built with any of those defaults
+gets its own fingerprint without operator action. The parent
+build carries no role. Two sessions appear in the console; each
+has its own cookie and its own task queue.
+
+If the role is not set — an operator has explicitly set
+`identity_role: ""` on a child build, or has bypassed the builder
+entirely — the child shares the parent's session and the operator
+sees one beacon. That is the correct behavior for a rebuild of an
+existing agent, and the wrong behavior for a same-host pivot.
+
 ### The pivot handshake
 
 On connect, the child sends:
@@ -2026,9 +2032,18 @@ whose signature does not match.
 
 Both sides now hold the same ECDH shared secret, derived from the
 child's fresh ephemeral and the parent's static pivot key.
-HKDF-SHA256 with the info string `tornadoc2-pivot-v1` expands the
+HKDF-SHA256 with the info string `tornadoc2-pivot-v2` expands the
 shared secret to 64 bytes: 32 for `child_to_parent` and 32 for
 `parent_to_child`.
+
+The HKDF info string is versioned independently of the pivot
+wire version. It is a domain separator on the key derivation, not a
+protocol-negotiation field — a future change that alters only the
+KDF (a different hash, a different expansion layout) can bump the
+info string without a wire-version change, and a change that alters
+only the framing can bump the wire version without touching the
+KDF. Today both read `v2`; treat them as separate version axes when
+reading the code.
 
 The child contributes a fresh ephemeral key on every handshake;
 the parent contributes its static pivot public key. This is ECDHE
@@ -2066,10 +2081,14 @@ The body of the frame is the AEAD envelope:
 ```
 
 The `seq` field is monotonically increasing per direction, starting
-at 1. It is included in the AEAD additional data, so an attacker who
-edits it in flight breaks the tag. The receiver expects exactly the
-next sequence number; any gap or repeat is treated as a fatal
-protocol error and the pivot session is closed. Both SMB and TCP are
+at 1. It, together with the wire version (`v2`), is included in the
+AEAD additional data, so an attacker who edits either in flight
+breaks the tag. The receiver expects exactly the next sequence
+number; any gap or repeat is treated as a fatal protocol error and
+the pivot session is closed. A `seqErr` value returned by the
+decrypt path names the expected and received sequence numbers in the
+parent's log line, so a repeated or skipped frame is diagnosable
+from the server-side logs without a packet capture. Both SMB and TCP are
 reliable in-order transports, so an out-of-order frame is either an
 injection or a replay.
 
@@ -2612,6 +2631,17 @@ reached over SMB, over a TCP bind listener, or over a TCP reverse
 listener carries its wire envelope inside the pivot session
 identically; the transport choice affects only which side dials,
 not what travels on the wire.
+
+**Plaintext responses on a pivot hop are forwarded, not failed.** The
+pivot transports call an `IsEnvelope` guard before invoking the
+server-ECDH decrypt path. A response that is not a server-ECDH
+envelope — a plaintext build, an error response the server sent
+before it reached the envelope layer, or a proxy-injected body — is
+forwarded to the child verbatim. Without the guard, an otherwise
+functional pivot session treats a plaintext response as a
+decryption failure, drops the frame, and reports a transport error
+to the child. The guard is on all three pivot transports: SMB, TCP
+bind, and TCP reverse.
 
 ### Shaping through a pivot
 
@@ -3327,6 +3357,7 @@ Flags:
 | `--tcp-rev-token-gen` | TCP reverse parent: generate a token and print it | — |
 | `--pivot-key <path>` | Pivot keypair file (PEM). **Required** for every SMB, TCP bind, or TCP reverse build, parent or child. The builder embeds the half the build's role needs | *(none)* |
 | `--pivot-key-gen [<path>]` | Generate a fresh pivot keypair, write it to `<path>` (default `mtls_certs/pivot.pem`), print both halves, and exit — no build is performed | `mtls_certs/pivot.pem` |
+| `--identity-role <name>` | Agent identity role. Disambiguates two agents built from the same tree that run on the same host under the same user — without a role, both resolve to one session, one cookie, one task queue, and one row in the beacon list. The builder defaults the role to `smb-child`, `tcp-bind`, or `tcp-rev` for the three pivot child transports; every other build defaults to empty, which reproduces the pre-role fingerprint. The role travels in its own wire field, not as a hostname suffix. Set explicitly to name two non-pivot builds, or to override the transport default | empty |
 | `--profile <name>` | `default`, `stealth`, `opsec`, `paranoid` | `default` |
 | `--c2-profile <name>` | A profile name under `profiles/c2/` | Handler default |
 | `--tls-profile <name>` | `go`, `chrome`, `firefox`, `safari`. Has effect on HTTP, DoH, and WebSocket. Accepted but ignored on QUIC and WireGuard | `go` |
@@ -3924,6 +3955,7 @@ profile's toggles one key at a time.
 
   "pivot_key_path": "",
   "agent_keypair_path": ".keys/agent/agent_signing.key",
+  "identity_role": "",
 
   "smb_pipe": "",
   "smb_relay_pipe": "",
@@ -3998,6 +4030,7 @@ profile's toggles one key at a time.
 | `wireguard_inner_port` | string | Port number | WireGuard only, optional; defaults to `8881`. Must match the handler's `--beacon-port` |
 | `pivot_key_path` | string | Path to a PEM file containing the engagement-wide pivot keypair (both halves). The builder embeds the half the build's role needs | **required** for every SMB or TCP build, parent or child |
 | `agent_keypair_path` | string | Path to the agent's ECDSA P-256 signing keypair, PEM-encoded, PKCS#8. The private half is embedded in every build; the public half is presented at check-in. When empty, a fresh keypair is generated **and not persisted** — the next build produces a different key, and the second agent is refused as an impersonation attempt against a server that pinned the first. Leave this set to `.keys/agent/agent_signing.key` for any deployment that expects to rebuild an agent for an existing session | all builds; mandatory for idempotent rebuilds |
+| `identity_role` | string | Optional build-time disambiguator, mixed into the server's session fingerprint when non-empty. Two agents built from the same tree, run on the same host, under the same user, would otherwise resolve to one session, one cookie, one task queue, and one row in the beacon list. Setting a role gives each agent its own session. The builder defaults the role to `smb-child`, `tcp-bind`, or `tcp-rev` for the three pivot child transports; every other build defaults to empty, which reproduces the pre-role fingerprint exactly. The role travels in its own wire field, not as a hostname suffix, so the beacon list shows the machine's real hostname | all builds; empty by default |
 | `smb_pipe` | string | Named pipe to dial. Bare name (`tornado_relay_001`) for a same-host pivot, or UNC path (`\\HOST\pipe\NAME`) for a cross-host pivot over SMB | `smb` only, required |
 | `smb_relay_pipe` | string | Named pipe to listen on. Bare name only — no path prefix, no UNC form | any transport, Windows only |
 | `tcp_bind_addr` | string | `host:port` | `tcp` only, required |
@@ -4946,7 +4979,9 @@ place of the terminal REPL. It is a presentation layer only: the
 CLI is the backend, and every action the GUI performs is a call
 into the same `Client` instance the terminal client uses. There is
 no second protocol implementation, no second dispatch table, and
-no second task-queue consumer.
+no second task-queue consumer. The window uses a GitHub-dark-
+inspired theme applied through a single `Palette` class so every
+widget picks up the same colours without per-widget styling.
 
     python beacon-client.py -c alice.cfg --gui
 
@@ -5061,6 +5096,19 @@ entered value.
 `build -c <file.json>` bypasses the form entirely and hands the
 file to `Client._cmd_build`, the same parser the CLI uses.
 
+Two JSON entry points share the same `Client._cmd_build` path the
+CLI uses. The main window's menu bar carries a **Build from JSON
+config…** item: it opens a file picker and hands the selected file
+straight to `_cmd_build`, bypassing the form entirely. The build
+dialog itself carries a **Load config…** button: it opens the same
+file picker and populates the form's fields from the selected file,
+leaving the operator free to adjust values before submitting.
+
+Both paths are thin wrappers around the CLI's existing config
+parser. Neither re-implements config validation, field naming, or
+transport-consistency checks — a config that the CLI would refuse is
+refused with the same error message in the GUI.
+
 ### Layout
 
 The window is divided into four regions:
@@ -5132,6 +5180,12 @@ A rough sketch of the layout:
   [Copy and paste](#copy-and-paste) below for the priority order
   and the reason Ctrl+C has three behaviours.
 - **Beacon tree.** Auto-refreshes every four seconds while idle. The
+  sidebar header shows live/stale counts for the currently loaded
+  set; every column carries a full-identity tooltip so an operator
+  can hover a truncated `USER@HOST` cell and read the complete
+  `machine_id`, `identity_role`, and platform tuple without opening
+  a detail pane. The `VIEW` column shows other operators attached
+  to the same beacon, matching the CLI's `beacons` output. The
   search box filters on the currently loaded rows; the column
   headers sort. Right-clicking a row offers `Attach`, `Show info`,
   `Set alias…`, `Kill`, and `Forget`.
@@ -5284,41 +5338,79 @@ a form a defender can recover.
 
 ### `execute-assembly <local.exe> [-- args...]`
 
-Runs a .NET assembly in memory on a Windows target. The server runs
-**Donut** on the local assembly to produce position-independent
-shellcode that hosts the CLR, loads the assembly bytes, and invokes its
-entry point.
+Runs a .NET assembly in memory on a Windows target. The agent hosts
+the CLR in its own process through the standard COM hosting
+interfaces (`ICLRMetaHost`, `ICLRRuntimeInfo`, `ICLRRuntimeHost`)
+and loads the target assembly from a base64 string carried in the
+task argument.
 
 **Requirements:**
 
 - Target OS: Windows
-- Server-side: `donut` on `PATH`, or a binary at `beacon/bin/donut`
-- Target architecture: amd64 or 386 — Donut does not emit arm64
+- Target architecture: amd64 or 386
+- .NET Framework 4.x installed on the target. The loader requests
+  `v4.0.30319` at runtime and fails with a specific HRESULT if the
+  runtime is absent.
+- `Bootstrap.dll` embedded next to the loader source. The bootstrap
+  is a fixed, non-secret managed DLL that receives
+  `<b64-assembly>|<b64-args>|<output-path>` as a single argument,
+  calls `Assembly.Load(byte[])` on the target, invokes its entry
+  point via reflection, and redirects `Console.Out` /
+  `Console.Error` to the output path. Its hash is stable across
+  builds and it carries no operation-specific data.
+
+**What touches disk.** The target assembly never touches disk. The
+bootstrap — a fixed, checked-in DLL — is written to `%TEMP%` with
+`FILE_FLAG_DELETE_ON_CLOSE` and is removed when the process exits.
+A defender who watches `%TEMP%` sees a small DLL appear and
+disappear; a defender who dumps process memory sees the target
+assembly's bytes, because that is where they live.
 
 **Wire format:**
 
 ```
 {verb: "execute_assembly",
- args: [<b64_shellcode>, <wait_seconds>]}
+args: [<b64_assembly>, "<entry_type>.<entry_method>", "<args>", <wait_seconds>]}
 ```
 
 **Behaviour notes:**
 
-- **Donut flags used by the server:** `-f 1` (raw binary shellcode),
-  `-t 2` (do not wait for the thread), `-x 2` (intercept
-  `ExitProcess`).
-- **Argument passing.** Arguments after `--` are joined with spaces and
-  passed to Donut via `-p`.
-- **Output capture.** Both stdout and stderr are captured through an
-  anonymous pipe, capped at 4 MiB per invocation.
-- **Wait window.** Default 60 seconds. The assembly keeps running on a
-  detached thread if it exceeds the window.
+- **Entry point.** With no explicit entry type and method, the
+  loader invokes the assembly's declared `EntryPoint`. A target that
+  exposes a non-default entry can be addressed with the optional
+  fields; the Sharp* family all declare `Main(string[])` and work
+  with the default.
+- **Argument passing.** Arguments after `--` are joined with spaces
+  and handed to the target as a single-element `string[]`. The
+  bootstrap also rewrites `Environment.CommandLine` before invoking,
+  so CommandLineParser-based tools see the operator's arguments
+  rather than the beacon's.
+- **Output capture.** The bootstrap redirects `Console.Out` and
+  `Console.Error` to a temp file the loader reads when
+  `ExecuteInDefaultAppDomain` returns. Output is capped at 4 MiB per
+  invocation.
+- **AMSI.** `Assembly.Load(byte[])` is an AMSI trigger. The `opsec`
+  profile patches `AmsiScanBuffer` in-process; that patch must run
+  before the `execute-assembly` task. The loader does not attempt a
+  bypass of its own.
+- **Donut.** Still supported for `--format shellcode` builds, where
+  the assembly is wrapped into position-independent shellcode by
+  Donut at build time and executed by the shellcode runner. The
+  `execute-assembly` verb itself no longer goes through Donut.
 
 ### `execmem <remote_path> <exe|elf> [-- args...]`
 
 Executes a previously-uploaded file in memory.
 
-**Windows.** PE process hollowing via an embedded C# loader.
+**Windows.** In-process Go PE loader: maps the image, resolves the
+import table, applies base relocations, walks the TLS directory to
+register callbacks, applies per-section protections, and calls the
+entry point on a new OS thread. No PowerShell child, no `csc`, no
+`Add-Type`, no temp file. The image is not registered with the LDR
+and is not discoverable by a later `LoadLibrary`. CFG-enabled hosts
+that refuse to execute the mapped image will produce a launch
+failure — fall back to a Donut-wrapped build for those hosts.
+
 **Linux.** `memfd_create` anonymous file, `/dev/shm` fallback.
 
 ### `bof <name|path> [args...]`
@@ -7310,6 +7402,7 @@ Plaintext:
     "machine_id": "…",
     "os": "windows",
     "arch": "amd64",
+    "identity_role": "",
     "proto": 1,
     "kill_days": 30,
     "work_start": 480,
@@ -7320,6 +7413,12 @@ Plaintext:
   "identity_ts": 1735689600
 }
 ```
+
+The `identity_role` field is not part of the signature. It is mixed
+into the session fingerprint on the server side and is empty on every
+build that does not set `--identity-role` explicitly or use a pivot
+child transport. An empty value reproduces the pre-role fingerprint
+exactly.
 
 The signature covers `machine_id|hostname|username|os|identity_ts`
 using the agent's build-time ECDSA P-256 private key. The server
@@ -7568,7 +7667,15 @@ falls back to trust-on-first-use with a session warning.
 The signed payload is deliberately excluded from the machine
 fingerprint. Two check-ins from the same machine at different times
 produce the same fingerprint because only the four stable identity
-fields are hashed.
+fields (plus the optional identity role, when set) are hashed.
+
+The **identity role** is not part of the signature. It is carried in
+its own `identity_role` field on the check-in identity and is mixed
+into the fingerprint only when non-empty. An agent built without a
+role produces the same fingerprint it always did; an agent built
+with a role produces a distinct fingerprint from an otherwise
+identical agent without one. See
+[Session lifecycle](#session-lifecycle) for the full model.
 
 ### Result signing
 
@@ -10187,6 +10294,11 @@ swallowed and the session continues.
 | `inject_method 'fiber' is a self-execution technique` | A JSON config set `inject_method` to `fiber` or `threadpool` | These techniques do not fit `migrate <pid>`; leave `inject_method` at `"default"` until `execmem` grows a `--method` flag |
 | `tcp reverse: dial …` on the child, and no pin log on the parent | The child cannot reach the parent's TCP listener | Confirm the parent printed `tcp reverse pivot: listening on …` at startup, that the address in `--tcp-rev-target` matches, and that no firewall is blocking the port between the child and the parent |
 | `tcp reverse pivot: auth failed from …` on the parent | The child's `tcp_rev_token` does not match the parent's | Rebuild the child with the token the parent printed at build time (`--tcp-rev-token-gen` on the parent side) |
+| `pattern Bootstrap.dll: no matching files found` | The Windows agent's `dotnet_loader_windows.go` embeds a bootstrap that was not compiled | Build `Bootstrap.dll` with `mcs` (Linux) or `csc` (Windows) and place it next to `Bootstrap.cs`, or check the prebuilt DLL into the tree. `install-go-build.sh` compiles it automatically when it is missing |
+| `dn: ExecuteInDefaultAppDomain hr=0x80070020` | `ExecuteInDefaultAppDomain` could not open the bootstrap — usually a share-mode mismatch on the delete-on-close temp file | Confirm the bootstrap was written with `FILE_SHARE_READ\|WRITE\|DELETE`; the delivered loader already does |
+| `dn: ExecuteInDefaultAppDomain hr=0x80131515` or `0x8007000E` on a hardened host | AMSI blocked the assembly load — the `opsec` profile's AMSI patch is not in place | Confirm the AMSI patch runs during agent init on Windows, not lazily; rebuild with `--profile opsec` if the deployment did not already |
+| `bof: symbol "": unresolved symbol ""` | COFF symbol-name parser reads the wrong half of the 8-byte name field | Use the current `bof_loader_windows.go`, which discriminates on the low 4 bytes (long names have a zero low half; short names do not) |
+| `unexpected fault address` immediately after a BOF returns | The scrub after execution writes into pages the section-finalize pass set to `PAGE_EXECUTE_READ` or `PAGE_READONLY` | Restore the blob to `PAGE_READ_WRITE` with `VirtualProtect` before the scrub, then free |
 
 ### An injection fails
 

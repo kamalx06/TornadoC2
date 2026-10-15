@@ -10,6 +10,19 @@ GO_VERSION="1.24"
 
 GARBLE_VERSION="v0.17.0"
 
+# Entry points that produce a binary. One line per main package.
+# The first field is the directory under the agent module root;
+# the second is the output filename stem. A .exe suffix is
+# appended for windows targets.
+MAIN_PKGS=(
+    "stageless:beacon"
+    "stager:stager"
+)
+
+# Directory the compiled binaries land in, relative to the agent
+# module root. Created if it does not exist.
+OUT_DIR_NAME="beacon_output"
+
 DIRECT_DEPS=(
     "github.com/miekg/dns v1.1.62"
     "github.com/refraction-networking/utls v1.6.7"
@@ -116,6 +129,61 @@ else
 fi
 
 # --------------------------------------------------------------------
+# Build the .NET bootstrap DLL
+#
+# The Go loader //go:embed's Bootstrap.dll, and //go:embed refuses
+# to build if the file does not exist. Compile it from Bootstrap.cs
+# whenever the source is newer than the DLL, or when the DLL is
+# missing entirely.
+#
+# mcs (Mono C# compiler) is used on Linux. On Windows, csc from the
+# .NET Framework directory is used. If neither is available, the
+# script warns and skips the Windows target rather than failing the
+# whole build.
+
+BOOTSTRAP_CS="native/Bootstrap.cs"
+BOOTSTRAP_DLL="native/Bootstrap.dll"
+
+if [[ -f "$BOOTSTRAP_CS" ]]; then
+    NEED_BUILD=0
+    if [[ ! -f "$BOOTSTRAP_DLL" ]]; then
+        NEED_BUILD=1
+        say "Bootstrap.dll missing — will build from $BOOTSTRAP_CS"
+    elif [[ "$BOOTSTRAP_CS" -nt "$BOOTSTRAP_DLL" ]]; then
+        NEED_BUILD=1
+        say "Bootstrap.cs is newer than Bootstrap.dll — rebuilding"
+    fi
+
+    if [[ $NEED_BUILD -eq 1 ]]; then
+        if command -v mcs >/dev/null 2>&1; then
+            say "building $BOOTSTRAP_DLL with mcs"
+            if mcs -target:library -out:"$BOOTSTRAP_DLL" "$BOOTSTRAP_CS"; then
+                say "  OK ($(stat -c %s "$BOOTSTRAP_DLL") bytes)"
+            else
+                die "mcs failed — fix Bootstrap.cs and rerun"
+            fi
+        elif command -v csc >/dev/null 2>&1; then
+            say "building $BOOTSTRAP_DLL with csc"
+            if csc /target:library /out:"$BOOTSTRAP_DLL" "$BOOTSTRAP_CS"; then
+                say "  OK"
+            else
+                die "csc failed — fix Bootstrap.cs and rerun"
+            fi
+        else
+            warn "no C# compiler found (mcs or csc)"
+            warn "install mono-mcs on Linux or build Bootstrap.dll"
+            warn "on a Windows host and check it in next to Bootstrap.cs"
+            warn ""
+            warn "the Windows agent build will fail without it"
+            warn "the Linux agent build is unaffected"
+            SKIP_WINDOWS=1
+        fi
+    else
+        say "Bootstrap.dll is up to date"
+    fi
+fi
+
+# --------------------------------------------------------------------
 # Back up the current go.mod / go.sum
 
 STAMP="$(date +%Y%m%d_%H%M%S)"
@@ -187,18 +255,44 @@ fi
 # --------------------------------------------------------------------
 # Build every configured target
 
+OUT_DIR="$(pwd)/$OUT_DIR_NAME"
+mkdir -p "$OUT_DIR"
+
+SKIP_WINDOWS="${SKIP_WINDOWS:-0}"
+
 FAILED=0
 for target in "${BUILD_TARGETS[@]}"; do
     goos="${target%%/*}"
     goarch="${target##*/}"
-    say "building $goos/$goarch"
-    if CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
-            go build ./... ; then
-        say "  OK"
-    else
-        warn "  build failed for $goos/$goarch (see above)"
-        FAILED=1
+
+    if [[ "$goos" == "windows" && "$SKIP_WINDOWS" == "1" ]]; then
+        warn "skipping $goos/$goarch — Bootstrap.dll not built"
+        continue
     fi
+
+    say "building $goos/$goarch"
+
+    for entry in "${MAIN_PKGS[@]}"; do
+        src="${entry%%:*}"
+        stem="${entry##*:}"
+
+        if [[ ! -d "$src" ]]; then
+            warn "  $src/ not found — skipping $stem"
+            continue
+        fi
+
+        out="$OUT_DIR/${stem}_${goos}_${goarch}"
+        [[ "$goos" == "windows" ]] && out+=".exe"
+
+        if CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
+                go build -trimpath -o "$out" "./$src" ; then
+            size=$(stat -c %s "$out" 2>/dev/null || stat -f %z "$out")
+            say "  OK  $(basename "$out")  (${size} bytes)"
+        else
+            warn "  build failed for $src ($goos/$goarch) — see above"
+            FAILED=1
+        fi
+    done
 done
 
 # --------------------------------------------------------------------

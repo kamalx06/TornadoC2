@@ -44,6 +44,14 @@ var (
 	WorkHoursStartRaw = ""
 	WorkHoursEndRaw   = ""
 	ServerECDHPubkey = ""
+
+	// IdentityRole disambiguates two builds from the same tree on
+	// the same host. The builder emits it only when the operator
+	// set one explicitly on a stager build; empty is the default
+	// and preserves the pre-role fingerprint. When the stager and
+	// the full agent it launches are both built with the same
+	// role, the session handoff works as it always did.
+	IdentityRole = ""
 )
 
 var (
@@ -92,6 +100,7 @@ func main() {
 		TLSProfile:       TLSProfile,
 		WorkHoursStart:   workStart,
 		WorkHoursEnd:     workEnd,
+		IdentityRole:     IdentityRole,
 	}
 
 	if ServerPubKeyPem != "" {
