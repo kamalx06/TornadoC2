@@ -63,7 +63,14 @@ class UpdateLock:
             pass
         return self
 
-    def __exit__(self, exc_type, exc, tb):
+    def release(self):
+        """Release the lock explicitly. Safe to call more than once.
+
+        Needed because the restart path calls os.execv, which
+        replaces the process image without running __exit__. A
+        caller that is about to exec must drop the lock first or
+        the lock file survives into the next process.
+        """
         if self._fd is not None:
             try:
                 os.close(self._fd)
@@ -74,17 +81,64 @@ class UpdateLock:
             os.remove(LOCK_FILE)
         except OSError:
             pass
+
+    def __exit__(self, exc_type, exc, tb):
+        self.release()
         return False
 
     def _break_if_stale(self):
+        """Break the lock file if it cannot belong to a live
+        holder other than ourselves.
+
+        Three cases break the lock:
+
+        1. Age exceeds STALE_LOCK_SECONDS.
+        2. The recorded PID is our own. On POSIX, ``os.execv``
+           preserves the PID, so an update that restarted the
+           handler while inside a ``with UpdateLock()`` block
+           leaves a lock file carrying the post-restart
+           process's PID. That is never a legitimate live holder
+           — it is the previous incarnation of this process.
+        3. The recorded PID no longer maps to a running process.
+        """
         try:
             mtime = os.path.getmtime(LOCK_FILE)
         except OSError:
             return
+
         age = time.time() - mtime
-        if age < STALE_LOCK_SECONDS:
+        if age >= STALE_LOCK_SECONDS:
+            try:
+                os.remove(LOCK_FILE)
+            except OSError:
+                pass
             return
+
         try:
-            os.remove(LOCK_FILE)
-        except OSError:
-            pass
+            with open(LOCK_FILE, 'r', encoding='ascii') as fh:
+                pid = int(fh.read().strip() or '0')
+        except (OSError, ValueError):
+            return
+
+        if pid <= 0:
+            return
+
+        # Case 2: our own PID, left behind by a pre-restart execv.
+        if pid == os.getpid():
+            try:
+                os.remove(LOCK_FILE)
+            except OSError:
+                pass
+            return
+
+        # Case 3: the PID is not running (POSIX only).
+        if os.name != 'nt':
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                try:
+                    os.remove(LOCK_FILE)
+                except OSError:
+                    pass
+            except OSError:
+                pass

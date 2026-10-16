@@ -321,7 +321,7 @@ class Updater:
         operator_confirmed = 'no'
 
         try:
-            with UpdateLock():
+            with UpdateLock() as lock:
                 self._report_interrupted_update()
 
                 if not git_available():
@@ -707,6 +707,10 @@ class Updater:
                 )
                 clear_state()
                 sys.stdout.flush()
+                # Release the lock before execv. os.execv never
+                # returns, so the `with` block's __exit__ will not
+                # run and the lock file would block the next update.
+                lock.release()
                 try:
                     self.h.shutdown_for_restart()
                     _restart_process()
@@ -762,7 +766,7 @@ class Updater:
         self._busy = True
 
         try:
-            with UpdateLock():
+            with UpdateLock() as lock:
                 last = get_last_apply()
                 if last is None:
                     self._print_warning(
@@ -931,6 +935,7 @@ class Updater:
                 )
                 clear_state()
                 sys.stdout.flush()
+                lock.release()
                 try:
                     self.h.shutdown_for_restart()
                     _restart_process()

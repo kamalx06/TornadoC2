@@ -74,7 +74,18 @@ def set_state(state, **extra):
 
 
 def clear_state():
-    save_state({'state': STATE_IDLE})
+    """Reset the in-progress state to idle.
+
+    Preserves the `last_apply` record so `update rollback` always
+    has a target. The record is what carries the previous revision
+    across a restart; wiping it here would leave the rollback path
+    with nothing to revert to after every successful update.
+    """
+    current = load_state()
+    keep = {'state': STATE_IDLE}
+    if isinstance(current.get('last_apply'), dict):
+        keep['last_apply'] = current['last_apply']
+    save_state(keep)
 
 
 def record_apply(previous_revision, new_revision):
