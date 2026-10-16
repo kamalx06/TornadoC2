@@ -76,6 +76,7 @@ loss, or legal consequences arising from the use of this project.
 - [Cryptography](#cryptography)
 - [Key Management](#key-management)
 - [Backup and Recovery](#backup-and-recovery)
+- [Self-Update](#self-update)
 - [OPSEC Profiles](#opsec-profiles)
 - [C2 Profiles](#c2-profiles)
   - [Concurrent multi-profile handlers](#concurrent-multi-profile-handlers)
@@ -4667,6 +4668,7 @@ server cleaned up the staged build
 | `beacon-build [<os> <arch> [flags]]` | Compile an agent (wizard if no arguments) |
 | `beacon-build -c <file>` | Compile from a JSON build config |
 | `beacon-rm <ID>` / `beacon-forget <ID>` | Forget a session |
+| `update` | Check for and apply updates from the official repository |
 | `operator list\|add\|remove\|set-role\|passwd\|export` | Manage team server operators locally |
 | `deadman status\|arm\|arm-until\|reset\|disable\|warn\|halt\|shred` | Inspect or reconfigure the auto-shutdown watchdog |
 | `halt [--force] [shutdown\|reboot]` | Run the shutdown sequence now |
@@ -7887,6 +7889,161 @@ If `.keys/agent/agent_signing.key` is lost and cannot be
 restored, every deployed agent must be rebuilt. Result and
 identity signature verification will fail for every existing
 agent until they are replaced.
+
+---
+
+## Self-Update
+
+The `update` command at the local console checks the official
+repository for a newer revision and applies it in place. The
+command runs from the handler process, in the console, without
+leaving the shell.
+
+```
+beacon> update
+Fetching updates from https://github.com/kamalx06/TornadoC2/ (main)...
+An update is available for TornadoC2.
+Source:         https://github.com/kamalx06/TornadoC2/ (main)
+Current commit: 8f3a1b2
+Target commit:  c4d5e6f
+Commits:        3
+Changes:        14 files changed, 612 insertions(+), 84 deletions(-)
+Summary:
+  c4d5e6f  add QUIC ClientHello shaping knobs
+  a1b2c3d  fix bootstrap DLL share-mode on Win11 24H2
+  9f8e7d6  rotate audit checkpoint on operator removal
+Updating will restart TornadoC2 and terminate all active beacon
+sessions, SOCKS proxies, tunnels, and other runtime state.
+Proceed with update? [y/N]: y
+Applying update...
+Update installed successfully. Restarting TornadoC2...
+```
+
+### What the command does
+
+1. **Acquires an update lock.** A second `update` typed while the
+   first is running is refused with a console message. A lock file
+   older than one hour — the previous process died between
+   acquisition and release — is broken automatically.
+2. **Reports an interrupted previous update.** If `logs/.update/state.json`
+   holds a state from a run that did not complete, the command
+   surfaces the recorded revision and target before doing anything
+   else.
+3. **Verifies the branch.** Updates are only permitted on `main`.
+   A repository checked out on a feature branch refuses with a
+   named branch.
+4. **Verifies the working tree is clean.** Untracked files,
+   modified files, an in-progress merge, cherry-pick, revert,
+   bisect, or rebase each refuse with a specific message.
+5. **Fetches from the official repository.** The fetch is pinned to
+   `https://github.com/kamalx06/TornadoC2/` regardless of what
+   `origin` points at, so a fork of the tree receives updates from
+   the official project without needing an `upstream` remote. The
+   fetched commits land under a private ref
+   (`refs/tornadoc2/upstream`) and never touch a local branch until
+   they are applied.
+6. **Prints a diff summary.** Commit count, the last ten commit
+   subjects, and `git diff --shortstat` for the range.
+7. **Applies the update.**
+   - A fast-forwardable history applies with `git merge --ff-only`.
+   - A diverged history (local commits not in the official branch)
+     refuses with an explanation and requires the operator to type
+     the word `reset` to discard the local commits. Anything else
+     cancels.
+8. **Validates the installation.** Every `.py` file in the package
+   is AST-parsed, the handler module is imported in a child
+   process, and `compileall` runs over the package directory. A
+   missing required file fails the check with a name.
+9. **Rolls back on validation failure.** The previous revision is
+   restored with `git reset --mixed` followed by
+   `git checkout -- .` — untracked files are preserved. The
+   rollback is re-validated, and both the failure and the rollback
+   outcome are audited.
+10. **Restarts the handler.** Every listener is stopped, the
+    process is replaced with a fresh interpreter, and the operator
+    is dropped at a new `beacon>` prompt.
+
+Every state transition is written to `logs/updater.log` with
+secret redaction. The audit trail is separate from the team server's
+hash-chained audit log — that chain is a record of the engagement,
+not of the tool's own maintenance.
+
+### Restart semantics
+
+The restart is **not** a hot reload. It is `os.execv` of the same
+Python interpreter with the same argv, replacing the running
+process. Consequences:
+
+- **Every active beacon session is terminated.** Deployed agents
+  re-check-in on their next poll and the server reattaches them to
+  their existing sessions — same beacon IDs, same cookies, same
+  task queues. From the operator's perspective the sessions vanish
+  for one sleep interval and reappear. No rebuild is required.
+- **Every SOCKS proxy, tunnel, and scheduled task's in-flight
+  worker** is torn down. New ones can be started immediately.
+- **The dead-man's switch stays armed.** Its persisted state is
+  not touched by the update; a switch that was due to fire at
+  20:00 still fires at 20:00 regardless of when the update ran.
+- **The signing keys do not rotate.** `handler_signing.key`,
+  `server_ecdh.key`, and `agent_signing.key` all live outside the
+  git tree, so the update does not invalidate any deployed agent's
+  embedded public key.
+
+### Rollback
+
+A failed validation rolls back automatically:
+
+```
+Applying update...
+Post-update validation failed: tornadoc2/beacon_handler.py: invalid syntax
+Rollback complete. Installation restored to 8f3a1b2.
+```
+
+The rollback uses a mixed reset rather than `reset --hard`, so
+untracked files — an operator's local notes, a manually added
+profile, a hand-staged payload — survive the round trip. The
+previous revision is verified after the checkout, and a rollback
+that does not land on the expected revision is reported as a
+rollback failure.
+
+### What the command does not do
+
+- **It does not merge a diverged fork.** A tree with local commits
+  is refused until the operator explicitly authorises the reset.
+  A tree that has only been modified — no commits, just working
+  tree changes — is refused by the clean-tree check before that
+  point.
+- **It does not update a non-git installation.** A tarball
+  deployment refuses with a pointer at the official repository.
+- **It does not touch `logs/`, `team_ca/`, `.keys/`, `bofs/`,
+  `mtls_certs/`, `tls_certs/`, or `beacon_output/`.** Those are
+  all outside the tracked tree or listed in `.gitignore`. The
+  update is the code only.
+- **It does not recompile deployed agents.** A revised agent that
+  changes the wire format is a rebuild, not an update. The
+  handler's update path is for the server-side code.
+
+### Requirements
+
+- `git` on `PATH`. Without it the command refuses with
+  `Git is not available on this system.`
+- Network access to `github.com`.
+- A clean working tree on the `main` branch.
+- Write access to the repository directory for the update to apply.
+
+The command is available from the local console only — remote
+operators do not see it in their role-filtered catalogue, and the
+server does not expose an update endpoint. An engagement's team
+server is not something a remote operator should be able to
+replace underneath the person running it.
+
+### Files the command creates
+
+| Path | Purpose |
+|------|---------|
+| `logs/.update/state.json` | Persistent state for crash recovery and rollback |
+| `logs/.update/update.lock` | Cross-process lock; removed on clean exit |
+| `logs/updater.log` | Append-only audit trail of every update attempt |
 
 ---
 

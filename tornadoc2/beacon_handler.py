@@ -36,6 +36,7 @@ import secrets
 from .constants import BEACON_COMMANDS, MAIN_COMMANDS
 from .session_log import SessionLogger           # noqa: F401  (beacon engine)
 from .session_registry import SessionRegistry
+from .updater import Updater
 
 try:
     import readline
@@ -238,6 +239,7 @@ class BeaconHandler:
         self._completion_matches = []
 
         self.deadman = None
+        self.updater = Updater(self)
 
     # ------------------------------------------------------------------
     # Banner
@@ -253,9 +255,45 @@ class BeaconHandler:
 ██████╔╝███████╗██║  ██║╚██████╗╚██████╔╝██║ ╚████║
 ╚═════╝ ╚══════╝╚═╝  ╚═╝ ╚═════╝ ╚═════╝ ╚═╝  ╚═══╝
 {c['end']}
+      {c['bold']}T O R N A D O   C 2{c['end']}  {c['dim']}—{c['end']}  {c['magenta']}kamalx06{c['end']}
+      {c['dim']}pull-based command and control framework{c['end']}
+
+{c['dim']}{'─' * 62}{c['end']}
+
 {c['green']}Listener:{c['end']} {self.host}:{self.beacon_port}
 """
         print(banner)
+
+    # ------------------------------------------------------------------
+    # Restart support
+
+    def shutdown_for_restart(self):
+        for attr in (
+            '_beacon_listener', '_dns_transport', '_icmp_transport',
+            '_quic_listener', '_ws_listener', '_ws_server',
+            '_wireguard_transport', '_pivot_manager',
+            '_client_tunnel', 'operator_listener',
+        ):
+            obj = getattr(self, attr, None)
+            if obj is None:
+                continue
+            try:
+                stop = getattr(obj, 'stop', None)
+                if callable(stop):
+                    stop()
+            except Exception:
+                pass
+
+        if self.deadman is not None:
+            try:
+                stop = getattr(self.deadman, 'stop', None)
+                if callable(stop):
+                    stop()
+            except Exception:
+                pass
+
+        sys.stdout.flush()
+        sys.stderr.flush()
 
     # ------------------------------------------------------------------
     # TLS / mTLS certificate bootstrap
@@ -3722,6 +3760,9 @@ class BeaconHandler:
 
             if cmd in ('exit', 'quit', 'q'):
                 break
+            if cmd == 'update':
+                self.updater.handle_command(parts)
+                continue
             if cmd in ('beacons', 'bl'):
                 try:
                     self.beacon_console.print_list()
@@ -4625,6 +4666,14 @@ class BeaconHandler:
                           team_ca/deadman.json.
   rotate-cookies          Regenerate the cookie key; every beacon
                           re-checks-in on its next poll (team server)
+  update                  Check for and apply updates from the
+                          official repository. Only from the
+                          trusted branch; requires a clean working
+                          tree; validates the installation after
+                          applying and rolls back on failure.
+                          Restarts the handler on success — every
+                          active beacon, SOCKS proxy, and tunnel
+                          is terminated.
   audit [tail N] [operator NAME] [action VERB] [beacon ID] [denied] [full]
                           Inspect the audit log (team server)
   audit verify            Verify the hash chain

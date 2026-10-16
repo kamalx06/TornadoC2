@@ -36,7 +36,7 @@ MAIN_COMMANDS = (
     'recipes',
 
     # Meta
-    'help',
+    'help', 'update'
     'exit', 'quit', 'q',
 )
 
