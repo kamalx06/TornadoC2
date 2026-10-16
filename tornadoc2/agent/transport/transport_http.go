@@ -205,6 +205,9 @@ func (t *httpTransport) FetchTasks(wire *WireSession) ([]Task, error) {
             protocol.WorkHoursEnd = n
         }
     }
+    if v := resp.Header.Get("X-Beacon-SpawnTo"); v != "" {
+        protocol.ScheduleSpawnTo = v
+    }
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {

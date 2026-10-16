@@ -292,15 +292,19 @@ QLabel#statusPill[state="online"]  {{ color: {Palette.OK}; }}
 QLabel#statusPill[state="offline"] {{ color: {Palette.ERR}; }}
 
 /* ── Sidebar ──────────────────────────────────────────── */
-QWidget#sidebar {{ background: {Palette.BG_APP}; }}
+QWidget#sidebar {{
+    background: {Palette.BG_SOFT};
+    border-bottom: 1px solid {Palette.BORDER_SOFT};
+}}
 QLabel#sectionLabel {{
-    color: {Palette.TEXT_FAINT};
+    color: {Palette.TEXT_MUTED};
     font-weight: 700;
     font-size: 9pt;
-    letter-spacing: 0.6px;
+    letter-spacing: 1.0px;
 }}
 QLabel#sectionCount {{
     color: {Palette.TEXT_FAINT};
+    font-family: "__MONO_FONT__";
     font-size: 9pt;
 }}
 
@@ -374,31 +378,38 @@ QPushButton#ghost:hover {{
 /* ── Tree (beacon list) ───────────────────────────────── */
 QTreeWidget {{
     background: {Palette.BG_PANEL};
-    border: none;
+    border: 1px solid {Palette.BORDER_SOFT};
+    border-radius: 6px;
     outline: 0;
     alternate-background-color: {Palette.BG_PANEL};
-    padding: 2px 0;
+    padding: 4px 0;
 }}
 QTreeWidget::item {{
-    padding: 6px 4px;
+    padding: 9px 6px;
     border: none;
+    border-bottom: 1px solid {Palette.BORDER_SOFT};
     color: {Palette.TEXT};
 }}
 QTreeWidget::item:selected {{
     background: {Palette.BG_SELECT};
     color: {Palette.TEXT};
 }}
-QTreeWidget::item:hover {{ background: {Palette.BG_HOVER}; }}
+QTreeWidget::item:hover {{
+    background: {Palette.BG_HOVER};
+}}
+QHeaderView {{
+    background: {Palette.BG_SOFT};
+}}
 QHeaderView::section {{
-    background: {Palette.BG_PANEL};
+    background: {Palette.BG_SOFT};
     color: {Palette.TEXT_FAINT};
     border: none;
-    border-bottom: 1px solid {Palette.BORDER_SOFT};
-    padding: 8px 6px;
+    border-bottom: 1px solid {Palette.BORDER};
+    padding: 8px 8px;
     font-weight: 700;
-    font-size: 9pt;
+    font-size: 8.5pt;
     text-transform: uppercase;
-    letter-spacing: 0.4px;
+    letter-spacing: 0.8px;
 }}
 QHeaderView::section:hover {{ color: {Palette.TEXT}; }}
 
@@ -817,6 +828,45 @@ class _FocusFrame(QFrame):
             self.style().unpolish(self)
             self.style().polish(self)
         return super().eventFilter(obj, ev)
+
+
+
+
+class _BeaconTree(QTreeWidget):
+    """QTreeWidget that paints a centered hint when empty.
+
+    The plain QTreeWidget shows a blank pane when there are no
+    beacons, which reads as a broken widget rather than a
+    waiting state. Painting the hint in the viewport's paint
+    event keeps it aligned to the scroll area rather than to
+    the widget's full rect (which includes the header bar), so
+    the text sits visually centered in the empty region.
+    """
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._empty_text = ''
+
+    def set_empty_text(self, text: str) -> None:
+        if text != self._empty_text:
+            self._empty_text = text
+            self.viewport().update()
+
+    def paintEvent(self, ev) -> None:
+        super().paintEvent(ev)
+        if self.topLevelItemCount() != 0 or not self._empty_text:
+            return
+        p = QPainter(self.viewport())
+        p.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+        p.setPen(QColor(Palette.TEXT_FAINT))
+        f = self.font()
+        f.setItalic(True)
+        p.setFont(f)
+        p.drawText(
+            self.viewport().rect(),
+            Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap,
+            self._empty_text,
+        )
 
 
 # ---------------------------------------------------------------------
@@ -2821,6 +2871,10 @@ class GuiApp(QMainWindow):
         m_tools.addAction('C2 profiles',
                           lambda: self._submit('c2-profiles'))
         m_tools.addSeparator()
+        m_tools.addAction('Set spawnto for attached beacon…',
+                          lambda: self._prompt_spawnto(
+                              self.client.current_beacon))
+        m_tools.addSeparator()
         m_tools.addAction('Deadman status',
                           lambda: self._submit('deadman status'))
         m_tools.addAction('Operators',
@@ -2846,16 +2900,16 @@ class GuiApp(QMainWindow):
         divider.setFixedHeight(1)
         outer.addWidget(divider)
 
-        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter = QSplitter(Qt.Orientation.Vertical)
         splitter.setChildrenCollapsible(False)
         splitter.setHandleWidth(1)
         outer.addWidget(splitter, 1)
 
-        splitter.addWidget(self._build_sidebar())
+        splitter.addWidget(self._build_beacon_pane())
         splitter.addWidget(self._build_main_pane())
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
-        splitter.setSizes([480, 800])
+        splitter.setSizes([240, 560])
 
     # ------------------------------------------------------------------
     # Header bar
@@ -2930,27 +2984,41 @@ class GuiApp(QMainWindow):
     # ------------------------------------------------------------------
     # Sidebar
 
-    def _build_sidebar(self) -> QWidget:
-        side = QWidget()
-        side.setObjectName('sidebar')
-        side.setMinimumWidth(380)
-        lay = QVBoxLayout(side)
-        lay.setContentsMargins(Sp.L, Sp.L, Sp.L, Sp.L)
+    def _build_beacon_pane(self) -> QWidget:
+        pane = QWidget()
+        pane.setObjectName('sidebar')
+        pane.setMinimumHeight(140)
+
+        lay = QVBoxLayout(pane)
+        lay.setContentsMargins(Sp.L, Sp.M, Sp.L, Sp.S)
         lay.setSpacing(Sp.S)
 
-        # Heading row
+        # ── Toolbar row ──────────────────────────────────────
         head = QHBoxLayout()
         head.setSpacing(Sp.S)
+
+        # A small accent dot before the section label. Same
+        # visual grammar as the ◈ in the brand strip — a
+        # coloured glyph on the left of a text label marks a
+        # region the eye should land on.
+        dot = QLabel('\u25cf')
+        dot.setStyleSheet(
+            f'color: {Palette.ACCENT}; font-size: 8pt; '
+            f'background: transparent;')
+        head.addWidget(dot)
+
         lbl = QLabel('BEACONS')
         lbl.setObjectName('sectionLabel')
         head.addWidget(lbl)
+
         self.beacon_count_lbl = QLabel('0')
         self.beacon_count_lbl.setObjectName('sectionCount')
         head.addWidget(self.beacon_count_lbl)
-        head.addStretch(1)
-        lay.addLayout(head)
+
+        head.addSpacing(Sp.M)
+
         self.search_entry = QLineEdit()
-        self.search_entry.setPlaceholderText('filter…')
+        self.search_entry.setPlaceholderText('filter beacons…')
         self.search_entry.textChanged.connect(
             lambda _t: self._on_search_change())
 
@@ -2963,9 +3031,33 @@ class GuiApp(QMainWindow):
         search_lay.setSpacing(0)
         search_lay.addWidget(glyph)
         search_lay.addWidget(self.search_entry, 1)
-        lay.addWidget(search_wrap)
+        search_wrap.setMaximumWidth(340)
+        search_wrap.setMinimumWidth(220)
+        head.addWidget(search_wrap)
 
-        self.tree = QTreeWidget()
+        head.addStretch(1)
+
+        attach = QPushButton('Attach')
+        attach.setObjectName('primary')
+        attach.clicked.connect(self._attach_selected)
+        head.addWidget(attach)
+
+        detach = QPushButton('Detach')
+        detach.clicked.connect(lambda: self._submit('detach'))
+        head.addWidget(detach)
+
+        refresh = QPushButton('Refresh')
+        refresh.setObjectName('ghost')
+        refresh.clicked.connect(self._refresh_beacons_async)
+        head.addWidget(refresh)
+
+        lay.addLayout(head)
+
+        # ── Beacon table ─────────────────────────────────────
+        self.tree = _BeaconTree()
+        self.tree.set_empty_text(
+            'waiting for beacons\n'
+            'the list updates every few seconds')
         self.tree.setColumnCount(5)
         self.tree.setHeaderLabels(['BEACON', 'USER@HOST', 'OS',
                                    'LAST', 'VIEW'])
@@ -2983,42 +3075,23 @@ class GuiApp(QMainWindow):
             lambda *_: self._attach_selected())
         self.tree.setTextElideMode(Qt.TextElideMode.ElideMiddle)
 
+        # Column sizing. USER@HOST stretches to fill the rest;
+        # everything else sizes to its content so a header like
+        # "win/amd64" never truncates to "wi...64". The trade is
+        # that OS and LAST re-measure on every refresh; for a
+        # fleet of tens that is invisible.
         hdr = self.tree.header()
         hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
         hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
-        hdr.setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
-        hdr.setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
-        self.tree.setColumnWidth(0, 110)
-        self.tree.setColumnWidth(2, 72)
-        self.tree.setColumnWidth(3, 52)
-        self.tree.setColumnWidth(4, 62)
+        hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        self.tree.setColumnWidth(0, 200)   # BEACON  (dot + id + alias)
         hdr.sectionClicked.connect(self._sort_by)
         hdr.setSectionsClickable(True)
 
         lay.addWidget(self.tree, 1)
-
-        # Toolbar row
-        btns = QHBoxLayout()
-        btns.setSpacing(Sp.S)
-        attach = QPushButton('Attach')
-        attach.setObjectName('primary')
-        attach.clicked.connect(self._attach_selected)
-        btns.addWidget(attach)
-
-        detach = QPushButton('Detach')
-        detach.clicked.connect(lambda: self._submit('detach'))
-        btns.addWidget(detach)
-
-        btns.addStretch(1)
-
-        refresh = QPushButton('Refresh')
-        refresh.setObjectName('ghost')
-        refresh.clicked.connect(self._refresh_beacons_async)
-        btns.addWidget(refresh)
-
-        lay.addLayout(btns)
-        return side
+        return pane
 
     # ------------------------------------------------------------------
     # Main pane (tabs + input bar)
@@ -3073,7 +3146,7 @@ class GuiApp(QMainWindow):
         self.prompt_lbl.setFont(_f_mono(11, bold=True))
         self.prompt_lbl.setStyleSheet(
             f'color: {Palette.ACCENT}; background: transparent;')
-        self.prompt_lbl.setMinimumWidth(60)
+        self.prompt_lbl.setMinimumWidth(110)
 
         self.input_entry = _HistoryLineEdit()
         self.input_entry.setFont(_f_mono(11))
@@ -3112,6 +3185,8 @@ class GuiApp(QMainWindow):
 
         self.status_lbl = QLabel('initialising…')
         self.status_lbl.setFont(_f_mono(9))
+        self.status_lbl.setStyleSheet(
+            f'color: {Palette.TEXT_MUTED};')
         sb.addWidget(self.status_lbl, 1)
 
         self.clock_lbl = QLabel('')
@@ -3139,6 +3214,8 @@ class GuiApp(QMainWindow):
                   activated=lambda: self._select_tab(1))
         QShortcut(QKeySequence('F5'), self,
                   activated=self._refresh_beacons_async)
+        QShortcut(QKeySequence('Ctrl+Shift+W'), self,
+                  activated=self._prompt_spawnto_selected)
         QShortcut(QKeySequence('Ctrl+C'), self,
                   context=Qt.ShortcutContext.ApplicationShortcut,
                   activated=self._on_copy_or_clear)
@@ -3468,6 +3545,15 @@ class GuiApp(QMainWindow):
 
     def _render_beacon_tree(self) -> None:
         self.tree.clear()
+
+        if self._filter_text:
+            self.tree.set_empty_text(
+                f'no beacons match "{self._filter_text}"')
+        else:
+            self.tree.set_empty_text(
+                'waiting for beacons\n'
+                'the list updates every few seconds')
+
         rows = list(self._beacon_rows)
 
         if self._filter_text:
@@ -3563,6 +3649,14 @@ class GuiApp(QMainWindow):
             sleep = b.get('sleep_interval', 0)
             fp = (b.get('fingerprint') or '')[:16]
             checkins = b.get('checkins', 0)
+            spawnto = (b.get('spawnto') or '').strip()
+            if not spawnto:
+                spawnto_note = '(default worker path)'
+            elif spawnto == 'self':
+                spawnto_note = 'self (explicit)'
+            else:
+                spawnto_note = spawnto
+
             tip = (
                 f"beacon #{b['id']}\n"
                 f"alias       : {alias or '—'}\n"
@@ -3573,6 +3667,7 @@ class GuiApp(QMainWindow):
                 f"sleep       : {sleep}s\n"
                 f"check-ins   : {checkins}\n"
                 f"last seen   : {age_s} ago\n"
+                f"spawnto     : {spawnto_note}\n"
                 f"fingerprint : {fp}…"
             )
 
@@ -3600,6 +3695,12 @@ class GuiApp(QMainWindow):
 
             for c in range(5):
                 item.setToolTip(c, tip)
+
+            if live:
+                tint = QColor(Palette.OK)
+                tint.setAlpha(14)
+                for c in range(5):
+                    item.setBackground(c, QBrush(tint))
 
             item.setForeground(0, QBrush(beacon_color))
             item.setForeground(1, QBrush(body_color))
@@ -3657,6 +3758,8 @@ class GuiApp(QMainWindow):
 
         menu.addSeparator()
         menu.addAction('Set alias…', self._ctx_set_alias)
+        menu.addAction('Set spawnto…',
+                       lambda: self._prompt_spawnto(sel))
         menu.addSeparator()
         menu.addAction('Kill', lambda: self._ctx_action('kill'))
         menu.addAction('Forget', lambda: self._ctx_action('forget'))
@@ -3710,6 +3813,69 @@ class GuiApp(QMainWindow):
         self._submit(f"use {sel}")
         self._submit(f"alias {name}")
 
+    def _prompt_spawnto_selected(self) -> None:
+        """Open the spawnto prompt for the currently selected
+        beacon. Bound to Ctrl+Shift+W so an operator whose hands
+        are already on the tree does not have to reach for the
+        mouse."""
+        self._prompt_spawnto(self._selected_id())
+
+    def _prompt_spawnto(self, bid: str) -> None:
+        """Prompt for a spawnto path and dispatch it.
+
+        The verb is a server-side intercept: the listener's
+        `_apply_local_verb` mutates the session and returns the
+        confirmation inline, so the operator sees the resulting
+        value immediately rather than on the next beacon poll.
+        The GUI does not need to know any of that — it submits
+        the same `spawnto <path>` line the CLI would, and the
+        response arrives through the normal task-result path.
+
+        Two empty inputs are meaningful:
+
+          * A cancelled dialog — the operator changed their
+            mind, nothing is submitted.
+          * An empty string typed and accepted — the operator
+            wants to clear the current spawnto back to the
+            default worker path. This sends `spawnto -`,
+            matching the server's clear sentinel.
+
+        Anything else is passed through verbatim. The server
+        validates length and control characters and refuses the
+        reserved word "self"; a syntactically valid but
+        nonexistent path is accepted by the server and fails on
+        the target with a specific error, which is the right
+        layer for that check.
+        """
+        if not bid:
+            self._log('select a beacon first', 'warn')
+            return
+        if self._busy:
+            self._log('(a command is already running — wait for it)',
+                      'warn')
+            return
+
+        from PySide6.QtWidgets import QInputDialog
+        path, ok = QInputDialog.getText(
+            self, f'Spawnto for beacon #{bid}',
+            'Path to the sacrificial process that '
+            'execute-assembly should spawn.\n\n'
+            'Leave blank and press OK to clear (revert to the '
+            'default worker path under %LOCALAPPDATA%).')
+        if not ok:
+            return
+
+        path = path.strip()
+        if path == '':
+            verb_args = ['spawnto', '-']
+        else:
+            verb_args = ['spawnto', path]
+
+        self._submit(f"use {bid}")
+        self._submit(' '.join(verb_args))
+        self._log(f"spawnto for #{bid}: "
+                  f"{path or '<default>'}", 'meta')
+
     # ==================================================================
     # Input submission
 
@@ -3757,9 +3923,16 @@ class GuiApp(QMainWindow):
                     f'color: {Palette.PURPLE}; background: transparent;')
             return
         bid = self.client.current_beacon
-        self.prompt_lbl.setText(f'#{bid} \u203a' if bid else '\u203a')
-        self.prompt_lbl.setStyleSheet(
-            f'color: {Palette.ACCENT}; background: transparent;')
+        if bid:
+            self.prompt_lbl.setText(f'#{bid} \u203a')
+            self.prompt_lbl.setStyleSheet(
+                f'color: {Palette.ACCENT}; '
+                f'background: transparent;')
+        else:
+            self.prompt_lbl.setText('no beacon \u203a')
+            self.prompt_lbl.setStyleSheet(
+                f'color: {Palette.TEXT_FAINT}; '
+                f'background: transparent;')
 
     def _update_input_state(self) -> None:
         if self._on_chat_tab():

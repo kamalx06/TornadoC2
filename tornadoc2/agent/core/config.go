@@ -37,19 +37,6 @@ type Config struct {
 	PivotPrivKeyB64 string
 	PivotPubKeyB64  string
 
-	// IdentityRole is a build-time disambiguator. Two agents
-	// built from the same tree, run on the same host, under the
-	// same user, would otherwise hash to the same session
-	// fingerprint. When this field is non-empty, the agent sends
-	// it in the check-in identity and the server mixes it into
-	// the fingerprint, so the two agents get distinct sessions.
-	//
-	// Empty (the default) reproduces the pre-role fingerprint
-	// exactly, so no deployed agent's session is invalidated by
-	// the field's existence. The builder sets it automatically
-	// for the three pivot child transports; an operator can set
-	// it explicitly on any build via `identity_role` in the JSON
-	// config or `--identity-role` on `beacon-build`.
 	IdentityRole string
 
 	SMBPipe         string
@@ -79,11 +66,6 @@ type Config struct {
 
 	InjectorShellcodeB64 string
 
-	// InjectMethod is the default `migrate <pid>` method when no
-	// --method flag is supplied. Empty or "default" selects the
-	// platform's historical path — CreateRemoteThread on Windows,
-	// ptrace on Linux. "apc" selects remote APC injection on
-	// Windows; it is refused on Linux by inject_linux.go.
 	InjectMethod string
 
 	Verbose           bool

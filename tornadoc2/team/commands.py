@@ -656,6 +656,17 @@ COMMANDS = [
      'scope': 'beacon', 'native': False,
      'client_op': 'execute_assembly',
      'platforms': ['windows']},
+    {'name': 'spawnto',
+     'args': '[<path>] | --clear',
+     'description': 'Set the sacrificial process that '
+                    'execute-assembly spawns. Blank or --clear '
+                    'reverts to the default worker staged under '
+                    '%LOCALAPPDATA%. Applies on the next '
+                    'check-in.',
+     'capability': 'beacon.use',
+     'category': 'IN-MEMORY PAYLOAD EXECUTION',
+     'scope': 'beacon', 'native': True,
+     'platforms': ['windows']},
 
     # ---- BOF --------------------------------------------------------
     {'name': 'bof', 'args': '<path.o> [args...]',

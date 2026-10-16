@@ -110,11 +110,12 @@ func (t *wsTransport) call(ctx context.Context,
 		// a beacon or results reply leaves the protocol
 		// globals untouched.
 		Scheduling struct {
-			Sleep    string `json:"sleep,omitempty"`
-			Jitter   string `json:"jitter,omitempty"`
-			Kill     string `json:"kill_deadline,omitempty"`
+			Sleep     string `json:"sleep,omitempty"`
+			Jitter    string `json:"jitter,omitempty"`
+			Kill      string `json:"kill_deadline,omitempty"`
 			WorkStart string `json:"work_start,omitempty"`
-			WorkEnd  string `json:"work_end,omitempty"`
+			WorkEnd   string `json:"work_end,omitempty"`
+			SpawnTo   string `json:"spawn_to,omitempty"`
 		} `json:"scheduling,omitempty"`
 	}
 	if err := wsjson.Read(readCtx, conn, &reply); err != nil {
@@ -133,7 +134,8 @@ func (t *wsTransport) call(ctx context.Context,
 	// reads these back after FetchTasks returns.
 	if s := reply.Scheduling; s.Sleep != "" ||
 		s.Jitter != "" || s.Kill != "" ||
-		s.WorkStart != "" || s.WorkEnd != "" {
+		s.WorkStart != "" || s.WorkEnd != "" ||
+		s.SpawnTo != "" {
 		if s.Sleep != "" {
 			if n, err := strconv.Atoi(s.Sleep); err == nil && n >= 0 {
 				protocol.ScheduleSleep = n
@@ -158,6 +160,9 @@ func (t *wsTransport) call(ctx context.Context,
 			if n, err := strconv.Atoi(s.WorkEnd); err == nil && n >= 0 && n < 1440 {
 				protocol.WorkHoursEnd = n
 			}
+		}
+		if s.SpawnTo != "" {
+			protocol.ScheduleSpawnTo = s.SpawnTo
 		}
 	}
 

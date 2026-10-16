@@ -137,6 +137,21 @@ available in the current version.
 
 ---
 
+<p align="center">
+  <img src="demo/gui.png"
+       alt="TornadoC2 operator console — beacon table above, log and chat tabs below"
+       width="1000">
+</p>
+
+<p align="center">
+  <em>The PySide6 operator console. Beacon table on top, log and
+  chat on the bottom, one command bar for both. The terminal REPL
+  is the reference implementation; the GUI is a presentation layer
+  over the same <code>Client</code> methods.</em>
+</p>
+
+---
+
 ## Why TornadoC2 Exists
 
 I used Sliver for a year. It is a good tool — that needs saying before anything else, because what follows is not a criticism of it. The problem was that I could not change the agent's shape. A Sliver beacon looks like a Sliver beacon: one fingerprint, one polling schedule, one protocol family, one runtime configuration that sits on disk. I could point it at a different URL. I could not make it something else. That is the right trade for engagements where a generalist shape is fine. It was the wrong trade for the networks I was working on.
@@ -183,22 +198,8 @@ The rest of this document describes how it works. This section describes why it 
   native verbs and the sleep-mask implementation are what remains.
 
 - **More native commands.** Depth on the execution and operational
-  sides — a broader `curl` surface, additional DNS record types,
-  TLS and HTTP/2–HTTP/3 inspection, socket verbs beyond `nc`. Same
-  principle as the current set: in-process, standard library, no
+  sides. Same principle as the current set: in-process, standard library, no
   child process.
-
-- **Pivot transport stability.** The SMB, TCP bind, and TCP
-  reverse transports are functional but not yet at the
-  operational stability of the direct transports. The
-  remaining work is internal to connection management —
-  overlapping poll cycles, TOFU pin persistence across a
-  parent restart, and reconnect behaviour on a pivot held
-  open for longer than a working day. The wire protocol is
-  frozen; the improvements do not require a rebuild of any
-  deployed parent or child. See the stability notice at the
-  top of [Pivot Transports](#pivot-transports) for what is
-  stable today and what to prefer until the work lands.
 
 ---
 
@@ -307,9 +308,17 @@ The rest of this document describes how it works. This section describes why it 
 - **Chunked file transfer** with SHA-256 verification.
 - **In-memory PE (Windows) and ELF (Linux) execution.**
 - **In-memory .NET assembly execution** (`execute-assembly`) on
-  Windows, via an in-process CLR host. A fixed managed bootstrap
-  loads the target assembly with `Assembly.Load(byte[])`; the target
-  never touches disk. Donut remains a fallback for
+  Windows. The CLR is hosted in a **sacrificial worker process**
+  spawned by the beacon, not in the beacon process itself. The
+  worker receives the target assembly as a base64 string, hosts the
+  CLR, and runs the assembly through a fixed managed bootstrap that
+  calls `Assembly.Load(byte[])`; the target never touches disk.
+  When the target returns or calls `Environment.Exit` — which most
+  of the Sharp* family does — the worker dies and the beacon
+  survives. The beacon reads the captured output from the worker's
+  output file and posts it as the task result. The sacrificial
+  binary is a fresh copy of the beacon by default, settable
+  per-session with the `spawnto` verb. Donut remains a fallback for
   `--format shellcode` builds.
 - **Two injection backends for `migrate <pid>`.** The default is
   `CreateRemoteThread` on Windows and `ptrace` on Linux — the
@@ -383,11 +392,10 @@ BOF and .NET assembly execution are Windows-only.
 | **Native execution** | `cat`, `ls`, `find`, `grep`, `head`, `tail`, `stat`, `strings`, `hexdump`, `sha1`, `sha256`, `md5`, `cksum`, `wc`, `nl`, `rev`, `sort`, `uniq`, `tr`, `base64`, `gzip`, `gunzip`, `which`, `readlink`, `realpath`, `du`, `ps`, `id`, `env`, `pwd`, `whoami` (with `/priv` on Windows), `hostname`, `uname`, `df`, `uptime`, `date`, `getpid`, `getppid`, `ifconfig`, `netstat`, `arp`, `route`, `users`, `groups`, `av-list`, `screenshot`, `mkdir`, `rm`, `cp`, `mv`, `chmod`, `ln`, `touch`, `curl`, `resolve`, `nc`, `hashdump`, `enablepriv`, `lsassdump` execute in-process · `readfile` as an alias for `cat` · Windows identity: `make_token` builds a NEW_CREDENTIALS token and holds it for subsequent `exec`; `rev2self` drops it; `runas` spawns a child in a fresh logon session under supplied credentials |
 | **Network verbs (in-process)** | `curl` — HTTP/HTTPS client with `-X`, `-H`, `-d`, `-k`, `-i`, `-L`, `-o`, `-m`, `--max-size` · `resolve` — DNS lookups for A, AAAA, CNAME, MX, NS, TXT, PTR · `nc` — TCP connect/banner grab with `-z`, `-w`, `--send` · No `/bin/curl`, no `dig`, no `/bin/nc` |
 | **Command execution** | `exec` spawns a child process · `sh` routes a command through a stdin-piped shell so the command never appears in argv |
-| **In-memory payloads** | `execmem <path> exe` on Windows — in-process Go PE loader: maps the image, resolves imports, applies base relocations, walks the TLS directory, executes the entry point; no PowerShell, no temp file · `execmem <path> elf` on Linux (`memfd_create`, `/dev/shm` fallback) · `execute-assembly <local.exe>` runs a .NET assembly through an in-process CLR host that loads the target with `Assembly.Load(byte[])`; only a fixed, non-secret bootstrap touches disk, and only under `%TEMP%` with `FILE_FLAG_DELETE_ON_CLOSE` · On-disk source unlinked before invocation on every path |
+| **In-memory payloads** | `execmem <path> exe` on Windows — in-process Go PE loader: maps the image, resolves imports, applies base relocations, walks the TLS directory, executes the entry point; no PowerShell, no temp file · `execmem <path> elf` on Linux (`memfd_create`, `/dev/shm` fallback) · `execute-assembly <local.exe>` runs a .NET assembly by spawning a **sacrificial worker process**. The worker hosts the CLR, loads the target with `Assembly.Load(byte[])`, and captures stdout/stderr. When the target calls `Environment.Exit` — the Sharp* family does, at the end of `Main` — the worker dies and the beacon survives. Only a fixed, non-secret bootstrap touches disk, and only under `%TEMP%` with `FILE_FLAG_DELETE_ON_CLOSE`. The sacrificial binary is settable per-session with the `spawnto` verb; the default is a fresh copy of the beacon binary · On-disk source unlinked before invocation on every path |  
 | **Inline scripts** | `pyexec`, `psexec`, `shexec` deliver script source base64-encoded in the task and pipe it to `python3 -`, `powershell.exe -Command -`, or `/bin/sh -s` via stdin · Source never appears in argv · `--stdin` variant reads the source from the operator's terminal in paste mode |
 | **BOF / COFF** | Windows-only execution · `bofs` (main-scope) manages the **shared server-side registry** — `list`, `add`, `remove` · `bof` (beacon-scope) runs a registered BOF by name, or a local `.o` file by path · Arguments packed according to the BOF's declared `bof_pack` format when one is registered, falling back to a single space-joined `z` string · The registry is persisted to `logs/.tornadoc2_bofs.json`, with raw COFF bytes under `bofs/<name>.o` · Server never executes the bytes — the beacon's in-process Go COFF loader does |
-| **C2 profile catalogue** | `c2-profiles` (alias `c2p`) lists every profile the server can build against, with the fields an operator needs to pick one — the three request paths, the User-Agent, and the shaping roles the profile declares · `c2-profiles <name>` prints the raw JSON so it can be copied as a starting point for a new profile or pasted into a build config · Thirty profiles ship in-tree covering enterprise SaaS (Teams, Slack, Salesforce, ServiceNow-adjacent APIs), developer infrastructure (GitHub, GitLab, Stripe, Sentry-adjacent APIs), and consumer applications (Instagram, TikTok, Netflix, YouTube), plus a dedicated DNS-transport profile · **Multi-profile handler.** The listener builds a per-path shape map at startup and serves every profile under `profiles/c2/` concurrently. Agents built against different profiles coexist on one handler, each getting the shape its own profile declared — same port, same certificate, same process. No team-server restart to change profiles, no second listener for a second fingerprint,
-no "active profile" state. Contrast with Cobalt Strike, Sliver, Havoc, and Brute Ratel, which all bind one profile per team server. Thirty profiles ship in-tree; the handler scales to any number without architectural change
+| **C2 profile catalogue** | `c2-profiles` (alias `c2p`) lists every profile the server can build against, with the fields an operator needs to pick one — the three request paths, the User-Agent, and the shaping roles the profile declares · `c2-profiles <name>` prints the raw JSON so it can be copied as a starting point for a new profile or pasted into a build config · Thirty profiles ship in-tree covering enterprise SaaS (Teams, Slack, Salesforce, ServiceNow-adjacent APIs), developer infrastructure (GitHub, GitLab, Stripe, Sentry-adjacent APIs), and consumer applications (Instagram, TikTok, Netflix, YouTube), plus a dedicated DNS-transport profile · **Multi-profile handler.** The listener builds a per-path shape map at startup and serves every profile under `profiles/c2/` concurrently. Agents built against different profiles coexist on one handler, each getting the shape its own profile declared — same port, same certificate, same process. No team-server restart to change profiles, no second listener for a second fingerprint, no "active profile" state. Contrast with Cobalt Strike, Sliver, Havoc, and Brute Ratel, which all bind one profile per team server. Thirty profiles ship in-tree; the handler scales to any number without architectural change
 | **Scheduling** | Configurable sleep interval and jitter · Re-check-in on session expiry · Kill date enforcement · Working-hours window · Server-side recurring tasks with persistent storage and optional output retention |
 | **Cryptography** | ECDSA P-256 task signing · ECDSA result signing · ECDSA identity signing at check-in · P-256 ECDH wire key agreement · Trust-on-first-use public key pinning per session |
 | **OPSEC** | Compile-time evasion profiles · Anti-sandbox, anti-debug, anti-VM heuristics · AMSI/ETW patching · Sleep mask with four modes: `rc4` and `aes-ctr` on Linux and Windows, `cronos` and `hwbp` on Windows amd64 · No kernel timer, no APC, no new thread in either Windows mode · Indirect syscalls · Self-deletion of the on-disk binary · String obfuscation · Garble · UPX · Shell history suppression · Jittered first check-in |
@@ -4818,6 +4826,7 @@ traces back to a specific export.
 | `make_token <DOMAIN\user> <password>` | Windows: build and hold a NEW_CREDENTIALS token; subsequent `exec` runs as that user. `make_token --revert` is the same as `rev2self` |
 | `rev2self` | Windows: drop the held impersonation token |
 | `runas <DOMAIN\user> <password> <command> [args...]` | Windows: spawn a child in a fresh logon session under the supplied credentials. Returns the PID; does not wait |
+| `spawnto <path>` | Set the sacrificial process that `execute-assembly` spawns (Windows only). `spawnto` with no argument shows the current value; `spawnto --clear` reverts to the default worker path under `%LOCALAPPDATA%` |
 
 **Network verbs:**
 
@@ -4936,6 +4945,7 @@ the modal with the full source in one call, then the follow-up
 | `workhours <start> <end>` | Set the working-hours window |
 | `workhours off` | Disable the working-hours window |
 | `workhours` | Show current window |
+| `spawnto <path>` | Set the sacrificial process that `execute-assembly` spawns (Windows only). `spawnto` with no argument shows the current value; `spawnto --clear` reverts to the default worker path under `%LOCALAPPDATA%` |
 | `schedule add <N><u> <verb> [args]` | Add a recurring server-side task |
 | `schedule list` | List schedules for this beacon |
 | `schedule remove <id>` | Delete a schedule |
@@ -4984,6 +4994,12 @@ inspired theme applied through a single `Palette` class so every
 widget picks up the same colours without per-widget styling.
 
     python beacon-client.py -c alice.cfg --gui
+
+<p align="center">
+  <img src="demo/gui.png"
+       alt="TornadoC2 operator console"
+       width="900">
+</p>
 
 **What it is not.** The GUI is not a different client. The CLI
 remains the reference implementation. Every protocol change, every
@@ -5338,17 +5354,29 @@ a form a defender can recover.
 
 ### `execute-assembly <local.exe> [-- args...]`
 
-Runs a .NET assembly in memory on a Windows target. The agent hosts
-the CLR in its own process through the standard COM hosting
-interfaces (`ICLRMetaHost`, `ICLRRuntimeInfo`, `ICLRRuntimeHost`)
-and loads the target assembly from a base64 string carried in the
-task argument.
+Runs a .NET assembly in memory on a Windows target **without
+hosting the CLR in the beacon process**. The beacon spawns a
+sacrificial worker process — a fresh copy of the beacon binary by
+default, or whatever path the operator has set with the `spawnto`
+verb — hands it the target assembly as a base64 string through its
+environment, and reads the captured stdout/stderr from an output
+file the worker writes. The beacon does not host the CLR and does
+not load the assembly; only the worker does.
+
+**Why the worker model exists.** Most of the Sharp* family calls
+`Environment.Exit` at the end of `Main`. That terminates the
+process it runs in. An in-process CLR host would take the beacon
+down with the target; the worker model isolates the target's
+teardown to a process the beacon does not depend on. The beacon
+sees the worker exit, reads the output file the worker left behind,
+and posts it as the task result — the same shape as any other
+verb, from the operator's perspective.
 
 **Requirements:**
 
 - Target OS: Windows
 - Target architecture: amd64 or 386
-- .NET Framework 4.x installed on the target. The loader requests
+- .NET Framework 4.x installed on the target. The worker requests
   `v4.0.30319` at runtime and fails with a specific HRESULT if the
   runtime is absent.
 - `Bootstrap.dll` embedded next to the loader source. The bootstrap
@@ -5361,38 +5389,69 @@ task argument.
 
 **What touches disk.** The target assembly never touches disk. The
 bootstrap — a fixed, checked-in DLL — is written to `%TEMP%` with
-`FILE_FLAG_DELETE_ON_CLOSE` and is removed when the process exits.
-A defender who watches `%TEMP%` sees a small DLL appear and
-disappear; a defender who dumps process memory sees the target
-assembly's bytes, because that is where they live.
+`FILE_FLAG_DELETE_ON_CLOSE` and is removed when the worker process
+exits. The worker's output file is a small text file under the
+same temp directory; the beacon reads it and removes it when the
+task returns. A defender who watches `%TEMP%` during an
+`execute-assembly` invocation sees a small DLL and a small text
+file appear and disappear within the target's runtime.
+
+**The default staging path persists a copy of the beacon binary on disk.** `execute-assembly` needs a worker binary. The default is `%LOCALAPPDATA%\Microsoft\EdgeWebView\svc.exe`, a copy of the beacon staged on first use. That copy is a fully functional beacon binary — it inherits every build-time property of the original — but it never checks in, because the parent sets `TORNADO_WORKER=1` in the environment it spawns it with. An operator whose threat model includes a forensic capture of the host's `%LOCALAPPDATA%` tree should either stage a sacrificial binary at a path of their own choosing first and set `spawnto` to that path, or accept the artifact knowingly. There is no opt-out: the worker is always a separate file from the parent, because running the worker from the parent's own on-disk location makes the parent's binary vulnerable to anything the worker does.
+
+**Sacrificial process.** The binary the beacon spawns as the
+worker is controlled per-session by the `spawnto` verb:
+
+```
+● beacon#1001 > spawnto C:\Windows\System32\rundll32.exe
+spawnto=C:\Windows\System32\rundll32.exe
+
+● beacon#1001 > spawnto
+spawnto=C:\Windows\System32\rundll32.exe
+
+● beacon#1001 > spawnto --clear
+spawnto=<default>
+```
+
+The three values are distinct. `spawnto` with no argument reads the current state. `spawnto --clear` 
+(or `spawnto -`) reverts to the default worker path. `spawnto self` opts into the historical 
+self-spawn-from-original-binary behaviour — useful on hosts where `%LOCALAPPDATA%` is unwritable, 
+or when the operator wants no second on-disk artifact, but the worker then shares the parent's 
+on-disk file, which is the footgun the default exists to avoid.
+
+`<default>` means the worker is a copy of the beacon staged at
+`%LOCALAPPDATA%\Microsoft\EdgeWebView\svc.exe`, produced on first
+`execute-assembly` and re-staged whenever the file is missing. The
+operator does not need to set anything for that default. The value
+rides the HTTP/QUIC `X-Beacon-SpawnTo` response header, the
+WebSocket envelope's `scheduling` map, or a synthetic `spawnto`
+task on the DNS transport. It applies on the worker's next
+invocation, not on an already-running task.
 
 **Wire format:**
 
 ```
 {verb: "execute_assembly",
-args: [<b64_assembly>, "<entry_type>.<entry_method>", "<args>", <wait_seconds>]}
+args: [<b64_assembly>, "<args>"]}
 ```
 
 **Behaviour notes:**
 
-- **Entry point.** With no explicit entry type and method, the
-  loader invokes the assembly's declared `EntryPoint`. A target that
-  exposes a non-default entry can be addressed with the optional
-  fields; the Sharp* family all declare `Main(string[])` and work
-  with the default.
+- **Entry point.** The bootstrap invokes the assembly's declared
+  `EntryPoint`. The Sharp* family all declare `Main(string[])` and
+  work without any additional metadata.
 - **Argument passing.** Arguments after `--` are joined with spaces
   and handed to the target as a single-element `string[]`. The
   bootstrap also rewrites `Environment.CommandLine` before invoking,
   so CommandLineParser-based tools see the operator's arguments
-  rather than the beacon's.
+  rather than the worker's.
 - **Output capture.** The bootstrap redirects `Console.Out` and
-  `Console.Error` to a temp file the loader reads when
-  `ExecuteInDefaultAppDomain` returns. Output is capped at 4 MiB per
-  invocation.
+  `Console.Error` to a temp file. `AutoFlush = true` is set on the
+  writer so a target that calls `Environment.Exit` mid-run does not
+  lose its final lines. Output is capped at 4 MiB per invocation.
 - **AMSI.** `Assembly.Load(byte[])` is an AMSI trigger. The `opsec`
   profile patches `AmsiScanBuffer` in-process; that patch must run
-  before the `execute-assembly` task. The loader does not attempt a
-  bypass of its own.
+  in the worker before the `execute-assembly` loader reaches the
+  CLR. The loader does not attempt a bypass of its own.
 - **Donut.** Still supported for `--format shellcode` builds, where
   the assembly is wrapped into position-independent shellcode by
   Donut at build time and executed by the shellcode runner. The
@@ -5703,8 +5762,8 @@ The BOF's two `BeaconDataExtract` calls then read one string each.
 ### Windows-only execution
 
 BOF execution is a **Windows-only capability.** A COFF object is a
-Windows-native format; the Beacon API and the C# loader both depend
-on the Windows ABI. This is enforced at three layers:
+Windows-native format; the Beacon API and the Go COFF loader both
+depend on the Windows ABI. This is enforced at three layers:
 
 1. **Catalogue.** The `bof` entry carries `platforms: ['windows']`.
    When the operator client attaches to a Linux beacon, the server
@@ -5748,8 +5807,9 @@ to disk. On download, it opens the file, verifies the on-disk digest
 against the registry entry, and returns the bytes base64-encoded.
 
 Execution happens on the target, when the beacon's Go code hands the
-COFF to its embedded C# loader inside a PowerShell child process. The
-server has no path to that code.
+COFF to its in-process Go COFF loader. There is no PowerShell child,
+no `csc` invocation, no `Add-Type`, and no temp file on the target
+side. The server has no path to that code.
 
 ---
 
@@ -7476,6 +7536,15 @@ Response headers carry scheduling parameters:
 | `X-Beacon-Kill` | New kill deadline |
 | `X-Beacon-WorkStart` | Working-hours start (minutes) |
 | `X-Beacon-WorkEnd` | Working-hours end |
+| `X-Beacon-SpawnTo` | Path to the sacrificial process `execute-assembly` should spawn. Empty body value is never sent; the sentinel `-` clears a previously-set path and reverts to self-spawn. Absent header means the server has not pushed a value on this poll. |
+
+The WebSocket transport carries the same values inside the reply
+envelope's `scheduling` map under the keys `sleep`, `jitter`,
+`kill_deadline`, `work_start`, `work_end`, and `spawn_to`, because
+a WebSocket frame has no HTTP header layer. The DNS transport
+delivers the ones the agent supports as synthetic tasks — `sleep`,
+`workhours`, and `spawnto` — injected into the `/tasks` reply when
+the value changes.
 
 ### `POST /results` — upload output
 
@@ -7617,6 +7686,7 @@ socket. No `/bin/curl`, no `dig`, no `/bin/nc`.
 |------|-------------|
 | `sleep <N> [jitter]` | Update check-in interval |
 | `workhours <start> <end>` | Update working-hours window |
+| `spawnto <path>` | Update the sacrificial process used by `execute-assembly` (Windows). `spawnto -` clears the value and reverts to self-spawn |
 | `kill` / `exit` | Self-destruct |
 
 ### In-memory execution and transfer
@@ -7630,9 +7700,9 @@ These execute without a subprocess:
 | `readchunk <path> <off> <size>` | `os.Open` + `Seek` + `Read` |
 | `filesize <path>` | `os.Stat` |
 | `sha256file <path>` | streaming SHA-256 |
-| `execute_assembly <b64> <wait>` | RWX alloc + thread + pipe capture |
+| `execute_assembly <b64> <args>` | spawn sacrificial worker; worker hosts CLR, loads assembly with `Assembly.Load(byte[])`, captures stdout/stderr to a file the parent reads |
 | `execmem <path> <exe\|elf>` | platform-specific in-memory loader |
-| `bof <b64_coff> <entry> <b64_args>` | embedded COFF loader |
+| `bof <b64_coff> <entry> <b64_args>` | in-process Go COFF loader |
 | `migrate <--self\|pid\|name> [--method <name>]` | detach-spawn or foreign-process injection; `--method default\|apc` selects the injection backend (see [Migration](#migration)) |
 
 `exec` is the only verb that spawns a child process. `sh` routes a

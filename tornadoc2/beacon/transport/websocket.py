@@ -337,7 +337,8 @@ class WebSocketListener(BeaconListener):
                 ('X-Beacon-Jitter',    'jitter'),
                 ('X-Beacon-Kill',      'kill_deadline'),
                 ('X-Beacon-WorkStart', 'work_start'),
-                ('X-Beacon-WorkEnd',   'work_end')):
+                ('X-Beacon-WorkEnd',   'work_end'),
+                ('X-Beacon-SpawnTo',   'spawn_to')):
             v = resp.headers.get(hdr, '')
             if v:
                 scheduling[key] = v

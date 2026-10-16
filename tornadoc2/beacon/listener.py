@@ -786,6 +786,8 @@ class BeaconListener(Transport):
 
             resp.headers['X-Beacon-WorkStart'] = str(session.work_hours_start)
             resp.headers['X-Beacon-WorkEnd'] = str(session.work_hours_end)
+            resp.headers['X-Beacon-SpawnTo'] = (
+                getattr(session, 'spawn_to', '') or '-')
         opts = self._options_for_path(request.path)
         for _k, _v in opts['response_headers'].items():
             resp.headers[_k] = _v

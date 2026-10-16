@@ -59,6 +59,7 @@ class BeaconSession:
         self._confirmed_sleep: int = self.sleep_interval
         self.work_hours_start: int = 480    # 08:00
         self.work_hours_end:   int = 1140   # 19:00
+        self.spawn_to: str = ''
         _ws = identity.get('work_start')
         _we = identity.get('work_end')
         if _ws is not None and _we is not None:
@@ -76,6 +77,7 @@ class BeaconSession:
             round(self.jitter, 4),
             self.work_hours_start,
             self.work_hours_end,
+            self.spawn_to or '',
         )
 
         self.task_queue: queue.Queue = queue.Queue(

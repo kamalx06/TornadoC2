@@ -733,10 +733,10 @@ class BeaconEngine:
         Called by header-less transports (DNS) on every /tasks
         poll, because those transports cannot carry the
         X-Beacon-Sleep / X-Beacon-Jitter / X-Beacon-WorkStart /
-        X-Beacon-WorkEnd headers the HTTP transport pushes on
-        every response. Tasks are signed with the same signer the
-        ordinary task queue uses, so the agent's signature check
-        accepts them.
+        X-Beacon-WorkEnd / X-Beacon-SpawnTo headers the HTTP,
+        QUIC, and WebSocket transports push on every response.
+        Tasks are signed with the same signer the ordinary task
+        queue uses, so the agent's signature check accepts them.
 
         Kill-deadline changes cannot be propagated this way — the
         agent has no verb for it and the HTTP path delivers it
@@ -751,6 +751,7 @@ class BeaconEngine:
             round(session.jitter, 4),
             session.work_hours_start,
             session.work_hours_end,
+            getattr(session, 'spawn_to', '') or '',
         )
 
         if not hasattr(session, '_last_pushed_schedule'):
@@ -779,6 +780,9 @@ class BeaconEngine:
             pairs.append(('sleep',
                           [str(current[0]),
                            f'{current[1]:.4f}']))
+
+        if prev[4] != current[4]:
+            pairs.append(('spawnto', [current[4] or '-']))
 
         out = []
         for verb, args in pairs:

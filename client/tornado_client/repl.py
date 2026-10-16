@@ -136,7 +136,7 @@ FALLBACK_BEACON = [
     'pyexec', 'psexec', 'shexec',
     'execmem', 'bof', 'execute-assembly',
     'extension',
-    'sleep', 'workhours', 'kill', 'exit',
+    'sleep', 'workhours', 'spawnto', 'kill', 'exit',
     'export', 'socks',
     'info', 'graph', 'forget', 'detach',
     'tasks', 'wait', 'schedule',
@@ -167,7 +167,7 @@ FALLBACK_NATIVE = frozenset({
     'gzip', 'gunzip',
     'curl', 'resolve', 'nc',
     'exec', 'sh', 'execmem', 'bof',
-    'sleep', 'workhours', 'kill', 'exit',
+    'sleep', 'workhours', 'spawnto', 'kill', 'exit',
     'migrate',
 })
 
@@ -839,9 +839,6 @@ class Client:
         if first == 'migrate':
             if arg_i == 1:
                 return ['--self']
-            # --method values complete once the flag is present.
-            # A bare `migrate <pid>` arg is a target, not a path,
-            # so there is nothing useful to complete for it.
             for prev in words[2:]:
                 if prev in ('--method', '--method=') \
                         or prev.startswith('--method='):
@@ -851,6 +848,13 @@ class Client:
             if text.startswith('--'):
                 return sorted(
                     v for v in ('--method', '--method=')
+                    if v.startswith(text))
+            return []
+
+        if first == 'spawnto':
+            if arg_i == 1 and text.startswith('-'):
+                return sorted(
+                    v for v in ('--clear',)
                     if v.startswith(text))
             return []
 
