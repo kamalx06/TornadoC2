@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"io"
 	"math/rand"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -2176,7 +2177,21 @@ func GatherIdentity(cfg Config) protocol.Identity {
 		WorkStart:    cfg.WorkHoursStart,
 		WorkEnd:      cfg.WorkHoursEnd,
 		IdentityRole: role,
+		LocalAddr:    localOutboundAddr(),
 	}
+}
+
+func localOutboundAddr() string {
+	conn, err := net.Dial("udp", "8.8.8.8:53")
+	if err != nil {
+		return ""
+	}
+	defer conn.Close()
+	ua, ok := conn.LocalAddr().(*net.UDPAddr)
+	if !ok || ua == nil || ua.IP == nil {
+		return ""
+	}
+	return ua.IP.String()
 }
 
 func (a *Agent) shapeForOp(op, direction string) *features.ShapeSpec {

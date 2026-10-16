@@ -673,7 +673,9 @@ class BeaconListener(Transport):
                     child_fp[:16], computed[:16])
                 return Response(status=400)
 
-        payload['addr'] = request.remote_addr
+        _ident = payload.get('identity') or {}
+        payload['addr'] = (_ident.get('local_addr')
+                           or request.remote_addr)
         if child_fp:
             parent_sid = self._session_id()
             parent_session = (

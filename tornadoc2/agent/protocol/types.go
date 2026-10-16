@@ -12,6 +12,7 @@ type Identity struct {
 	WorkEnd   int    `json:"work_end"`
 	Stager    bool   `json:"stager,omitempty"`
 	IdentityRole string `json:"identity_role,omitempty"`
+	LocalAddr string `json:"local_addr,omitempty"`
 }
 
 type CheckinRequest struct {
