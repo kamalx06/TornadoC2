@@ -77,6 +77,35 @@ def clear_state():
     save_state({'state': STATE_IDLE})
 
 
+def record_apply(previous_revision, new_revision):
+    """Persist the last successfully applied update.
+
+    Written after the merge succeeds and validation passes. This
+    is what `update rollback` reverts to. Not cleared by
+    clear_state — the record survives across runs so rollback
+    always has a target.
+    """
+    current = load_state()
+    current['last_apply'] = {
+        'previous_revision': previous_revision,
+        'new_revision': new_revision,
+        'applied_at': _utc_now(),
+    }
+    save_state(current)
+
+
+def get_last_apply():
+    """Return the last-apply record, or None if no successful
+    update has been recorded on this installation."""
+    state = load_state()
+    record = state.get('last_apply')
+    if not isinstance(record, dict):
+        return None
+    if not record.get('previous_revision'):
+        return None
+    return record
+
+
 def is_interrupted_state(state):
     return state.get('state') in {
         STATE_PREPARING, STATE_APPLYING, STATE_VALIDATING,

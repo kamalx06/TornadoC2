@@ -103,13 +103,33 @@ def verify_trusted_branch(repo_root, run_git):
 
 
 def check_working_tree(repo_root, run_git):
+    """Inspect the working tree for local modifications.
+
+    Only tracked changes refuse the update. Untracked files are
+    allowed — they are the runtime state the tool creates at first
+    run (.keys/, logs/, team_ca/, mtls_certs/, ...) plus anything
+    the operator has staged locally. Git's own fast-forward check
+    refuses if an incoming commit would overwrite an untracked
+    file, so this check does not need to duplicate that safety
+    gate.
+
+    Returns (clean, status_lines) where status_lines is the
+    filtered porcelain output for tracked changes only.
+    """
     result = run_git('status', '--porcelain', cwd=repo_root)
     if result.returncode != 0:
         return False, [result.stderr.strip() or 'git status failed']
 
-    lines = [line for line in result.stdout.splitlines() if line.strip()]
-    if lines:
-        return False, lines
+    tracked_changes = []
+    for line in result.stdout.splitlines():
+        if not line.strip():
+            continue
+        if line.startswith('??'):
+            continue
+        tracked_changes.append(line)
+
+    if tracked_changes:
+        return False, tracked_changes
 
     git_dir_result = run_git('rev-parse', '--git-dir', cwd=repo_root)
     if git_dir_result.returncode != 0:

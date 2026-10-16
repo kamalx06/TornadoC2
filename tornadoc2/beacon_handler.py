@@ -4674,6 +4674,10 @@ class BeaconHandler:
                           Restarts the handler on success — every
                           active beacon, SOCKS proxy, and tunnel
                           is terminated.
+  update rollback         Revert to the previous successfully
+                          applied revision. Requires a prior
+                          successful `update` on this installation.
+                          Restarts the handler on success.
   audit [tail N] [operator NAME] [action VERB] [beacon ID] [denied] [full]
                           Inspect the audit log (team server)
   audit verify            Verify the hash chain

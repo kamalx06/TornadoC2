@@ -4669,6 +4669,7 @@ server cleaned up the staged build
 | `beacon-build -c <file>` | Compile from a JSON build config |
 | `beacon-rm <ID>` / `beacon-forget <ID>` | Forget a session |
 | `update` | Check for and apply updates from the official repository |
+| `update rollback` | Revert to the previous successfully applied revision |
 | `operator list\|add\|remove\|set-role\|passwd\|export` | Manage team server operators locally |
 | `deadman status\|arm\|arm-until\|reset\|disable\|warn\|halt\|shred` | Inspect or reconfigure the auto-shutdown watchdog |
 | `halt [--force] [shutdown\|reboot]` | Run the shutdown sequence now |
@@ -7989,7 +7990,7 @@ process. Consequences:
   git tree, so the update does not invalidate any deployed agent's
   embedded public key.
 
-### Rollback
+### Automatic rollback
 
 A failed validation rolls back automatically:
 
@@ -8005,6 +8006,67 @@ profile, a hand-staged payload — survive the round trip. The
 previous revision is verified after the checkout, and a rollback
 that does not land on the expected revision is reported as a
 rollback failure.
+
+### Manual rollback
+
+`update rollback` reverts the installation to the revision that
+was current before the last successful `update` ran. It exists so
+an operator can move off a bad update that passed validation but
+did not work in practice — a protocol regression, a broken
+config, a bug that only shows up at runtime.
+
+```
+beacon> update rollback
+Rolling back from c4d5e6f to 8f3a1b2 (applied 2026-10-16 14:32:11).
+Every listener is stopped, the handler exits, and the process is
+replaced with the previous revision. Deployed beacons reattach on
+their next poll.
+Proceed with rollback? [y/N]: y
+Rolled back to 8f3a1b2. Restarting TornadoC2...
+```
+
+**Where the target comes from.** The updater records the previous
+revision into `logs/.update/state.json` under a `last_apply` key
+each time an update succeeds. `update rollback` reads that key and
+reverts to the recorded `previous_revision`. The record is not
+cleared by a successful update, so it survives across runs until it
+is used.
+
+**One rollback per update.** A second `update rollback` after the
+first finds no recorded target and refuses:
+
+```
+No successful update has been recorded on this installation
+— nothing to roll back to.
+```
+
+
+That is deliberate. A rollback moves the installation back exactly
+one step. To go further, use `git checkout <sha>` manually, or run
+an update and then roll back again.
+
+**Preconditions.** The rollback path enforces the same two gates
+the update path does:
+
+- The repository must be on `main`. A feature branch refuses.
+- The tracked working tree must be clean. Untracked files are
+  ignored, matching the update path.
+
+**Failure handling.** If the reset succeeds but the post-rollback
+validation fails — a missing file, a Python syntax error, an
+import failure — the installation is left at the previous revision
+and the failure is printed. The `last_apply` record is preserved so
+the operator can retry once the environment issue is resolved.
+
+**Audit.** Every rollback writes to `logs/updater.log`:
+
+```
+UPDATE_ROLLBACK_STARTED current_revision=c4d5e6f... target_revision=8f3a1b2...
+UPDATE_ROLLBACK result=success target_revision=8f3a1b2... previous_revision=c4d5e6f...
+```
+
+A refused rollback — no record, dirty tree, wrong branch — writes
+`UPDATE_ROLLBACK_ABORTED` with the reason.
 
 ### What the command does not do
 

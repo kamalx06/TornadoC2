@@ -30,9 +30,12 @@ from .update_state import (
     STATE_VALIDATING,
     begin_update,
     clear_state,
+    get_last_apply,
     is_interrupted_state,
     load_state,
+    record_apply,
     rollback_to_revision,
+    save_state,
     set_state,
 )
 from .update_validate import validate_installation
@@ -267,7 +270,12 @@ class Updater:
     def handle_command(self, cmd_parts):
         if not cmd_parts or cmd_parts[0].lower() != 'update':
             return False
-        self.run_update()
+        sub = (cmd_parts[1].lower() if len(cmd_parts) > 1
+               else 'apply')
+        if sub in ('rollback', 'revert'):
+            self.run_rollback()
+        else:
+            self.run_update()
         return True
 
     def _print_error(self, message):
@@ -444,46 +452,82 @@ class Updater:
                     )
                 )
 
+                # ---- Update summary ---------------------------------
+                print()
+                print(f"{colors['yellow']}{'═' * 62}{colors['end']}")
                 print(
-                    f"{colors['yellow']}An update is available for "
-                    f"TornadoC2.{colors['end']}"
+                    f"{colors['yellow']}{colors['bold']}"
+                    f"  An update is available for TornadoC2."
+                    f"{colors['end']}"
                 )
-                print(
-                    f"Source:         {OFFICIAL_REPO_URL} "
-                    f"({OFFICIAL_BRANCH})"
-                )
-                print(
-                    f"Current commit: "
-                    f"{_short_revision(previous_revision)}"
-                )
-                print(
-                    f"Target commit:  "
-                    f"{_short_revision(target_revision)}"
-                )
-                print(f"Commits:        {commit_count}")
+                print(f"{colors['yellow']}{'═' * 62}{colors['end']}")
+                print()
+                print(f"  Source:         {OFFICIAL_REPO_URL} "
+                      f"({OFFICIAL_BRANCH})")
+                print(f"  Current commit: "
+                      f"{_short_revision(previous_revision)}")
+                print(f"  Target commit:  "
+                      f"{_short_revision(target_revision)}")
+                print(f"  Commits:        {commit_count}")
                 if shortstat:
-                    print(f"Changes:        {shortstat}")
+                    print(f"  Changes:        {shortstat}")
                 if commits:
-                    print('Summary:')
+                    print()
+                    print('  Summary:')
                     for entry in commits:
-                        print(f"  {entry}")
+                        print(f"    {entry}")
 
                 if diverged:
                     print()
                     self._print_warning(DIVERGED_FORK_HEADER)
 
-                print(
-                    f"{colors['yellow']}Updating will restart "
-                    f"TornadoC2 and terminate all active beacon "
-                    f"sessions, SOCKS proxies, tunnels, and other "
-                    f"runtime state.{colors['end']}"
-                )
+                # ---- Warning box ------------------------------------
+                print()
+                print(f"{colors['red']}{colors['bold']}"
+                      f"{'!' * 62}{colors['end']}")
+                print(f"{colors['red']}{colors['bold']}"
+                      f"!!{' ' * 58}!!{colors['end']}")
+                print(f"{colors['red']}{colors['bold']}"
+                      f"!!{' ' * 20}W A R N I N G{' ' * 21}!!"
+                      f"{colors['end']}")
+                print(f"{colors['red']}{colors['bold']}"
+                      f"!!{' ' * 58}!!{colors['end']}")
+                print(f"{colors['red']}{colors['bold']}"
+                      f"{'!' * 62}{colors['end']}")
+                print()
+                print(f"{colors['yellow']}  Applying this update will:"
+                      f"{colors['end']}")
+                print()
+                print(f"{colors['yellow']}    - Stop every active "
+                      f"listener{colors['end']}")
+                print(f"{colors['yellow']}    - Terminate all live "
+                      f"beacon sessions{colors['end']}")
+                print(f"{colors['yellow']}    - Close every SOCKS proxy "
+                      f"and tunnel{colors['end']}")
+                print(f"{colors['yellow']}    - Restart the TornadoC2 "
+                      f"handler process{colors['end']}")
+                print()
+                print(f"{colors['cyan']}  Deployed beacons reconnect on "
+                      f"their next poll with the same session IDs, "
+                      f"cookies, and queued tasks. No deployed agent "
+                      f"needs to be rebuilt.{colors['end']}")
+                print()
+                print(f"{colors['yellow']}  The signing keys, the team "
+                      f"CA, the audit chain, the credential vault, and "
+                      f"every staged payload are preserved across the "
+                      f"restart.{colors['end']}")
+                print()
+                print(f"{colors['red']}{colors['bold']}"
+                      f"{'!' * 62}{colors['end']}")
+                print()
 
+                # ---- Prompt -----------------------------------------
                 apply_method = 'merge'
                 if diverged:
                     try:
                         answer = input(
-                            f"{colors['red']}{DIVERGED_FORK_PROMPT}"
+                            f"{colors['red']}"
+                            f"{DIVERGED_FORK_PROMPT}"
                             f"{colors['end']}"
                         ).strip()
                     except (EOFError, KeyboardInterrupt):
@@ -507,7 +551,8 @@ class Updater:
                 else:
                     try:
                         answer = input(
-                            f"{colors['cyan']}Proceed with update? "
+                            f"{colors['cyan']}{colors['bold']}"
+                            f"Do you want to apply this update now? "
                             f"[y/N]: {colors['end']}"
                         ).strip().lower()
                     except (EOFError, KeyboardInterrupt):
@@ -647,6 +692,10 @@ class Updater:
 
                 set_state(
                     STATE_COMPLETED, validation_result='success')
+                record_apply(
+                    previous_revision=previous_revision,
+                    new_revision=target_revision,
+                )
                 self._print_success(UPDATE_SUCCESS_MSG)
                 self.audit.log(
                     'UPDATE_COMPLETED',
@@ -694,5 +743,219 @@ class Updater:
                 )
                 if rolled_back:
                     set_state(STATE_ROLLED_BACK)
+        finally:
+            self._busy = False
+
+    def run_rollback(self):
+        """Revert to the previous successfully applied revision.
+
+        Uses the record written by ``record_apply`` at the end of a
+        successful update. Refuses when no successful update has
+        ever been recorded on this installation — there is nothing
+        to revert to.
+        """
+        if self._busy:
+            self._print_warning('Update already in progress.')
+            return
+
+        colors = self.h.colors
+        self._busy = True
+
+        try:
+            with UpdateLock():
+                last = get_last_apply()
+                if last is None:
+                    self._print_warning(
+                        'No successful update has been recorded on '
+                        'this installation — nothing to roll back '
+                        'to.'
+                    )
+                    self.audit.log(
+                        'UPDATE_ROLLBACK_ABORTED',
+                        reason='no_last_apply_record',
+                    )
+                    return
+
+                previous_revision = last.get('previous_revision')
+                if not previous_revision:
+                    self._print_warning(
+                        'The last-apply record is incomplete.')
+                    self.audit.log(
+                        'UPDATE_ROLLBACK_ABORTED',
+                        reason='incomplete_record',
+                    )
+                    return
+
+                repo_root = get_repo_root()
+                if not repo_root or not is_git_repo(repo_root):
+                    self._print_warning(NOT_GIT_REPO_MSG)
+                    self.audit.log(
+                        'UPDATE_ROLLBACK_ABORTED',
+                        reason='not_git_repo',
+                    )
+                    return
+
+                head = self._run_git(
+                    'rev-parse', 'HEAD', cwd=repo_root)
+                if head.returncode != 0:
+                    self._print_error(
+                        _git_error(
+                            head,
+                            'Unable to read current revision',
+                        )
+                    )
+                    self.audit.log(
+                        'UPDATE_ROLLBACK_ABORTED',
+                        reason='read_current_revision_failed',
+                    )
+                    return
+                current_revision = head.stdout.strip()
+
+                if current_revision == previous_revision:
+                    self._print_info(
+                        f'Already at '
+                        f'{_short_revision(previous_revision)} '
+                        f'— nothing to roll back to.'
+                    )
+                    return
+
+                clean, status_lines = check_working_tree(
+                    repo_root, self._run_git)
+                if not clean:
+                    self._print_error(
+                        _format_dirty_tree_message(status_lines))
+                    self.audit.log(
+                        'UPDATE_ROLLBACK_ABORTED',
+                        reason='dirty_working_tree',
+                    )
+                    return
+
+                self._print_warning(
+                    f'Rolling back from '
+                    f'{_short_revision(current_revision)} to '
+                    f'{_short_revision(previous_revision)} '
+                    f'(applied {last.get("applied_at", "?")}).'
+                )
+                self._print_warning(
+                    'Every listener is stopped, the handler exits, '
+                    'and the process is replaced with the previous '
+                    'revision. Deployed beacons reattach on their '
+                    'next poll.'
+                )
+                try:
+                    ans = input(
+                        f"{colors['cyan']}Proceed with rollback? "
+                        f"[y/N]: {colors['end']}"
+                    ).strip().lower()
+                except (EOFError, KeyboardInterrupt):
+                    print()
+                    self._print_warning('Rollback cancelled.')
+                    self.audit.log(
+                        'UPDATE_ROLLBACK_ABORTED',
+                        reason='operator_cancelled',
+                    )
+                    return
+                if ans not in ('y', 'yes'):
+                    self._print_warning('Rollback cancelled.')
+                    self.audit.log(
+                        'UPDATE_ROLLBACK_ABORTED',
+                        reason='operator_declined',
+                    )
+                    return
+
+                self.audit.log(
+                    'UPDATE_ROLLBACK_STARTED',
+                    current_revision=current_revision,
+                    target_revision=previous_revision,
+                )
+
+                set_state(STATE_ROLLING_BACK)
+                rolled_back, detail = rollback_to_revision(
+                    repo_root, previous_revision, self._run_git)
+                if not rolled_back:
+                    set_state(
+                        STATE_FAILED,
+                        failure_reason=detail,
+                    )
+                    self._print_error(
+                        f'Rollback failed: {detail}')
+                    self.audit.log(
+                        'UPDATE_ROLLBACK',
+                        result='failure',
+                        detail=detail,
+                        target_revision=previous_revision,
+                    )
+                    return
+
+                ok, vdetail = validate_installation(repo_root)
+                self.audit.log(
+                    'UPDATE_ROLLBACK_VALIDATION',
+                    result='success' if ok else 'failure',
+                    detail=vdetail,
+                )
+                if not ok:
+                    set_state(
+                        STATE_FAILED,
+                        failure_reason=vdetail,
+                    )
+                    self._print_error(
+                        f'Rollback landed at the previous revision '
+                        f'but validation failed: {vdetail}'
+                    )
+                    self.audit.log(
+                        'UPDATE_ROLLBACK',
+                        result='validation_failed',
+                        target_revision=previous_revision,
+                        detail=vdetail,
+                    )
+                    return
+
+                set_state(
+                    STATE_COMPLETED,
+                    validation_result='success',
+                )
+                state = load_state()
+                state.pop('last_apply', None)
+                save_state(state)
+
+                self._print_success(
+                    f'Rolled back to '
+                    f'{_short_revision(previous_revision)}. '
+                    f'Restarting TornadoC2...'
+                )
+                self.audit.log(
+                    'UPDATE_ROLLBACK',
+                    result='success',
+                    target_revision=previous_revision,
+                    previous_revision=current_revision,
+                )
+                clear_state()
+                sys.stdout.flush()
+                try:
+                    self.h.shutdown_for_restart()
+                    _restart_process()
+                except Exception as exc:
+                    self._print_error(
+                        f'Failed to restart TornadoC2: {exc}')
+                    self.audit.log(
+                        'UPDATE_ROLLBACK_ABORTED',
+                        reason='restart_failure',
+                        detail=str(exc),
+                    )
+
+        except UpdateLockError as exc:
+            self._print_warning(str(exc))
+            self.audit.log(
+                'UPDATE_ROLLBACK_ABORTED',
+                reason='lock_acquisition_failure',
+            )
+        except Exception as exc:
+            self._print_error(
+                f'Unexpected rollback failure: {exc}')
+            self.audit.log(
+                'UPDATE_ROLLBACK_ABORTED',
+                reason='unexpected_exception',
+                detail=str(exc),
+            )
         finally:
             self._busy = False
