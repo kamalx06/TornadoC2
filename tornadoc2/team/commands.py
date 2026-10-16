@@ -87,6 +87,14 @@ COMMANDS = [
         'category': None, 'scope': 'main', 'native': False,
     },
     {
+        'name': 'jobs', 'args': '[kill <id>]',
+        'description': 'list active background transfers '
+                       '(upload / download); `jobs kill <id>` '
+                       'cancels one',
+        'capability': None,
+        'category': None, 'scope': 'main', 'native': False,
+    },
+    {
         'name': 'build', 'args': '[-c <file>]',
         'description': 'compile an agent on the server',
         'capability': 'beacon.build',
@@ -511,7 +519,17 @@ COMMANDS = [
      'category': 'EXECUTION',
      'scope': 'beacon', 'native': True,
      'platforms': ['windows']},
-
+    {'name': 'shell',
+     'args': '[start | stop | status | exec <cmd>]',
+     'description': 'Interactive shell on the target. Holds a '
+                    'persistent /bin/sh or cmd.exe open across '
+                    'check-ins so state (cd, env, shell vars) '
+                    'persists between commands. Bad opsec — the '
+                    'client warns before starting one.',
+     'capability': 'beacon.use',
+     'category': 'EXECUTION',
+     'scope': 'beacon', 'native': False,
+     'client_op': 'shell'},
     # ---- Scheduling ------------------------------------------------
     {'name': 'sleep', 'args': '[N] [jitter]',
      'description': 'Change check-in interval',
@@ -604,16 +622,19 @@ COMMANDS = [
 
     # ---- File transfer ---------------------------------------------
     {'name': 'upload', 'args': '<local> <remote>',
-     'description': 'Chunked upload with SHA-256 verify',
+     'description': 'Chunked upload with SHA-256 verify. Runs in '
+                    'the background; the prompt stays live. Use '
+                    '`jobs` to check status.',
      'capability': 'beacon.use',
      'category': 'FILE TRANSFER',
      'scope': 'beacon', 'native': False,
      'client_op': 'upload'},
     {'name': 'download',
      'args': '<remote> <local> [--no-loot]',
-     'description': 'Chunked download with SHA-256 verify; '
-                    'also stores to loot (pass --no-loot for a '
-                    'private pull)',
+     'description': 'Chunked download with SHA-256 verify; also '
+                    'stores to loot (pass --no-loot for a private '
+                    'pull). Runs in the background; the prompt '
+                    'stays live. Use `jobs` to check status.',
      'capability': 'beacon.use',
      'category': 'FILE TRANSFER',
      'scope': 'beacon', 'native': False,
@@ -724,9 +745,10 @@ COMMANDS = [
      'platforms': ['windows']},
     {'name': 'hashdump', 'args': '[<outdir>]',
      'description': 'Windows: read SAM + SYSTEM hives, decrypt '
-                    'locally with secretsdump. Linux: merge '
-                    '/etc/passwd and /etc/shadow into unshadow(8) '
-                    'format.',
+                    'locally with secretsdump (any installed '
+                    'form) or the built-in native parser. Linux: '
+                    'merge /etc/passwd and /etc/shadow into '
+                    'unshadow(8) format.',
      'capability': 'beacon.use',
      'category': 'SESSION TOOLS',
      'scope': 'beacon', 'native': False,

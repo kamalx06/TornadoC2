@@ -34,11 +34,50 @@ namespace TornadoBootstrap
                 : Encoding.UTF8.GetString(argBytes);
 
             Assembly asm;
-            try { asm = Assembly.Load(asmBytes); }
-            catch (Exception) { return 2; }
+            try
+            {
+                asm = Assembly.Load(asmBytes);
+            }
+            catch (Exception ex)
+            {
+                // Best-effort: write the reason to the capture
+                // file before returning. The loader will read the
+                // file on the parent side regardless of the
+                // bootstrap's return code, so this is what the
+                // operator sees next to exit 2.
+                try
+                {
+                    if (!string.IsNullOrEmpty(outputPath))
+                    {
+                        System.IO.File.AppendAllText(
+                            outputPath,
+                            "[bootstrap] Assembly.Load failed: " +
+                            ex.GetType().Name + ": " +
+                            ex.Message + Environment.NewLine);
+                    }
+                }
+                catch { /* nothing more to try */ }
+                return 2;
+            }
 
             MethodInfo entry = asm.EntryPoint;
-            if (entry == null) return 3;
+            if (entry == null)
+            {
+                try
+                {
+                    if (!string.IsNullOrEmpty(outputPath))
+                    {
+                        System.IO.File.AppendAllText(
+                            outputPath,
+                            "[bootstrap] assembly has no declared " +
+                            "entry point; the loader needs an " +
+                            "explicit type and method, or a Donut-" +
+                            "wrapped build." + Environment.NewLine);
+                    }
+                }
+                catch { }
+                return 3;
+            }
 
             string[] argv = string.IsNullOrEmpty(argsString)
                 ? new string[0]

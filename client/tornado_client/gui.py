@@ -3935,16 +3935,38 @@ class GuiApp(QMainWindow):
                 f'background: transparent;')
 
     def _update_input_state(self) -> None:
-        if self._on_chat_tab():
-            self.input_entry.setEnabled(True)
-            return
-        self.input_entry.setEnabled(not self._busy)
+        """Keep the input bar enabled at all times.
+
+        The input used to be disabled while `_busy` was set —
+        again matching the Tk version rather than the CLI.
+        Since submission is now always accepted (see
+        `_submit`), disabling the widget only hides the
+        operator's ability to queue a follow-up command.
+        The status bar still reports the worker's state for
+        anyone who wants to know; the input itself is always
+        usable.
+        """
+        self.input_entry.setEnabled(True)
 
     def _submit(self, line: str) -> None:
-        if self._busy:
-            self._log('(a command is already running — wait for it)',
-                      'warn')
-            return
+        """Queue a command for the worker thread.
+
+        Submission is always accepted. The queue behind the
+        worker is unbounded and processes in FIFO order, so
+        there is no correctness reason to refuse a command
+        while another is running. The CLI behaves the same
+        way: `_dispatch_task` returns as soon as the task is
+        acked by the server, and the operator can type the
+        next command immediately. Blocking submission here
+        made the GUI feel slower than the CLI for no gain.
+
+        The worker thread still processes one item at a time,
+        so a slow blocking verb (`execute-assembly`,
+        `hashdump`, a large `upload`) delays the queued
+        follow-ups. The status bar's pending indicator is
+        what tells the operator work is backed up; the input
+        stays open regardless.
+        """
         self._command_q.put(('line', line))
 
     # ==================================================================
@@ -4000,6 +4022,7 @@ class GuiApp(QMainWindow):
         self._busy = busy
         try:
             self._update_input_state()
+            self._update_status()
         except Exception:
             pass
         if not busy and not self._on_chat_tab():
@@ -4411,13 +4434,19 @@ class GuiApp(QMainWindow):
                     state = 'alive' if b.get('alive') else 'stale'
                     sleep = b.get('sleep_interval', 0)
                     break
-            pending = 0
+            onwire = 0
             if getattr(c, '_result_poller', None) is not None:
                 try:
-                    pending = c._result_poller.pending_count()
+                    onwire = c._result_poller.pending_count()
                 except Exception:
-                    pending = 0
-            note = f"  ·  {pending} pending" if pending else ""
+                    onwire = 0
+            queued = self._command_q.qsize()
+            notes = []
+            if onwire:
+                notes.append(f"{onwire} on wire")
+            if queued:
+                notes.append(f"{queued} queued")
+            note = ("  ·  " + "  ·  ".join(notes)) if notes else ""
             self._status(
                 f"beacon #{bid}  ·  {state}  ·  sleep={sleep}s{note}")
         else:

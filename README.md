@@ -306,6 +306,22 @@ The rest of this document describes how it works. This section describes why it 
   PowerShell, no `Add-Type`. `runas` is an EXECUTION-category verb
   and forks by design; that is the same category `exec` and `sh`
   already live in.
+- **Persistent interactive shell.** The `shell` verb holds a
+  `/bin/sh` (Linux) or `cmd.exe` (Windows) alive on the target
+  between check-ins, so state set by one command — `cd`, `export`,
+  shell variables, an open file descriptor inherited into a
+  subcommand — persists into the next. This is a **deliberately
+  high-signal verb**: a long-lived child process is exactly what a
+  process-creation monitor and a behavioural EDR heuristic watch
+  for. The client warns and asks for confirmation before dispatching
+  the first `shell start`, and the operator can decline. `sh <cmd>`
+  remains the recommended form for one-off commands; `shell` exists
+  for the sessions where state persistence is worth the exposure.
+  Sub-verbs: `shell start`, `shell stop`, `shell status`,
+  `shell exec <cmd>`, and bare `shell` for an interactive loop that
+  prompts once and then stays in the operator's console. The shell
+  dies with the beacon on `kill`, kill-deadline, or reboot; it does
+  not survive `migrate`.
 - **Chunked file transfer** with SHA-256 verification.
 - **In-memory PE (Windows) and ELF (Linux) execution.**
 - **In-memory .NET assembly execution** (`execute-assembly`) on
@@ -392,7 +408,7 @@ BOF and .NET assembly execution are Windows-only.
 | **Wire protocol** | Three endpoints: `POST /beacon`, `GET /tasks`, `POST /results` · Plus `/stage/<name>` for stager payload delivery · JSON bodies with base64 for binary fields · Cookie-based session tokens with HMAC proof · Response padding to random bucket sizes |
 | **Native execution** | `cat`, `ls`, `find`, `grep`, `head`, `tail`, `stat`, `strings`, `hexdump`, `sha1`, `sha256`, `md5`, `cksum`, `wc`, `nl`, `rev`, `sort`, `uniq`, `tr`, `base64`, `gzip`, `gunzip`, `which`, `readlink`, `realpath`, `du`, `ps`, `id`, `env`, `pwd`, `whoami` (with `/priv` on Windows), `hostname`, `uname`, `df`, `uptime`, `date`, `getpid`, `getppid`, `ifconfig`, `netstat`, `arp`, `route`, `users`, `groups`, `av-list`, `screenshot`, `mkdir`, `rm`, `cp`, `mv`, `chmod`, `ln`, `touch`, `curl`, `resolve`, `nc`, `hashdump`, `enablepriv`, `lsassdump` execute in-process · `readfile` as an alias for `cat` · Windows identity: `make_token` builds a NEW_CREDENTIALS token and holds it for subsequent `exec`; `rev2self` drops it; `runas` spawns a child in a fresh logon session under supplied credentials |
 | **Network verbs (in-process)** | `curl` — HTTP/HTTPS client with `-X`, `-H`, `-d`, `-k`, `-i`, `-L`, `-o`, `-m`, `--max-size` · `resolve` — DNS lookups for A, AAAA, CNAME, MX, NS, TXT, PTR · `nc` — TCP connect/banner grab with `-z`, `-w`, `--send` · No `/bin/curl`, no `dig`, no `/bin/nc` |
-| **Command execution** | `exec` spawns a child process · `sh` routes a command through a stdin-piped shell so the command never appears in argv |
+| **Command execution** | `exec` spawns a child process · `sh` routes a command through a stdin-piped shell so the command never appears in argv · `shell` holds a `/bin/sh` (Linux) or `cmd.exe` (Windows) alive across check-ins so `cd`, `env`, and shell variables persist between commands. **Bad opsec** — the client warns and confirms before starting one. `sh` is the recommended form for one-off commands; `shell` is for sessions where state persistence is worth a long-lived child process on the target |
 | **In-memory payloads** | `execmem <path> exe` on Windows — in-process Go PE loader: maps the image, resolves imports, applies base relocations, walks the TLS directory, executes the entry point; no PowerShell, no temp file · `execmem <path> elf` on Linux (`memfd_create`, `/dev/shm` fallback) · `execute-assembly <local.exe>` runs a .NET assembly by spawning a **sacrificial worker process**. The worker hosts the CLR, loads the target with `Assembly.Load(byte[])`, and captures stdout/stderr. When the target calls `Environment.Exit` — the Sharp* family does, at the end of `Main` — the worker dies and the beacon survives. Only a fixed, non-secret bootstrap touches disk, and only under `%TEMP%` with `FILE_FLAG_DELETE_ON_CLOSE`. The sacrificial binary is settable per-session with the `spawnto` verb; the default is a fresh copy of the beacon binary · On-disk source unlinked before invocation on every path |  
 | **Inline scripts** | `pyexec`, `psexec`, `shexec` deliver script source base64-encoded in the task and pipe it to `python3 -`, `powershell.exe -Command -`, or `/bin/sh -s` via stdin · Source never appears in argv · `--stdin` variant reads the source from the operator's terminal in paste mode |
 | **BOF / COFF** | Windows-only execution · `bofs` (main-scope) manages the **shared server-side registry** — `list`, `add`, `remove` · `bof` (beacon-scope) runs a registered BOF by name, or a local `.o` file by path · Arguments packed according to the BOF's declared `bof_pack` format when one is registered, falling back to a single space-joined `z` string · The registry is persisted to `logs/.tornadoc2_bofs.json`, with raw COFF bytes under `bofs/<name>.o` · Server never executes the bytes — the beacon's in-process Go COFF loader does |
@@ -400,7 +416,7 @@ BOF and .NET assembly execution are Windows-only.
 | **Scheduling** | Configurable sleep interval and jitter · Re-check-in on session expiry · Kill date enforcement · Working-hours window · Server-side recurring tasks with persistent storage and optional output retention |
 | **Cryptography** | ECDSA P-256 task signing · ECDSA result signing · ECDSA identity signing at check-in · P-256 ECDH wire key agreement · Trust-on-first-use public key pinning per session |
 | **OPSEC** | Compile-time evasion profiles · Anti-sandbox, anti-debug, anti-VM heuristics · AMSI/ETW patching · Sleep mask with four modes: `rc4` and `aes-ctr` on Linux and Windows, `cronos` and `hwbp` on Windows amd64 · No kernel timer, no APC, no new thread in either Windows mode · Indirect syscalls · Self-deletion of the on-disk binary · String obfuscation · Garble · UPX · Shell history suppression · Jittered first check-in |
-| **Chunked transfer** | Upload: `truncate` / `writechunk` / `sha256file` · Download: `filesize` / `readchunk` / `sha256file` · Chunk sizes jittered within `[base/2, base]` · Batched enqueue to respect the task queue cap · Local and remote SHA-256 verified |
+| **Chunked transfer** | Upload: `truncate` / `writechunk` / `sha256file` · Download: `filesize` / `readchunk` / `sha256file` · 256 KiB base chunk size, jittered within `[base/2, base]` · **Pipelined, 16 chunks in flight** so the beacon's task queue is never idle · **Runs on a background worker thread** — the prompt stays live and no per-chunk output floods the terminal · `jobs` lists active transfers, `jobs kill <id>` cancels · Local and remote SHA-256 verified · On a verified download, pushes to the loot store automatically |
 | **Extensions** | WASM extension host with a four-function ABI · wazero interpreter, no JIT to `PROT_EXEC` · 16 MiB memory ceiling per module · Runtime push, hot-swap, and unload over the ECDSA-signed task channel · Sub-verbs: `list`, `info`, `load`, `unload`, `list-loaded`, `call` |
 | **Staged payloads** | A ~4 MB stager that checks in, fetches a full agent, decrypts it in memory, and executes it · Linux uses `memfd_create` with a `/dev/shm` fallback · Windows uses `FILE_FLAG_DELETE_ON_CLOSE` · Optional AES-256-GCM per-payload encryption · ECDSA signature verification on the served payload |
 | **Build system** | `beacon-build` — wizard, non-interactive flags, or a JSON config file · Per-build selection of OPSEC profile, C2 profile, TLS fingerprint, transport, kill days, work hours, mTLS bundle · Config-file builds override evasion toggles one key at a time |
@@ -535,18 +551,30 @@ The agent is designed to leave as little on disk as possible:
 Where the agent has to write to disk — a chunked upload — the
 artifacts are transient and the operator owns the cleanup.
 
-**One exception, stated plainly.** Every native verb above runs
+**Two exceptions, stated plainly.** Every native verb above runs
 in-process, without a subprocess, and without a signal that a
-general process-creation monitor would notice. `lsassdump` is the
-one verb where that distinction is preserved but the operation
-itself is the signature: LSASS ProcessAccess events, the
-`MiniDumpWriteDump` import against a protected process, and the
-`NtCreateProcessEx`-from-LSASS-address-space pattern are each
-independently high-signal on hosts with EDR. The verb runs through
-`syscall` with no child process and no PowerShell — the framework's
-process model claim is intact — but the operator takes the risk of
-the action when they type the verb. See
-[LSASS minidump](#lsass-minidump) for the honest scope.
+general process-creation monitor would notice. Two verbs are
+exceptions, for two different reasons:
+
+- **`lsassdump`** — the verb runs through `syscall` with no child
+  process and no PowerShell, so the framework's process model claim
+  is intact, but the *operation* is the signature: LSASS
+  `ProcessAccess` events, the `MiniDumpWriteDump` import against a
+  protected process, and the `NtCreateProcessEx`-from-LSASS-address-
+  space pattern are each independently high-signal on hosts with
+  EDR. See [LSASS minidump](#lsass-minidump) for the honest scope.
+
+- **`shell`** — the verb spawns a persistent child process, which is
+  the framework's one deviation from "no long-lived children". A
+  `/bin/sh` or `cmd.exe` stays alive on the target for as long as the
+  operator keeps the shell open, and every command typed is a
+  `write()` to its stdin. The exposure is a process-tree artefact
+  rather than a syscall signature: a defender who runs `ps`, watches
+  `/proc/<pid>/task/*/children`, or inspects the parent-child
+  relation sees the child immediately. `sh` remains the recommended
+  form for one-off commands; `shell` exists for the sessions where
+  state persistence is worth the exposure, and the client warns and
+  confirms before starting one.
 
 ### Graceful degradation
 
@@ -4699,6 +4727,7 @@ the shortcuts.
 | `caps` | Show the capability list the server advertised |
 | `audit [N]` | Read your own audit entries |
 | `history` | Show local command history |
+| `jobs` | List active background transfers; `jobs kill <id>` cancels one |
 | `build [-c <file>]` | Compile an agent on the server |
 | `c2-profiles` / `c2p` | List C2 profiles available for build, or show one profile's full JSON |
 | `bofs` / `bf` | Manage the server-side BOF registry — `list`, `add`, `remove` |
@@ -4823,12 +4852,13 @@ traces back to a specific export.
 | `curl <url>` | HTTP/HTTPS client |
 | `resolve <host> [type]` | DNS lookup (A, AAAA, CNAME, MX, NS, TXT, PTR) |
 | `nc <host> <port>` | TCP connect, banner grab, or probe |
-| `hashdump [<outdir>]` | SAM + SYSTEM hives (Windows) or `/etc/passwd` + `/etc/shadow` (Linux) |
+| `hashdump [<outdir>]` | SAM + SYSTEM hives (Windows) or `/etc/passwd` + `/etc/shadow` (Linux). The Windows path works whether or not `secretsdump` is installed on the operator's machine |
 | `enablepriv <args>` | List, enable, or disable Windows token privileges |
 | `lsassdump --dump [flags]` | LSASS minidump (Windows) — see [LSASS minidump](#lsass-minidump) |
 | `make_token <DOMAIN\user> <password>` | Windows: build and hold a NEW_CREDENTIALS token; subsequent `exec` runs as that user. `make_token --revert` is the same as `rev2self` |
 | `rev2self` | Windows: drop the held impersonation token |
 | `runas <DOMAIN\user> <password> <command> [args...]` | Windows: spawn a child in a fresh logon session under the supplied credentials. Returns the PID; does not wait |
+| `shell [start \| stop \| status \| exec <cmd>]` | Interactive shell held open across check-ins. `shell` enters an interactive loop (prompts once and stays). `shell start` launches the shell without entering the loop; `shell stop` kills it; `shell status` reports whether one is running and its uptime; `shell exec <cmd>` sends one command to a running shell and returns its output. **Bad opsec** — a long-lived child process is high-signal on any host with EDR or a process monitor. The client warns and confirms before `shell start` |
 | `spawnto <path>` | Set the sacrificial process that `execute-assembly` spawns (Windows only). `spawnto` with no argument shows the current value; `spawnto --clear` reverts to the default worker path under `%LOCALAPPDATA%` |
 
 **Network verbs:**
@@ -4917,8 +4947,10 @@ the modal with the full source in one call, then the follow-up
 
 | Command | Description |
 |---------|-------------|
-| `upload <local> <remote>` | Chunked upload with SHA-256 verification |
-| `download <remote> <local> [--no-loot]` | Chunked download with SHA-256 verification; also pushes to the loot store |
+| `upload <local> <remote>` | Chunked upload with SHA-256 verification. Starts a background transfer and returns immediately; use `jobs` to check status |
+| `download <remote> <local> [--no-loot]` | Chunked download with SHA-256 verification; pushes to the loot store on success unless `--no-loot`. Starts a background transfer and returns immediately; use `jobs` to check status |
+| `jobs` | List active background transfers with bytes/percent/chunks done and elapsed time |
+| `jobs kill <id>` | Cancel a transfer. Cancellation is cooperative — chunks already queued on the beacon still execute, and the worker exits at the next pipeline iteration |
 
 **In-memory execution:**
 
@@ -4954,6 +4986,8 @@ the modal with the full source in one call, then the follow-up
 | `schedule remove <id>` | Delete a schedule |
 | `tasks` | List outstanding tasks |
 | `wait [task-id]` | Block until pending task(s) complete |
+| `jobs` | List active background transfers (`upload`, `download`) |
+| `jobs kill <id>` | Cancel a running transfer |
 | `kill` | Queue self-destruct |
 
 **Session tools:**
@@ -4966,7 +5000,7 @@ the modal with the full source in one call, then the follow-up
 | `graph [tree\|flat\|summary\|path <a> <b>]` | Engagement-wide session graph |
 | `export [path]` | Export session to HTML transcript |
 | `migrate --self \| <pid> \| <name> [--method <name>]` | Detach a copy of the agent (`--self`), or inject the agent's embedded shellcode into a foreign process by PID or executable basename; the session survives on the new process. `--method default` uses `CreateRemoteThread` on Windows or `ptrace` on Linux; `--method apc` uses remote APC injection on Windows. When `--method` is absent the build-time default is used |
-| `hashdump [<outdir>]` | Windows: read SAM + SYSTEM hives and decrypt locally with `secretsdump.py`. Linux: merge `/etc/passwd` and `/etc/shadow` into `unshadow(8)` format |
+| `hashdump [<outdir>]` | Windows: read SAM + SYSTEM hives and decrypt locally. Tries `secretsdump` first, then falls back to a native pure-Python parser. Linux: merge `/etc/passwd` and `/etc/shadow` into `unshadow(8)` format |
 | `enablepriv <args>` | List, enable, or disable Windows token privileges on the current process |
 | `lsassdump --dump [flags]` | LSASS minidump. The highest-signal verb in the framework — see [LSASS minidump](#lsass-minidump) |
 | `make_token` / `rev2self` / `runas` | Windows identity manipulation: build and hold a NEW_CREDENTIALS token, drop the held token, or spawn a child in a new logon session |
@@ -5084,8 +5118,10 @@ depends on the active tab:
 
 | Active tab | Route | Busy state |
 |------------|-------|------------|
-| Log | Command worker thread | Input disabled while a command is in flight |
+| Log | Command worker thread | Always enabled — commands queue behind the running one and dispatch in order |
 | Chat | Chat worker thread | Always enabled — chat is never blocked by a running command |
+
+Submission is always accepted. The command queue is unbounded and processes in FIFO order; a slow blocking verb (`execute-assembly`, `hashdump`, a large upload) delays the queued follow-ups but does not block typing. The status bar carries the local queue depth alongside the on-wire task count so an operator can see the backlog. This matches the CLI's behaviour, where `_dispatch_task` returns as soon as the server acks the task and the operator can type the next command immediately.
 
 The prompt reflects the tab and, in chat mode, the active DM
 peer: `#1001 ›`, `chat ›`, or `chat→bob ›`. Switching tabs fires
@@ -5473,7 +5509,82 @@ and is not discoverable by a later `LoadLibrary`. CFG-enabled hosts
 that refuse to execute the mapped image will produce a launch
 failure — fall back to a Donut-wrapped build for those hosts.
 
+The loader patches the payload's import table before executing it,
+substituting in-process stubs for `ExitProcess`, `RtlExitUserProcess`,
+`ExitThread`, and `RtlExitUserThread`. A payload whose C runtime calls
+`ExitProcess` when `main()` returns terminates only its own entry
+thread, not the beacon's process — the beacon survives a payload that
+would otherwise take it down. The stubs redirect to `ExitThread`,
+which is exactly what the CRT expects on the normal `main`-returns
+path anyway.
+
+The loader also intercepts `GetStdHandle`, `WriteFile`, `WriteConsoleA`,
+and `WriteConsoleW`. A `GetStdHandle(STD_OUTPUT_HANDLE)` call returns
+a synthetic handle value the loader owns; subsequent writes against
+that handle are appended to a per-invocation capture buffer instead of
+being discarded to a nonexistent console. The result the operator sees
+includes the payload's output under a `--- payload output ---` header
+after the loader's own diagnostics. A payload that writes through
+`CONOUT$` or `WriteConsoleOutputCharacter` still bypasses the hook —
+those are separate calls — but the common `printf`/`WriteFile` shapes
+are captured.
+
 **Linux.** `memfd_create` anonymous file, `/dev/shm` fallback.
+
+### `shell [start | stop | status | exec <cmd>]`
+
+Holds a `/bin/sh` (Linux) or `cmd.exe` (Windows) alive on the target
+between check-ins. Distinct from `sh`, which spawns a fresh shell for
+every command and loses all state when that command returns.
+
+**What persists.** `cd`, `export`, shell variables, function
+definitions, and any file descriptor inherited into a subcommand. What
+a stateful session buys you in practice: one `cd` to a target
+directory instead of an absolute path on every command; a
+`TARGET=dc01` variable set once and referenced for the rest of the
+session; a background job started with `cmd &` that keeps running
+until the shell is stopped.
+
+**Why this is the highest-signal verb the framework offers.** The
+shell is a direct child of the beacon process, running for as long as
+the operator keeps it open. A defender who runs `ps` on the target,
+or watches `/proc/<beacon-pid>/task/*/children` on Linux, or the
+parent-child relation in a process monitor on Windows, sees it
+immediately. Every command typed is a `write()` to the shell's stdin,
+visible in the auditd stream on Linux and in whatever the host's
+process monitor reports.
+
+The framework makes no attempt to hide the child. A PTY over a
+memfd, an LD_PRELOAD shim to intercept `/proc` reads, a double-fork
+to re-parent the shell outside the beacon's process lifetime — none
+of that is done, because each one either puts the shell outside the
+beacon's lifetime (contradicting the "dies with the beacon"
+property) or adds a layer of ELF trickery the framework does not
+ship. The verb is honest about what it is; the warning says so.
+
+**Client-side confirmation.** `shell` with no sub-verb, or `shell
+start`, prints a multi-paragraph warning naming the exposure and
+prompts `[y/N]`. Only on `y` does the client dispatch `shell start`.
+An operator with a shell already running re-enters the interactive
+loop without a second prompt — the acceptance happened when the
+shell was first started. `shell exec`, `shell stop`, and `shell
+status` never prompt; they act on the existing state.
+
+The confirmation is a client convenience, not a server gate. An
+operator who calls the API directly (`POST /api/v1/beacon/<id>/task`
+with `{"verb": "shell", "args": ["start"]}`) bypasses it. The same
+model the `lsassdump` and `migrate <pid>` confirmations use.
+
+**Lifecycle.** The shell dies with the beacon. `kill`, kill-deadline
+expiry, or a reboot takes the shell down with it — nothing re-parents
+it, nothing detaches it. `migrate --self` and `migrate <pid>` also
+end the shell: the beacon process that spawned it exits, and the
+child dies with the parent.
+
+**Recommended form for one-off commands.** `sh <cmd>` — no
+persistent state, no long-lived child, no warning. `shell` exists
+for the specific case where the state persistence is worth the
+exposure.
 
 ### `bof <name|path> [args...]`
 
@@ -7669,7 +7780,7 @@ socket. No `/bin/curl`, no `dig`, no `/bin/nc`.
 
 | Verb | Implementation |
 |------|----------------|
-| `hashdump [<outdir>]` | Windows: `SeBackupPrivilege` via `AdjustTokenPrivileges`, `RegSaveKeyExW` on `HKLM\SAM` and `HKLM\SYSTEM`. Linux: reads `/etc/passwd` and `/etc/shadow`, merges on username into `unshadow(8)` format. Both return a JSON envelope; the client stores the files and, on Windows, optionally runs `secretsdump.py`. |
+| `hashdump [<outdir>]` | Windows: `SeBackupPrivilege` via `AdjustTokenPrivileges`, `RegSaveKeyExW` on `HKLM\SAM` and `HKLM\SYSTEM`. Linux: reads `/etc/passwd` and `/etc/shadow`, merges on username into `unshadow(8)` format. Both return a JSON envelope; the client writes the hives to disk, then decrypts them with the first available `secretsdump` form (`impacket-secretsdump`, `secretsdump.py`, `impacket_secretsdump`, `secretsdump`, or `python -m impacket.examples.secretsdump`). **When no secretsdump is installed, the client falls back to a pure-Python SAM parser** that reimplements the boot-key / hashed-boot-key / per-RID double-RC4 chain and produces the same output. The operator sees no difference in the result. |
 | `enablepriv <--list\|--list-all\|--vuln\|<privilege> [--disable]\|--all [--disable]>` | `OpenThreadToken` (falling back to `OpenProcessToken`), `LookupPrivilegeValueW`, `AdjustTokenPrivileges`. The privilege catalogue and risk buckets live on the client, not the agent. Windows only. |
 | `lsassdump --dump [--fork] [--duplicate] [--elevate] [--out <path>]` | Direct `MiniDumpWriteDump` via `dbghelp.dll`, with `NtCreateSection` + `NtCreateProcessEx` and system handle-table walk fallbacks. Windows only — see [LSASS minidump](#lsass-minidump). |
 
@@ -7679,6 +7790,7 @@ socket. No `/bin/curl`, no `dig`, no `/bin/nc`.
 |------|-------------|
 | `exec <cmd> [args...]` | Direct spawn; argv visible in `ps` |
 | `sh <cmd> [args...]` | stdin-piped shell; the command does not appear in argv |
+| `shell [start \| stop \| status \| exec <cmd>]` | Persistent interactive shell — a `/bin/sh` (Linux) or `cmd.exe` (Windows) held open across check-ins. State (working directory, environment variables, shell variables, function definitions) persists between commands. **Bad opsec** — the shell is a long-lived child of the beacon, visible in the target's process tree, and every command typed is a `write()` to its stdin. The client warns before `shell start` and asks for confirmation. Prefer `sh` for one-off commands |
 | `make_token <DOMAIN\\user> <password> \| --revert` | Windows. `LogonUserW(LOGON32_LOGON_NEW_CREDENTIALS)` builds a logon-type-9 token and installs it in the same slot `steal_token` uses. Every subsequent `exec` runs as that user. The verb accepts `DOMAIN\user`, `user@domain`, or a bare `user`; the token is validated on first network use, not at build time. `--revert` is an alias for `rev2self` |
 | `rev2self` | Windows. `RevertToSelf` plus a slot clear. Drops whichever token is held — from `steal_token` or from `make_token` — and returns the calling thread to the process default |
 | `runas <DOMAIN\\user> <password> <command> [args...]` | Windows. `CreateProcessWithLogonW` with `LOGON_WITH_PROFILE`, hidden window, returns the new PID immediately. Does not wait for the child and does not capture its output; use `make_token` + `exec` when output is needed. Requires the Secondary Logon (`seclogon`) service |
@@ -10569,6 +10681,16 @@ swallowed and the session continues.
   unpinned peer — silence on both sides, no server-side log. Rebuild
   the agent with `--wireguard-server-tunnel-ip <handler-value>`, or
   restart the handler with `--wireguard-server-ip 10.99.0.1`.
+
+### A background transfer does not complete
+
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| `jobs` shows a transfer stuck at the same byte count for minutes | The beacon is asleep (`sleep` interval is longer than the poll timeout), or the team server's task queue is full and refuses new chunks | Wait for the beacon's next poll. If the queue is full, the pipeline throttles itself to the depth the server accepts and continues when the queue drains |
+| `jobs kill <id>` returns "cancel requested" but `jobs` still lists the transfer | Cancellation is cooperative. The worker exits at the next pipeline iteration boundary — up to one beacon poll interval of lag | Wait for the beacon's next poll. The worker will not exit mid-chunk |
+| A download fails with `sha256 mismatch` | The local file was written from a mix of correct and stale chunks — usually a transfer that was interrupted and restarted while an old staging file existed | Delete the partial local file and start the download again |
+| A completed download is missing from the loot store | The automatic loot push failed after the download's SHA-256 verified — the store was unavailable, the caps were hit, or the `loot.use` capability is missing | The file is intact locally; use `loot upload <local_path>` to retry the push, or retrieve from the beacon again with `download` |
+| A transfer blocks other commands in the GUI | `execute-assembly`, `hashdump`, `lsassdump`, `migrate`, and `creds validate` still run synchronously on the worker thread and hold it for their full timeout. Only `upload` and `download` run on the dedicated background transfer worker | Wait for the blocking command to complete. The status bar shows the local queue depth |
 
 ### A build fails
 
