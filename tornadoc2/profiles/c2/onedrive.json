@@ -12,7 +12,7 @@
     "client-request-id": "{{nonce}}"
   },
   "request_headers": {
-    "results": { "Content-Type": "application/octet-stream" }
+    "Content-Type": "application/octet-stream"
   },
 
   "response_headers": {

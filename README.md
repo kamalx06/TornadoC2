@@ -59,6 +59,7 @@ loss, or legal consequences arising from the use of this project.
 - [In-Memory Execution](#in-memory-execution)
 - [BOF Registry](#bof-registry)
 - [C2 Profile Catalogue](#c2-profile-catalogue)
+- [Profile Validation (`shapecheck`)](#profile-validation-shapecheck)
 - [SOCKS5 Pivoting](#socks5-pivoting)
 - [Migration](#migration)
 - [Scheduled Tasks](#scheduled-tasks)
@@ -195,12 +196,85 @@ The rest of this document describes how it works. This section describes why it 
 
 ### What comes next
 
-- **macOS support.** Cross-compiles today; the platform-specific
-  native verbs and the sleep-mask implementation are what remains.
+**The Go agent is frozen; the next agent is Rust.**
 
-- **More native commands.** Depth on the execution and operational
-  sides. Same principle as the current set: in-process, standard library, no
-  child process.
+Development on the Go agent has stopped. No new transports, no
+new native verbs, no new evasion primitives, no structural
+changes. The Go agent in this tree is the Go agent this tree
+will have. It still works — every capability documented above is
+live, it is not deprecated, and it is not scheduled for removal.
+But no new Go build will carry a new feature.
+
+**The reason is size.** A default Go beacon is 8–20 MiB
+depending on the OPSEC profile and whether the injection pass is
+embedded. That is the Go runtime, its GC, its reflection
+metadata, and its standard-library link footprint compiled into
+every binary — not the C2 logic, not the crypto, not the
+transports. `-ldflags="-s -w"`, `garble`, and UPX shave at the
+edges; they do not change the shape.
+
+**The replacement is a Rust agent.** Stripped, LTO'd,
+`panic=abort`, no runtime, no GC, no reflection metadata — the
+same protocol, crypto, and native verb surface in the low
+single-digit megabytes, with room for every capability the Go
+agent carries. Rust also offers no GC pauses or goroutine stacks
+for a scanner to walk, full ClientHello control via `boring`
+(BoringSSL) instead of uTLS's reimplementation, a smaller
+syscall surface, and a custom allocator so the heap pattern is
+not a language fingerprint.
+
+The rewrite is a ground-up port, not a wrapper: no FFI to Go, no
+cgo, no embedded Go runtime. Same wire protocol, same
+compile-time configuration model, same ECDSA identity and task
+signing, same transports. A mixed fleet needs no second server,
+no second profile directory, no second workflow — the server
+cannot tell a Go agent from a Rust one.
+
+**What this means for an operator today:**
+
+- **Nothing has changed on the Go agent.** It runs, checks in,
+  and executes every verb the README documents.
+- **Critical bugs will be triaged.** A wire-protocol bug that
+  affects deployed sessions is a server-side bug too and is
+  fixed. A Go-specific bug — a race, a Windows path, a verb that
+  crashes on an edge case — is catalogued, and where the fix is
+  mechanical and low-risk, applied; where the fix is structural,
+  it waits for the Rust port, where the code will not exist.
+- **Transports the Rust agent does not yet carry keep working on
+  Go agents.** A mixed fleet is the expected shape during the
+  transition.
+- **macOS support moves to the Rust rewrite.** The Go build
+  cross-compiles and runs on macOS, but the platform-specific
+  native verbs and the sleep-mask implementation were never
+  implemented and will not be; that is the state the frozen tree
+  leaves them in.
+- **More native verbs move to Rust.** The next native verb this
+  framework ships will ship in the Rust agent.
+
+**The team server side is unchanged.** The handler, the C2
+profile system, the multi-profile routing, the pivot
+infrastructure, the audit chain, the credential vault, the loot
+store, the team chat, the webhook dispatcher, the dead-man's
+switch, the operator console, the GUI, the remote build pipeline,
+the scheduler, and the wire protocol all continue to receive
+changes. The rewrite is an agent-side project; the server is not
+part of it.
+
+**Aim: feature parity.** The goal is to carry every capability
+the Go agent has today into the Rust agent — the same transports,
+the same native verb set, the same evasion primitives, the same
+in-memory execution paths, the same pivot model. Some things may
+land after the first Rust release rather than with it; the ones
+that do will be named, not dropped silently.
+
+**The timeline is not a promise.** A Rust rewrite of an agent
+this size is months of work, and the longest parts — the Windows
+injection backends, the .NET worker, the AMSI and ETW patches,
+the sleep-mask implementation, the COFF loader, the
+uTLS-equivalent ClientHello work — are also the parts where Rust
+offers the largest long-term gain and imposes the largest
+short-term cost. The honest answer is: no exact date, working on
+it now, will ship as soon as it is ready.
 
 ---
 
@@ -6154,6 +6228,135 @@ ignored on a DNS or DoH build.
 
 **C2 profiles apply to both the parent and the child on an SMB or TCP pivot build.** The child shapes its own C2 body against the profile it was built with, then wraps the shaped body in its own wire envelope. The parent's relay forwards both the child's and the server's wire envelopes verbatim: it never touches the shape. This is forced by wire encryption — the shaped body sits inside the child's wire envelope, and the parent does not hold the child's wire session key. Only the child can decrypt the envelope and unwrap the shape.
 Both the parent and the child should be built with the same --c2-profile. The parent's profile determines the paths on its own direct requests to the server; the child's profile determines the shape the child produces and consumes. If the two profiles differ, the child will fail to unwrap the shaped responses the server produces using the paths the parent sent.
+
+---
+
+## Profile Validation (`shapecheck`)
+
+`tornadoc2/shapecheck.py` validates a C2 profile before deployment.
+It runs the profile through the same checks the Python handler
+applies at startup and the same round-trip probe the Go agent's
+`ValidateShapingSpec` applies at build time, and reports every
+failure in one place.
+
+### Why it exists
+
+The two implementations diverge in ways a JSON schema validator
+cannot catch:
+
+| Divergence | Effect | Check |
+|---|---|---|
+| Python's `\w` is Unicode-aware; Go's is ASCII-only | A segment containing `é` passes the handler and fails the agent build | `EXT002`, `EXT003` |
+| Python strips whitespace on `encoding`; Go does not | `" base64url"` produces different codecs on each side — the two disagree on the wire format | `ENC002` |
+
+Both pass `validate()` on the handler and break at build time or
+at the first round-trip. `shapecheck` catches them, plus
+fifty-two other classes across routing, headers, status codes,
+cookie names, placeholder placement, encoding, placement,
+extract-path syntax, DNS labels, and cross-profile collisions.
+
+### Usage
+
+```
+shapecheck                              # scans ./profiles/c2/
+shapecheck profiles/c2/                 # explicit directory
+shapecheck profiles/c2/apple.json       # one file
+shapecheck profiles/c2/ backup/         # multiple paths
+```
+
+Default scans `./profiles/c2/` from the current working
+directory — the same directory the handler scans at startup.
+
+### Output
+
+```
+$ shapecheck
+shapecheck v1.0.0 — scanning profiles/c2/
+
+! dns.json
+  ! RT007   warn   paths: all three paths are framework defaults
+          ↳ Set explicit paths so the profile blends with the target network.
+  ! TRN001  warn   profile: declares both shaping and dns_label
+          ↳ Each build transport reads only one side.
+
+────────────────────────────────────────────────────────────
+  0 error(s)  2 warning(s)  1 profile(s)
+```
+
+Every finding carries a stable check ID. The ID is what
+`--ignore` and `--explain` operate on.
+
+### Flags
+
+| Flag | Effect |
+|---|---|
+| `--list-checks` | Print every check ID with severity and one-line summary |
+| `--explain <id>` | Print one check's severity, summary, suggestion, and doc |
+| `--ignore <ids>` | Comma-separated IDs to suppress — removed before the summary count, so an ignored error does not fail the exit code |
+
+The catalogue covers twelve families: `RT` (routing), `HDR`
+(headers), `STS` (status), `CKY` (cookie), `SHP` (shape
+structure), `PLD` (placeholder), `ENC` (encoding), `PLC`
+(placement), `EXT` (extract path + Python/Go divergence +
+round-trip), `DNS`, `XPR` (cross-profile), and `PRF` (profile
+root).
+
+### Exit codes
+
+| Code | Meaning |
+|---|---|
+| `0` | Clean or warnings only |
+| `1` | At least one error |
+| `2` | Usage error — missing path, no `.json` files, unknown ID |
+
+`1` fails a CI gate; warnings do not. A pipeline that runs
+`shapecheck` before merging a profile change refuses a profile
+that hits a real error class without refusing one that carries
+only warnings.
+
+### Python/Go round-trip
+
+For each shape, `shapecheck` runs `wrap()` and `unwrap()`
+against seven probe payloads — flat object, empty object, list,
+nested object, mixed scalars, Unicode, long string. A template
+that handles only one shape passes one probe and fails the
+other six.
+
+The round-trip needs `shaping.py` importable. When it is, the
+round-trip runs. When it is not, the tool prints a note to
+stderr and skips that check; the static checks — path syntax,
+`\w` divergence, placeholder placement — run either way. Run
+from the repository root with the handler on `PYTHONPATH`:
+
+```
+PYTHONPATH=tornadoc2 python tornadoc2/shapecheck.py profiles/c2/
+```
+
+### What it does not do
+
+- **No live check.** Static only. The tool does not start the
+  handler or exercise the shaping layer against real traffic.
+- **No agent-config check.** It does not know whether the build's
+  `--tls-profile` matches the profile's `user_agent`, or whether
+  the profile's paths are permitted on the target's egress path.
+- **No transport validation.** A `dns_label` block is valid for a
+  DNS build and ignored for an HTTP one; the tool warns on the
+  dual-declaration (`TRN001`) but cannot know which transport you
+  will build for.
+- **No auto-fix.** Every fix it could apply — which colliding
+  path wins, what static value to substitute for a placeholder,
+  whether a small `payload_chunk_size` is a deliberate trade — is
+  a semantic decision a tool should not make silently.
+
+### Where it lives
+
+`tornadoc2/shapecheck.py`. No dependencies beyond the Python standard
+library and, optionally, the handler's `shaping.py` for the
+round-trip. Symlink onto `PATH`:
+
+```
+ln -s "$PWD/tornadoc2/shapecheck.py" /usr/local/bin/shapecheck
+```
 
 ---
 
