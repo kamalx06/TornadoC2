@@ -2,18 +2,12 @@
 r"""
 shapecheck — C2 profile validator for TornadoC2.
 
-Cross-checks a profile against both the Python handler (validate())
-and the Go agent (ValidateShapingSpec()). Where the two implementations
-diverge — Python's Unicode \w vs Go's ASCII \w, Python's permissive
-base64 vs Go's strict decoder — the profile passes on one side and
-fails on the other. Those cases are errors here, because they break
-on deployment.
-
 Usage:
     shapecheck                              # scans ./profiles/c2/
     shapecheck profiles/c2/                 # scans ./profiles/c2/
     shapecheck profiles/c2/apple.json       # one file
     shapecheck profiles/c2/ backup/         # multiple paths
+    shapecheck --build-config build.json    # enable cross-file checks
     shapecheck --explain EXT002
     shapecheck --list-checks
     shapecheck --ignore XPR001,DNS005 profiles/c2/
@@ -31,15 +25,34 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 DEFAULT_DIR = "profiles/c2"
 
 # --- Optional: the handler's shaping module ---
-try:
-    from shaping import wrap, unwrap
-    HAVE_SHAPING = True
-except ImportError:
-    HAVE_SHAPING = False
+def _import_shaping():
+    try:
+        from shaping import wrap, unwrap
+        return wrap, unwrap
+    except ImportError:
+        pass
+    here = Path(__file__).resolve().parent
+    for candidate in (
+        here / "shaping.py",
+        here / "features" / "shaping.py",
+        here.parent / "shaping.py",
+        here.parent / "features" / "shaping.py",
+    ):
+        if candidate.is_file():
+            sys.path.insert(0, str(candidate.parent))
+            try:
+                from shaping import wrap, unwrap
+                return wrap, unwrap
+            except ImportError:
+                continue
+    return None, None
+
+wrap, unwrap = _import_shaping()
+HAVE_SHAPING = wrap is not None
 
 # ---------------------------------------------------------------------------
 # Constants — must mirror shaping.py and shaping.go
@@ -59,6 +72,34 @@ PLACEMENT_NAME = re.compile(r"^[A-Za-z0-9._-]+$")
 COOKIE_NAME = re.compile(r"^[A-Za-z0-9._-]+$")
 DNS_VERB = re.compile(r"^[a-z0-9]$")
 
+# RFC 7230 header token: alphanumerics plus a fixed punctuation set.
+PLACEMENT_TOKEN = re.compile(r"^[A-Za-z0-9!#$%&'*+\-.^_`|~]+$")
+
+# URL-encoded characters (%XX) never match request.path after Flask
+# decodes it.
+URL_ENCODED = re.compile(r"%[0-9A-Fa-f]{2}")
+
+# :<digits> — plausible when copy-pasted from a URL that carried a port.
+PORT_IN_PATH = re.compile(r":[0-9]+")
+
+# Framework routes registered on the BEACON listener before any
+# profile's routes. A profile declaring one is shadowing or shadowed.
+FRAMEWORK_PATHS = re.compile(
+    r"^/(stage/|beacon/?$|tasks/?$|results/?$)"
+)
+
+# Headers the framework sets itself on every response.
+FRAMEWORK_HEADERS = {
+    "content-type", "content-length", "set-cookie",
+    "x-beacon-sleep", "x-beacon-jitter", "x-beacon-kill",
+    "x-beacon-workstart", "x-beacon-workend",
+    "x-beacon-spawnto", "x-payload-sig",
+}
+
+# XML/SOAP top-level names that only an XML-shaped body carries.
+XML_ROOTS = {"ListBucketResult", "EnumerationResults",
+             "AccessControlPolicy", "Envelope", "PutObjectRequest"}
+
 PROBES: list[Any] = [
     {"__probe__": "ok", "n": 1},
     {"empty": {}},
@@ -68,6 +109,126 @@ PROBES: list[Any] = [
     {"unicode": "日本語テスト"},
     {"long": "x" * 500},
 ]
+
+# ---------------------------------------------------------------------------
+# Realism tables
+# ---------------------------------------------------------------------------
+
+# UA version floors — bump these each release. A profile below the
+# floor is claiming a browser version no real client sends any more.
+UA_FLOOR = {
+    "chrome":  120,
+    "firefox": 120,
+    "safari":  17,
+}
+
+# Per-profile path hints. The key is the profile filename stem; the
+# value is a list of regexes a real service of that name would
+# plausibly expose. A profile whose beacon_path does not match any
+# pattern is flagged as RT011.
+#
+# Patterns are anchored (^/) and match against the path only, not
+# the host. A profile served on a path-style URL (S3, Azure) is
+# validated against the first path segment, which is the bucket or
+# container name.
+PATH_HINTS = {
+    # Amazon storefront uses /gp/ for account pages and /dp/ for
+    # products; MWS API is under /gp/mws/. Sellers' SP-API is /.
+    "amazon":           [r"^/gp/", r"^/(dp|api)/"],
+
+    # iCloud web services are under /ws/ (setup.icloud.com/setup/ws/1/)
+    # and per-service hosts under /ws/ as well.
+    "apple-icloud":     [r"^/(ws|setup/ws)/"],
+
+    # S3 path-style: https://s3.amazonaws.com/{bucket}/{key}
+    # The first path segment is the bucket name.
+    "aws-s3":           [r"^/[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]/"],
+
+    # Azure Blob path-style: https://{account}.blob.core.windows.net/{container}
+    "azure-blob":       [r"^/[a-z0-9][a-z0-9-]{1,61}[a-z0-9]/"],
+
+    # Cloudflare stable base is /client/v4/ (api.cloudflare.com).
+    # /cdn-cgi/ is the trace endpoint the dashboard hits.
+    "cloudflare":       [r"^/(client/v4/|cdn-cgi/)"],
+
+    # Discord HTTP API is /api/v{version}/, current default v10.
+    "discord":          [r"^/api/v[0-9]+/", r"^/api/"],
+
+    # Dropbox API v2 endpoints all start with /2/.
+    "dropbox":          [r"^/2/"],
+
+    # GitHub REST API is /repos/, /user/, /users/, /orgs/ on api.github.com;
+    # GitHub Enterprise prefixes /api/v3/.
+    "github":           [r"^/(repos|user|users|orgs)/", r"^/api/v3/"],
+
+    # GitLab REST API is always /api/v4/.
+    "gitlab":           [r"^/api/v4/"],
+
+    # GA4 Data API is /v1beta/properties/{id}:runReport on
+    # analyticsdata.googleapis.com. Universal Analytics /collect/ is
+    # the legacy endpoint; some profiles still use it.
+    "google-analytics": [r"^/(v1beta/properties/|v1/properties/|collect)"],
+
+    # Google Drive API is /drive/v3/; uploads are /upload/drive/v3/.
+    "google-drive":     [r"^/(drive/v3/|upload/drive/v3/)"],
+
+    # Instagram private API (i.instagram.com) is /api/v1/; the
+    # web client also hits /graphql/.
+    "instagram":        [r"^/(api/v1/|graphql/)"],
+
+    # Jira Cloud/Server REST is /rest/api/3/ (Cloud) or /rest/api/2/ (Server).
+    # The OAuth path is /rest/oauth/.
+    "jira":             [r"^/rest/(api|oauth)/"],
+
+    # LinkedIn public API is /v2/; the internal Voyager API is /voyager/api/.
+    "linkedin":         [r"^/(v2|voyager/api)/"],
+
+    # Notion API base is https://api.notion.com/v1/.
+    "notion":           [r"^/v1/"],
+
+    # Office 365 is Microsoft Graph: /v1.0/ or /beta/. The older
+    # Outlook REST surface is /api/v2.0/.
+    "o365":             [r"^/(v1\.0|beta|api/v[0-9.]+)/"],
+
+    # Okta core API is /api/v1/ on {subdomain}.okta.com.
+    "okta":             [r"^/api/v1/"],
+
+    # OneDrive is the Graph drive surface: /v1.0/me/drive/.
+    "onedrive":         [r"^/v1\.0/(me|users|drives)/", r"^/me/"],
+
+    # Salesforce REST is /services/data/vXX.X/.
+    "salesforce":       [r"^/services/(data|oauth2)/"],
+
+    # Shopify Admin API is /admin/api/{version}/.
+    "shopify":          [r"^/admin/api/"],
+
+    # Slack Web API is https://slack.com/api/{method}.
+    "slack":            [r"^/api/"],
+
+    # Spotify Web API base is https://api.spotify.com/v1/.
+    "spotify":          [r"^/v1/"],
+
+    # Stripe API base is https://api.stripe.com/v1/ (and /v2/ for the
+    # newer Accounts API).
+    "stripe":           [r"^/(v1|v2)/"],
+
+    # Microsoft Teams is Microsoft Graph: /v1.0/ or /beta/.
+    "teams":            [r"^/(v1\.0|beta)/"],
+
+    # Telegram Bot API is /bot{token}/{method}; the token is digits
+    # followed by a colon. Some clients also hit /bot/ and /api/.
+    "telegram":         [r"^/bot[0-9]+:", r"^/(bot|api)/"],
+
+    # Webex REST base is https://webexapis.com/v1/.
+    "webex":            [r"^/v1/"],
+
+    # YouTube Data API is /youtube/v3/ on www.googleapis.com; the
+    # internal innertube API is /youtubei/.
+    "youtube":          [r"^/(youtube/v3/|youtubei/)"],
+
+    # Zoom REST API base is https://api.zoom.us/v2/.
+    "zoom":             [r"^/v2/"],
+}
 
 # ---------------------------------------------------------------------------
 # Check registry
@@ -98,7 +259,8 @@ _reg("RT004", "error", "Path contains a query string or fragment",
      "The listener matches request.path, which excludes ? and #. "
      "Two profiles declaring '/x' and '/x?y' collide.")
 _reg("RT005", "error", "Path contains whitespace")
-_reg("RT006", "error", "beacon_path / tasks_path / results_path are not distinct",
+_reg("RT006", "error",
+     "beacon_path / tasks_path / results_path are not distinct",
      "The handler refuses a profile whose three roles collide.")
 _reg("RT007", "warn",  "All three paths are framework defaults",
      "Set explicit paths so the profile blends with the target network.")
@@ -110,6 +272,21 @@ _reg("RT009", "warn",  "stager.path collides with a role path",
 _reg("RT010", "error", "Path contains a {{placeholder}}",
      "Placeholders are substituted only in template bodies. "
      "This is sent literally as part of the URL.")
+_reg("RT011", "warn",  "Path does not match the profile's named application",
+     "The beacon_path does not match the shape of the service the "
+     "profile name claims to mimic. The path looks like the framework "
+     "default or a different app's layout.")
+_reg("RT012", "warn", "Path collides with a framework-reserved route",
+     "The listener registers /stage/*, /identify, /api/v1/*, and "
+     "/.well-known/* before any profile's routes. A profile declaring "
+     "one of these is either shadowed or shadowing — either way, "
+     "not what the operator intended.")
+_reg("RT013", "error", "Path contains URL-encoded characters",
+     "Flask's request.path is decoded. A literal %2E or %20 in a "
+     "declared path will never match an incoming request.")
+_reg("RT014", "warn",  "Path contains what looks like a port number",
+     "Copy-paste from a URL often leaves :8080 in the path. The "
+     "port belongs on the build config's url field, not the path.")
 
 # --- Headers ---
 _reg("HDR001", "error", "Header value contains CR/LF/NUL (header injection)",
@@ -119,6 +296,26 @@ _reg("HDR002", "warn",  "Header contains a {{placeholder}} sent literally",
      "A static value is usually what you want; a real value must come from "
      "the build config, not the profile.")
 _reg("HDR003", "error", "Header key or value is not a string")
+_reg("HDR004", "warn",  "Accept header does not match the shaped body shape",
+     "An XML-shaped template (S3 ListBucketResult, Azure "
+     "EnumerationResults) served with Accept: application/json is a "
+     "contradiction a defender can read.")
+_reg("HDR005", "error", "Duplicate header name (case-insensitive)",
+     "HTTP headers are case-insensitive. Content-Type and content-type "
+     "in the same block means one silently wins at runtime, and which "
+     "one is not predictable.")
+_reg("HDR006", "warn",  "Content-Type contradicts the request body shape",
+     "Sending Content-Type: application/json with an XML-shaped body "
+     "is a two-signal mismatch a request inspector reads immediately.")
+_reg("HDR007", "warn",  "Accept and Content-Type confuse JSON with XML",
+     "Accept: application/json paired with Content-Type: "
+     "application/xml on the same request is the shape of a client "
+     "that confused the two protocols. Accept and Content-Type "
+     "routinely differ on legitimate traffic (uploading binary, "
+     "expecting JSON); only the JSON/XML inversion is flagged.")
+_reg("HDR008", "warn",  "Header value exceeds the plausible length ceiling",
+     "Headers over 8 KB are unusual. Even Authorization tokens and "
+     "cookies rarely exceed 4 KB.")
 
 # --- Status ---
 _reg("STS001", "error", "status is not an object")
@@ -148,6 +345,17 @@ _reg("SHP003", "error", "Shape value is not an object")
 _reg("SHP004", "error", "template is not an object",
      "The renderer requires a JSON object at the top level.")
 _reg("SHP005", "error", "extract is missing or not a string")
+_reg("SHP006", "warn",  "Rendered body size exceeds the plausible ceiling",
+     "Real SaaS check-in responses are small. A template that "
+     "renders to >100 KB for a small probe payload is likely an "
+     "authoring mistake.")
+_reg("SHP007", "warn",  "Response shapes use different encodings",
+     "A real service encodes the same way on every endpoint it "
+     "serves. Mixed encodings are legal but implausible.")
+_reg("SHP008", "warn",  "Body size varies by >20x across shapes",
+     "Real services produce responses within an order of magnitude "
+     "of one another. A drift this large suggests a template with "
+     "an accidental bloat.")
 
 # --- Payload placeholder ---
 _reg("PLD001", "error", "No {{payload}} placeholder anywhere in the template",
@@ -183,11 +391,21 @@ _reg("PLC004", "error", "Placement name contains invalid characters",
 _reg("PLC005", "warn",  "placement on results_request is ignored",
      "results_request is an HTTP request from the agent, not a response. "
      "Placement applies only to responses.")
+_reg("PLC006", "error",
+     "Placement header collides with a framework-set header",
+     "The framework writes Content-Type, Set-Cookie, and X-Beacon-* "
+     "on every response. A payload placed in one of those is either "
+     "overwritten by the framework or overwrites a header the agent "
+     "needs to parse.")
+_reg("PLC007", "error", "Placement name is not a valid HTTP header token",
+     "Header names are RFC 7230 tokens. A name containing : or space "
+     "is a header line injection vector, not a header.")
 
 # --- Extract path ---
 _reg("EXT001", "error", "Extract path segment has invalid syntax",
      "A segment must match ^(\\w+)(\\[N\\])?$.")
-_reg("EXT002", "error", "Segment matches Python's \\w but not Go's (ASCII-only)",
+_reg("EXT002", "error",
+     "Segment matches Python's \\w but not Go's (ASCII-only)",
      "Python's \\w is Unicode-aware; Go's is ASCII-only. The handler "
      "accepts the profile but ValidateShapingSpec() on the agent build "
      "rejects it.")
@@ -198,7 +416,8 @@ _reg("EXT004", "error", "Round-trip failed (per-probe)",
      "The template and extract do not agree on where the payload lives.")
 
 # --- DNS ---
-_reg("DNS001", "error", "DNS verb must be a single lowercase alphanumeric character")
+_reg("DNS001", "error",
+     "DNS verb must be a single lowercase alphanumeric character")
 _reg("DNS002", "error", "DNS verb collision resets all three to defaults",
      "Two verbs sharing a character is not partially recoverable: "
      "both sides reset verb_b/t/r to 'b'/'t'/'r' at once.")
@@ -221,12 +440,70 @@ _reg("TRN001", "warn",  "Profile declares both shaping and dns_label",
      "Each build transport reads only one side. If you build "
      "--transport http, the dns_label block is ignored; if "
      "--transport dns, the shaping block is ignored.")
+_reg("TRN002", "warn",  "Response Server header does not fit the UA family",
+     "A Chrome UA served by AppleHttpServer, or a Safari UA served by "
+     "Microsoft-HTTPAPI, is a two-signal mismatch a defender can read.")
 
 # --- Profile root ---
 _reg("PRF001", "error", "Profile root is not an object")
 _reg("PRF002", "warn",  "user_agent is missing",
      "The built-in default is used; may not match a plausible target.")
 _reg("PRF003", "warn",  "user_agent is empty")
+_reg("PRF004", "warn",  "user_agent version is below the current floor",
+     "A Chrome/100 or Firefox/90 UA is immediately stale — real "
+     "clients update. Bump to a version within the current release "
+     "window.")
+_reg("PRF005", "warn",  "user_agent family and --tls-profile disagree",
+     "A profile claiming Chrome with --tls-profile go sends a Go "
+     "stdlib ClientHello that a JA3/JA4 lookup sees immediately. "
+     "Pair a browser UA with the matching --tls-profile.")
+_reg("PRF006", "warn",
+     "Explicit paths declared without a shaping block",
+     "A profile that changes the paths but not the bodies sends "
+     "plain JSON in the framework's default structure. The paths "
+     "blend; the bodies do not.")
+_reg("PRF007", "warn", "Response headers do not include a Server header",
+     "Every enterprise front-end sets Server. A response with only "
+     "Content-Type is the shape of a hand-rolled API, not a real one.")
+
+# ---------------------------------------------------------------------------
+# User-Agent family detection
+# ---------------------------------------------------------------------------
+
+def _ua_family(ua: Any) -> Optional[str]:
+    """Return 'chrome' | 'firefox' | 'safari' | None.
+
+    Edge returns 'chrome' — Edge uses Chrome's TLS stack, so the
+    uTLS profile that applies is the Chrome one.
+    """
+    if not isinstance(ua, str) or not ua:
+        return None
+    ua_lc = ua.lower()
+    if "firefox/" in ua_lc:
+        return "firefox"
+    if "edg/" in ua_lc:
+        return "chrome"
+    if "chrome/" in ua_lc:
+        return "chrome"
+    if "safari/" in ua_lc:
+        return "safari"
+    return None
+
+
+def _effective_encoding(enc: Any) -> str:
+    """Return the encoding a shape will actually use.
+
+    Empty, None, unrecognised, and 'base64' all resolve to base64 —
+    the framework's fallback. Whitespace is stripped to match the
+    Python handler's normalisation.
+    """
+    if not isinstance(enc, str):
+        return "base64"
+    stripped = enc.strip().lower()
+    if stripped in VALID_ENCODINGS:
+        return stripped or "base64"
+    return "base64"
+
 
 # ---------------------------------------------------------------------------
 # Issues and per-profile results
@@ -261,10 +538,12 @@ class ProfileResult:
 # ---------------------------------------------------------------------------
 
 class Checker:
-    def __init__(self, name: str, path: Path, profile: Any):
+    def __init__(self, name: str, path: Path, profile: Any,
+                 cfg: Optional[dict] = None):
         self.name = name
         self.path = path
         self.profile = profile
+        self.cfg = cfg
         self.issues: list[Issue] = []
 
     def _add(self, id: str, section: str, message: str = "",
@@ -286,13 +565,24 @@ class Checker:
             return ProfileResult(self.name, self.path, self.issues)
 
         self._check_paths()
+        self._check_path_hint()
         self._check_user_agent()
+        self._check_ua_freshness()
+        self._check_ua_tls_consistency()
         self._check_headers()
+        self._check_accept_consistency()
+        self._check_content_type_consistency()
+        self._check_accept_ct_consistency()
+        self._check_server_consistency()
         self._check_status()
         self._check_cookie()
         self._check_shaping()
+        self._check_encoding_consistency()
+        self._check_size_drift()
         self._check_dns()
         self._check_stager()
+        self._check_shaping_presence()
+        self._check_server_presence()
         self._check_transport_hints()
         return ProfileResult(self.name, self.path, self.issues)
 
@@ -311,7 +601,8 @@ class Checker:
 
         if len({beacon, tasks, results}) < 3:
             self._add("RT006", "paths",
-                      f"beacon={beacon!r} tasks={tasks!r} results={results!r}")
+                      f"beacon={beacon!r} tasks={tasks!r} "
+                      f"results={results!r}")
 
         if (beacon, tasks, results) == ("/beacon", "/tasks", "/results"):
             self._add("RT007", "paths")
@@ -331,6 +622,35 @@ class Checker:
             self._add("RT005", section, f"got {path!r}")
         if "{{" in path:
             self._add("RT010", section, f"got {path!r}")
+        if FRAMEWORK_PATHS.search(path):
+            self._add("RT012", section, f"got {path!r}")
+        if URL_ENCODED.search(path):
+            self._add("RT013", section, f"got {path!r}")
+        if PORT_IN_PATH.search(path):
+            self._add("RT014", section, f"got {path!r}")
+
+    def _check_path_hint(self) -> None:
+        stem = self.path.stem.split(".")[0]
+        patterns = PATH_HINTS.get(stem)
+        if not patterns:
+            return
+        # DNS-only profiles carry placeholder paths; the DNS wire
+        # format has no path segment, so the check does not apply.
+        if "dns_label" in self.profile and "shaping" not in self.profile:
+            return
+        beacon = self.profile.get("beacon_path", "")
+        if not isinstance(beacon, str) or not beacon:
+            return
+        if not any(re.search(p, beacon) for p in patterns):
+            self._add("RT011", "beacon_path",
+                      f"{beacon!r} does not match {stem} shape "
+                      f"({', '.join(patterns)})",
+                      suggestion=(f"A profile named {stem!r} whose "
+                                  f"beacon_path does not match any of "
+                                  f"{patterns} is not carrying a "
+                                  f"plausible {stem} shape. The path "
+                                  f"looks like the framework default "
+                                  f"or a different app's layout."))
 
     def _check_user_agent(self) -> None:
         if "user_agent" not in self.profile:
@@ -342,23 +662,230 @@ class Checker:
         elif not ua.strip():
             self._add("PRF003", "user_agent", "value is empty")
 
+    def _check_ua_freshness(self) -> None:
+        ua = self.profile.get("user_agent", "")
+        if not isinstance(ua, str) or not ua:
+            return
+        m = re.search(r"chrome/(\d+)", ua, re.IGNORECASE)
+        if m:
+            v = int(m.group(1))
+            if v < UA_FLOOR["chrome"]:
+                self._add("PRF004", "user_agent",
+                          f"Chrome/{v} below floor "
+                          f"Chrome/{UA_FLOOR['chrome']}")
+            return
+        m = re.search(r"firefox/(\d+)", ua, re.IGNORECASE)
+        if m:
+            v = int(m.group(1))
+            if v < UA_FLOOR["firefox"]:
+                self._add("PRF004", "user_agent",
+                          f"Firefox/{v} below floor "
+                          f"Firefox/{UA_FLOOR['firefox']}")
+            return
+        if "safari/" in ua.lower():
+            m = re.search(r"version/(\d+)", ua, re.IGNORECASE)
+            if m:
+                v = int(m.group(1))
+                if v < UA_FLOOR["safari"]:
+                    self._add("PRF004", "user_agent",
+                              f"Safari Version/{v} below floor "
+                              f"Safari/{UA_FLOOR['safari']}")
+
+    def _check_ua_tls_consistency(self) -> None:
+        if self.cfg is None:
+            return
+        transport = str(self.cfg.get("transport_mode", "") or "").lower()
+        # QUIC and WireGuard ignore --tls-profile; the framework
+        # cannot close the ClientHello gap there, so it is not a
+        # lint.
+        if "quic" in transport or "wireguard" in transport:
+            return
+        # DNS and ICMP carry no HTTP request; --tls-profile does not
+        # apply. Only HTTP-shaped transports matter here.
+        if not any(t in transport for t in ("http", "doh", "websocket")):
+            return
+        ua = self.profile.get("user_agent", "")
+        tls = self.cfg.get("tls_profile", "go")
+        if not isinstance(ua, str) or not isinstance(tls, str):
+            return
+        family = _ua_family(ua)
+        if family is None:
+            return
+        if tls == "go":
+            self._add("PRF005", "user_agent",
+                      f"UA claims {family}, build uses --tls-profile go "
+                      f"— a JA3/JA4 lookup sees the Go stdlib, not "
+                      f"{family}")
+        elif tls != family:
+            self._add("PRF005", "user_agent",
+                      f"UA claims {family}, build uses --tls-profile "
+                      f"{tls} — the two fingerprints disagree")
+
     def _check_headers(self) -> None:
-        for section in ("extra_headers", "request_headers", "response_headers"):
+        for section in ("extra_headers", "request_headers",
+                        "response_headers"):
             if section not in self.profile:
                 continue
             headers = self.profile[section]
             if not isinstance(headers, dict):
                 self._add("HDR003", section, f"got {type(headers).__name__}")
                 continue
+            seen_lc: dict[str, str] = {}
             for k, v in headers.items():
                 if not isinstance(k, str) or not isinstance(v, str):
                     self._add("HDR003", section,
                               f"header {k!r} has non-string key or value")
                     continue
+                lc = k.lower()
+                if lc in seen_lc:
+                    self._add("HDR005", section,
+                              f"header {k!r} duplicates "
+                              f"{seen_lc[lc]!r} case-insensitively")
+                else:
+                    seen_lc[lc] = k
                 if HEADER_INJECTION.search(k) or HEADER_INJECTION.search(v):
                     self._add("HDR001", section, f"header {k!r}")
                 if "{{" in k or "{{" in v:
                     self._add("HDR002", section, f"header {k!r} = {v!r}")
+                if len(v) > 8192:
+                    self._add("HDR008", section,
+                              f"header {k!r} value is {len(v)} bytes "
+                              f"(>8 KB)")
+
+    def _check_accept_consistency(self) -> None:
+        """HDR004: Accept media type must not contradict an XML-shaped
+        template the response carries."""
+        accept = ""
+        for section in ("extra_headers", "request_headers"):
+            headers = self.profile.get(section)
+            if isinstance(headers, dict):
+                a = headers.get("Accept")
+                if isinstance(a, str) and a:
+                    accept = a.lower()
+                    break
+        if not accept:
+            return
+        accept_primary = accept.split(",")[0].split(";")[0].strip()
+        if not accept_primary or "*/*" in accept_primary:
+            return
+        sh = self.profile.get("shaping")
+        if not isinstance(sh, dict):
+            return
+        for shape_name in ("checkin_response", "tasks_response"):
+            spec = sh.get(shape_name)
+            if not isinstance(spec, dict):
+                continue
+            tmpl = spec.get("template")
+            if not isinstance(tmpl, dict) or not tmpl:
+                continue
+            top = set(tmpl.keys())
+            looks_xml = bool(top & XML_ROOTS)
+            if looks_xml and "json" in accept_primary:
+                self._add("HDR004", "extra_headers",
+                          f"Accept={accept_primary!r} but "
+                          f"{shape_name} template is XML-shaped "
+                          f"(top-level {sorted(top & XML_ROOTS)})")
+                return
+
+    def _check_content_type_consistency(self) -> None:
+        """HDR006: Content-Type on the request must not contradict
+        the results_request template shape."""
+        ct = ""
+        for section in ("extra_headers", "request_headers"):
+            headers = self.profile.get(section)
+            if isinstance(headers, dict):
+                v = headers.get("Content-Type")
+                if isinstance(v, str) and v:
+                    ct = v.lower()
+                    break
+        if not ct:
+            return
+        ct_primary = ct.split(",")[0].split(";")[0].strip()
+        sh = self.profile.get("shaping")
+        if not isinstance(sh, dict):
+            return
+        spec = sh.get("results_request")
+        if not isinstance(spec, dict):
+            return
+        tmpl = spec.get("template")
+        if not isinstance(tmpl, dict) or not tmpl:
+            return
+        top = set(tmpl.keys())
+        looks_xml = bool(top & XML_ROOTS)
+        if looks_xml and "json" in ct_primary:
+            self._add("HDR006", "extra_headers",
+                      f"Content-Type={ct_primary!r} but "
+                      f"results_request template is XML-shaped "
+                      f"(top-level {sorted(top & XML_ROOTS)})")
+
+    def _check_accept_ct_consistency(self) -> None:
+        """HDR007: Accept and Content-Type confuse JSON with XML.
+
+        Accept describes response media types; Content-Type
+        describes request body media types. They are independent
+        headers and routinely differ on legitimate traffic
+        (uploading octet-stream and expecting JSON back is normal).
+
+        The one pattern that is almost always a mistake is a
+        request that asks for JSON but claims to send XML, or the
+        reverse — a client that has confused the two protocols. That
+        is the only case this check fires on."""
+        accept = ""
+        ct = ""
+        for section in ("extra_headers", "request_headers"):
+            headers = self.profile.get(section)
+            if not isinstance(headers, dict):
+                continue
+            a = headers.get("Accept")
+            c = headers.get("Content-Type")
+            if isinstance(a, str) and a and not accept:
+                accept = a.lower()
+            if isinstance(c, str) and c and not ct:
+                ct = c.lower()
+        if not accept or not ct:
+            return
+        accept_primary = accept.split(",")[0].split(";")[0].strip()
+        ct_primary     = ct.split(",")[0].split(";")[0].strip()
+        if not accept_primary or not ct_primary:
+            return
+
+        JSON_TYPES = {"application/json"}
+        XML_TYPES  = {"application/xml", "text/xml"}
+        is_json_xml_mismatch = (
+            (accept_primary in JSON_TYPES and ct_primary in XML_TYPES)
+            or
+            (accept_primary in XML_TYPES and ct_primary in JSON_TYPES)
+        )
+        if is_json_xml_mismatch:
+            self._add("HDR007", "extra_headers",
+                      f"Accept={accept_primary!r} but "
+                      f"Content-Type={ct_primary!r} — a client that "
+                      f"asks for one of JSON/XML while sending the "
+                      f"other has confused the two protocols")
+
+    def _check_server_consistency(self) -> None:
+        family = _ua_family(self.profile.get("user_agent", "") or "")
+        if family is None:
+            return
+        sh = self.profile.get("response_headers")
+        if not isinstance(sh, dict):
+            return
+        server = sh.get("Server", "")
+        if not isinstance(server, str) or not server:
+            return
+        server_lc = server.lower()
+        if family == "chrome" and "apple" in server_lc:
+            self._add("TRN002", "response_headers",
+                      f"Server={server!r} but UA claims Chrome — "
+                      f"Apple front-ends do not typically serve "
+                      f"Chrome clients as their primary audience")
+        elif family == "safari" and any(
+            s in server_lc for s in ("microsoft", "amazons3", "gws")
+        ):
+            self._add("TRN002", "response_headers",
+                      f"Server={server!r} but UA claims Safari — "
+                      f"Microsoft/AWS front-ends do not serve Safari "
+                      f"clients as their primary audience")
 
     def _check_status(self) -> None:
         if "status" not in self.profile:
@@ -432,11 +959,14 @@ class Checker:
                 stripped = encoding.strip()
                 lowered  = stripped.lower()
                 if lowered not in VALID_ENCODINGS:
-                    self._add("ENC001", f"{sec}.encoding", f"got {encoding!r}")
+                    self._add("ENC001", f"{sec}.encoding",
+                              f"got {encoding!r}")
                 if encoding != stripped:
-                    self._add("ENC002", f"{sec}.encoding", f"got {encoding!r}")
+                    self._add("ENC002", f"{sec}.encoding",
+                              f"got {encoding!r}")
                 elif encoding != lowered:
-                    self._add("ENC003", f"{sec}.encoding", f"got {encoding!r}")
+                    self._add("ENC003", f"{sec}.encoding",
+                              f"got {encoding!r}")
 
         if placement is not None:
             self._check_placement(f"{sec}.placement", placement, name)
@@ -458,6 +988,7 @@ class Checker:
 
         if HAVE_SHAPING:
             self._check_roundtrip(sec, tmpl, extract, encoding)
+            self._check_body_size(sec, tmpl, encoding)
 
     def _check_placement(self, section: str, placement: Any,
                          shape: str) -> None:
@@ -473,6 +1004,12 @@ class Checker:
                 self._add("PLC003", section, f"kind={kind!r} needs a name")
             elif not isinstance(name, str) or not PLACEMENT_NAME.match(name):
                 self._add("PLC004", section, f"name={name!r}")
+            elif not PLACEMENT_TOKEN.match(name):
+                self._add("PLC007", section, f"name={name!r}")
+            if (kind == "header"
+                    and isinstance(name, str)
+                    and name.lower() in FRAMEWORK_HEADERS):
+                self._add("PLC006", section, f"name={name!r}")
         if shape == "results_request":
             self._add("PLC005", section)
 
@@ -516,10 +1053,7 @@ class Checker:
 
     def _check_roundtrip(self, section: str, tmpl: Any, extract: str,
                          encoding: Any) -> None:
-        eff = (encoding.strip().lower()
-               if isinstance(encoding, str)
-                  and encoding.strip().lower() in VALID_ENCODINGS
-               else "base64")
+        eff = _effective_encoding(encoding)
         for probe in PROBES:
             try:
                 rendered  = wrap(tmpl, probe, eff)
@@ -534,10 +1068,69 @@ class Checker:
                           f"probe={self._brief(probe)}: {exc}")
                 return
 
+    def _check_body_size(self, section: str, tmpl: Any,
+                         encoding: Any) -> None:
+        probe = {"__probe__": "ok", "n": 1}
+        try:
+            rendered = wrap(tmpl, probe, _effective_encoding(encoding))
+            body = json.dumps(rendered, separators=(",", ":"))
+        except Exception:
+            return
+        if len(body) > 100_000:
+            self._add("SHP006", section,
+                      f"renders to {len(body)} bytes for a small probe "
+                      f"— real SaaS check-in responses are typically "
+                      f"under 100 KB")
+
     @staticmethod
     def _brief(x: Any, maxlen: int = 60) -> str:
         s = repr(x)
         return s if len(s) <= maxlen else s[:maxlen - 3] + "..."
+
+    def _check_encoding_consistency(self) -> None:
+        """SHP007: checkin_response and tasks_response should use
+        the same effective encoding."""
+        sh = self.profile.get("shaping")
+        if not isinstance(sh, dict):
+            return
+        encodings: dict[str, str] = {}
+        for shape in ("checkin_response", "tasks_response"):
+            spec = sh.get(shape)
+            if not isinstance(spec, dict):
+                continue
+            encodings[shape] = _effective_encoding(spec.get("encoding"))
+        if len(set(encodings.values())) > 1:
+            self._add("SHP007", "shaping", f"{encodings}")
+
+    def _check_size_drift(self) -> None:
+        """SHP008: two response shapes rendering to wildly different
+        sizes for the same probe payload is a template bug."""
+        if not HAVE_SHAPING:
+            return
+        sh = self.profile.get("shaping")
+        if not isinstance(sh, dict):
+            return
+        sizes: dict[str, int] = {}
+        probe = {"__probe__": "ok", "n": 1}
+        for shape in ("checkin_response", "tasks_response"):
+            spec = sh.get(shape)
+            if not isinstance(spec, dict):
+                continue
+            tmpl = spec.get("template")
+            if not isinstance(tmpl, dict):
+                continue
+            try:
+                rendered = wrap(tmpl, probe,
+                                _effective_encoding(spec.get("encoding")))
+                sizes[shape] = len(json.dumps(rendered,
+                                              separators=(",", ":")))
+            except Exception:
+                continue
+        if len(sizes) < 2:
+            return
+        mn, mx = min(sizes.values()), max(sizes.values())
+        if mn > 0 and mx / mn > 20:
+            self._add("SHP008", "shaping", f"{sorted(sizes.items())}")
 
     def _check_dns(self) -> None:
         if "dns_label" not in self.profile:
@@ -588,6 +1181,38 @@ class Checker:
         results = self.profile.get("results_path", "/results")
         if sp in (beacon, tasks, results):
             self._add("RT009", "stager.path", f"{sp!r} collides")
+
+    def _check_shaping_presence(self) -> None:
+        """PRF006: explicit paths but no shaping — bodies stay in the
+        framework's plain-JSON default shape."""
+        if "dns_label" in self.profile and "shaping" not in self.profile:
+            return
+        beacon = self.profile.get("beacon_path", "")
+        if not beacon or beacon == "/beacon":
+            return
+        if "shaping" not in self.profile:
+            self._add("PRF006", "shaping",
+                      "explicit HTTP paths but no shaping block — "
+                      "bodies are plain JSON in the framework's "
+                      "default structure")
+
+    def _check_server_presence(self) -> None:
+        """PRF007: no Server header on an HTTP-shaped profile."""
+        if "dns_label" in self.profile and "shaping" not in self.profile:
+            return
+        beacon = self.profile.get("beacon_path", "")
+        if not beacon or beacon == "/beacon":
+            return
+        sh = self.profile.get("response_headers")
+        if not isinstance(sh, dict):
+            self._add("PRF007", "response_headers",
+                      "no response_headers block — real servers send "
+                      "Server, Cache-Control, and at least one X-* header")
+            return
+        if "Server" not in sh and "server" not in sh:
+            self._add("PRF007", "response_headers",
+                      "response_headers has no Server header — real "
+                      "enterprise front-ends always set one")
 
     def _check_transport_hints(self) -> None:
         if "shaping" in self.profile and "dns_label" in self.profile:
@@ -736,6 +1361,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("paths", nargs="*",
                     help=f"profile files or directories "
                          f"(default: ./{DEFAULT_DIR}/)")
+    ap.add_argument("--build-config", metavar="FILE",
+                    help="build config to cross-check against "
+                         "(enables PRF005, the UA/TLS mismatch check)")
     ap.add_argument("--explain", metavar="ID",
                     help="show documentation for a check ID")
     ap.add_argument("--list-checks", action="store_true",
@@ -752,10 +1380,25 @@ def main(argv: Optional[list[str]] = None) -> int:
     if args.explain:
         return explain_check(args.explain)
 
+    cfg: Optional[dict] = None
+    if args.build_config:
+        try:
+            cfg = json.loads(Path(args.build_config).read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            print(f"error: --build-config: {exc}", file=sys.stderr)
+            return 2
+        if not isinstance(cfg, dict):
+            print(f"error: --build-config: root is "
+                  f"{type(cfg).__name__}, expected object", file=sys.stderr)
+            return 2
+
     if not HAVE_SHAPING:
-        print("note: shaping.py not importable — round-trip checks are "
-              "skipped (add the handler package to PYTHONPATH)",
-              file=sys.stderr)
+        print("note: shaping.py not importable — round-trip checks "
+              "(EXT004), body-size checks (SHP006), and size-drift "
+              "(SHP008) are skipped", file=sys.stderr)
+    if cfg is None:
+        print("note: --build-config not given — PRF005 "
+              "(UA/TLS mismatch) is skipped", file=sys.stderr)
 
     ignored = {s.strip() for s in args.ignore.split(",") if s.strip()}
 
@@ -795,7 +1438,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             ))
             results.append(r)
             continue
-        results.append(Checker(name, path, profile).run())
+        results.append(Checker(name, path, profile, cfg=cfg).run())
 
     if len(profiles) > 1:
         cross = check_directory(profiles)
