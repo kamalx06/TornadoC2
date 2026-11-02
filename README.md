@@ -2,9 +2,11 @@
 
 A pull-based C2 with ten native transports, concurrent
 multi-profile handlers, and an honest threat model. The agent is a
-single Go binary with every behavioural property baked in at build
+single Rust binary with every behavioural property baked in at build
 time — no runtime config file, no environment variable, no
-command-line arguments. Tasks and results are ECDSA-signed end to
+command-line arguments.
+
+Tasks and results are ECDSA-signed end to
 end. The transports are HTTPS, QUIC/HTTP/3, WebSocket, DNS TXT,
 DNS-over-HTTPS, ICMP, WireGuard, SMB-pivot, TCP-bind, and
 TCP-reverse.
@@ -28,7 +30,7 @@ loss, or legal consequences arising from the use of this project.
 - [Why TornadoC2 Exists](#why-tornadoc2-exists)
   - [What that shaped](#what-that-shaped)
   - [What it is not](#what-it-is-not)
-  - [What comes next](#what-comes-next)
+  - [The Rust agent](#the-rust-agent)
 - [Capability summary](#capability-summary)
 - [Key Features](#key-features)
 - [Design Philosophy](#design-philosophy)
@@ -124,7 +126,7 @@ framework is built for long-haul engagements where the implant has
 to survive reboots, retry on failure, and self-destruct on a
 schedule.
 
-The implant is a single Go binary, cross-compiled from the operator
+The implant is a single Rust binary, cross-compiled from the operator
 machine. There is no runtime configuration file, no environment
 variable, no registry key. The callback URL, sleep interval, kill
 date, C2 profile, and evasion set are all baked in at build time. A
@@ -194,16 +196,22 @@ This is the tool I wanted to exist when I started looking for one. It fits the s
 
 The rest of this document describes how it works. This section describes why it exists. Both are true, and neither makes sense without the other.
 
-### What comes next
+### The port in progress
 
-**The Go agent is frozen; the next agent is Rust.**
+**The tooling is Rust; the agent is being ported.**
 
-Development on the Go agent has stopped. No new transports, no
-new native verbs, no new evasion primitives, no structural
-changes. The Go agent in this tree is the Go agent this tree
-will have. It still works — every capability documented above is
-live, it is not deprecated, and it is not scheduled for removal.
-But no new Go build will carry a new feature.
+The build tooling — `beacon/builder.py`, the `Dockerfile`, the
+`docker-compose.yml`, the installers, and the `install-rust-build.sh`
+build script — has been ported to Rust. Those files expect a Rust
+crate at `agent/` and call `cargo build` to produce the agent binary.
+That port is complete.
+
+The agent source in `agent/` is still Go. It is being ported to Rust.
+Until the port completes, the tooling will fail at the `cargo build`
+step because `agent/Cargo.toml` does not exist. Any operator who needs
+to build an agent today must use the pre-port tooling from an earlier
+commit; the capabilities documented in this README remain accurate for
+the Go agent and will be ported one-for-one.
 
 **The reason is size.** A default Go beacon is 8–20 MiB
 depending on the OPSEC profile and whether the injection pass is
@@ -299,20 +307,21 @@ it now, will ship as soon as it is ready.
   own session state and is not mixed with another transport in the
   same binary.
 - **Transport abstraction.** Adding another transport means
-  writing one Python listener class and one Go client class.
+  writing one Python listener class and one Rust client class.
   Those two classes hold the transport's entire design — wire
   parsing, chunking, reassembly, session handling, error paths.
   Around them sits a small amount of mechanical glue that
-  follows the same template for every transport: a config field
-  on the agent, a package var, one `case` in the agent's
-  dispatch switch, a linker-flag receiver and copy in the
-  stageless build, the builder's validation and flag emission,
-  the remote build manager's parameter pass-through, and the
-  handler's CLI flag and listener-startup call. There is no
-  dispatch table and no engine code to change, and the operator
-  client is unaffected — the client talks to the server API and
-  the transport is a server-to-agent concern. Ten transports
-  ship in-tree as proof of the pattern.
+  follows the same template for every transport: a config
+  struct field on the agent, a package var, one `match` arm
+  in the agent's dispatch switch, a `TC2_*` env var read and
+  `pub const` emission in `build.rs`, the builder's per-transport
+  validation and env var emission, the remote build manager's
+  parameter pass-through, and the handler's CLI flag and
+  listener-startup call. There is no dispatch table and no
+  engine code to change, and the operator client is unaffected
+  — the client talks to the server API and the transport is a
+  server-to-agent concern. Ten transports ship in-tree as proof
+  of the pattern.
 - **Concurrent multi-profile support.** A single handler serves
   every C2 profile under `profiles/c2/` at once, dispatching each
   incoming request to the profile that declared its path. A
@@ -351,8 +360,8 @@ it now, will ship as soon as it is ready.
 - **Staged payloads.** A ~4 MB first-stage stager fetches a full
   agent, decrypts it in memory, and executes it without writing the
   payload to disk.
-- **uTLS browser ClientHello fingerprinting** (`chrome`, `firefox`,
-  `safari`) to close the JA3/JA4 gap that otherwise identifies a Go
+- **BoringSSL browser ClientHello fingerprinting** (`chrome`, `firefox`,
+  `safari`) to close the JA3/JA4 gap that otherwise identifies a Rust
   client in a single packet capture.
 - **ECDSA P-256 task signing** (server → agent) and result signing
   (agent → server) with trust-on-first-use public key pinning.
@@ -421,7 +430,7 @@ it now, will ship as soon as it is ready.
   instrumented — but it moves the beacon out of the category an EDR
   watches for by default. See
   [Migration › Injection backends](#injection-backends).
-- **Windows BOF execution** through an in-process Go COFF loader
+- **Windows BOF execution** through an in-process Rust COFF loader
   (AMD64 and I386 relocations, full Beacon API surface), with a
   shared server-side registry that any operator can browse. No
   PowerShell, no `csc`, no `Add-Type`, no temp file.
@@ -473,8 +482,8 @@ BOF and .NET assembly execution are Windows-only.
 
 | Category | Capabilities |
 |----------|-------------|
-| **Implant** | Go binary, cross-compiled from the operator machine · No runtime config file, no environment variables, no command-line arguments — every property is baked in at build time · Windows PE, Windows DLL, Linux ELF, Donut shellcode, or stager output · amd64 and arm64 · Migration via `migrate --self` (detach a copy of the on-disk binary) or `migrate <pid>` / `migrate <name> --method default\|apc` (inject the agent's loader-wrapped shellcode into a foreign process) — the session survives either way, with the same machine fingerprint and the same beacon ID · `--method apc` selects remote APC injection on Windows; the default remains `CreateRemoteThread` / `ptrace` |
-| **Transports** | **HTTP**: HTTPS with server-authenticated TLS by default, optional mTLS, optional RootCA pinning, uTLS browser ClientHello · **QUIC**: HTTP/3 over UDP, same C2 protocol as HTTP on a different carriage; reaches networks that permit HTTP/3 but block or proxy direct TCP; requires `aioquic` on the handler and pulls `quic-go` into the agent · **WebSocket**: one wss:// connection per check-in cycle, same JSON body as HTTP inside the frame; reaches networks where a browser-shaped client is expected and a raw HTTPS GET is not; requires `simple-websocket` on the handler and pulls `coder/websocket` into the agent · **DNS**: TXT queries to an authoritative zone, payload base64url in the QNAME · **DoH**: the DNS wire format POSTed to a public resolver over HTTPS; blends with browser DoH, escapes UDP/53 filters · **ICMP**: echo request/response carrying a base64url JSON envelope with larger per-chunk payloads than DNS; works when only `ping` is allowed outbound · **WireGuard**: the C2 protocol carried over a userspace WireGuard device; reaches networks that permit UDP/51820 but filter or proxy TCP/443; requires `pyroute2` and `CAP_NET_ADMIN` on the handler and pulls a userspace WireGuard stack into the agent · **HTTP+DNS / HTTP+DoH / DNS+DoH**: two transports in one binary with automatic failover after N transport-level failures · **SMB**: Windows named pipe carrying an AEAD-encrypted pivot session, tunnelled through a parent beacon over the parent's own transport · **TCP bind**: child listens, parent dials, same pivot session tunnel · **TCP reverse**: parent listens, child dials, same pivot session tunnel · Transports coexist; a single handler runs all of them simultaneously. WebSocket, QUIC, and WireGuard are single-transport in this version. **Adding a new transport is two classes plus mechanical glue.** The two classes — one Python listener, one Go client, both inheriting from the existing base — hold the entire design. The glue is a fixed template that every transport follows across seven files: a config field, a package var, one switch case, a stageless linker receiver and copy, a builder flag emitter, a build-manager copy, and a handler flag. No engine code changes, and the operator client is unaffected |
+| **Implant** | Rust binary, cross-compiled from the operator machine · No runtime config file, no environment variables, no command-line arguments — every property is baked in at build time · Windows PE, Windows DLL, Linux ELF, Donut shellcode, or stager output · amd64 and arm64 · Migration via `migrate --self` (detach a copy of the on-disk binary) or `migrate <pid>` / `migrate <name> --method default\|apc` (inject the agent's loader-wrapped shellcode into a foreign process) — the session survives either way, with the same machine fingerprint and the same beacon ID · `--method apc` selects remote APC injection on Windows; the default remains `CreateRemoteThread` / `ptrace` |
+| **Transports** | **HTTP**: HTTPS with server-authenticated TLS by default, optional mTLS, optional RootCA pinning, BoringSSL browser ClientHello · **QUIC**: HTTP/3 over UDP, same C2 protocol as HTTP on a different carriage; reaches networks that permit HTTP/3 but block or proxy direct TCP; requires `aioquic` on the handler and pulls `quinn` into the agent · **WebSocket**: one wss:// connection per check-in cycle, same JSON body as HTTP inside the frame; reaches networks where a browser-shaped client is expected and a raw HTTPS GET is not; requires `simple-websocket` on the handler and pulls `tokio-tungstenite` into the agent · **DNS**: TXT queries to an authoritative zone, payload base64url in the QNAME · **DoH**: the DNS wire format POSTed to a public resolver over HTTPS; blends with browser DoH, escapes UDP/53 filters · **ICMP**: echo request/response carrying a base64url JSON envelope with larger per-chunk payloads than DNS; works when only `ping` is allowed outbound · **WireGuard**: the C2 protocol carried over a userspace WireGuard device; reaches networks that permit UDP/51820 but filter or proxy TCP/443; requires `pyroute2` and `CAP_NET_ADMIN` on the handler and pulls `boringtun` into the agent · **HTTP+DNS / HTTP+DoH / DNS+DoH**: two transports in one binary with automatic failover after N transport-level failures · **SMB**: Windows named pipe carrying an AEAD-encrypted pivot session, tunnelled through a parent beacon over the parent's own transport · **TCP bind**: child listens, parent dials, same pivot session tunnel · **TCP reverse**: parent listens, child dials, same pivot session tunnel · Transports coexist; a single handler runs all of them simultaneously. WebSocket, QUIC, and WireGuard are single-transport in this version. **Adding a new transport is two classes plus mechanical glue.** The two classes — one Python listener, one Go client, both inheriting from the existing base — hold the entire design. The glue is a fixed template that every transport follows across seven files: a config field, a package var, one switch case, a stageless linker receiver and copy, a builder flag emitter, a build-manager copy, and a handler flag. No engine code changes, and the operator client is unaffected |
 | **Pivot model** | A parent beacon carries traffic for one or more children that cannot reach the team server directly · Peer-to-peer handshake with an engagement-wide ECDSA P-256 pivot keypair · The parent proves possession of the pivot private key; the child proves possession of its own identity signing key · A fresh ECDH exchange derives independent per-direction session keys (HKDF-SHA256, info string `tornadoc2-pivot-v2`) · Every subsequent C2 frame is an AES-256-GCM AEAD frame with a monotonic sequence number in the additional data · Transparent to the operator: pivoted children appear with normal beacon IDs · Wire encryption on the child's own C2 envelope is preserved — the parent carries it opaquely · The parent's own transport to the team server continues to use server-ECDH wire encryption |
 | **Wire encryption** | AES-256-GCM envelope on every request and response body · Key derived from a P-256 ECDH exchange · Backward-compatible: an agent built without the embedded ECDH public key speaks plaintext |
 | **Identity signing** | Every check-in carries an ECDSA signature over `machine_id\|hostname\|username\|os\|ts` · Server verifies before pinning · Closes first-contact impersonation on plaintext builds · Signed payload excluded from the machine fingerprint |
@@ -483,13 +492,13 @@ BOF and .NET assembly execution are Windows-only.
 | **Native execution** | `cat`, `ls`, `find`, `grep`, `head`, `tail`, `stat`, `strings`, `hexdump`, `sha1`, `sha256`, `md5`, `cksum`, `wc`, `nl`, `rev`, `sort`, `uniq`, `tr`, `base64`, `gzip`, `gunzip`, `which`, `readlink`, `realpath`, `du`, `ps`, `id`, `env`, `pwd`, `whoami` (with `/priv` on Windows), `hostname`, `uname`, `df`, `uptime`, `date`, `getpid`, `getppid`, `ifconfig`, `netstat`, `arp`, `route`, `users`, `groups`, `av-list`, `screenshot`, `mkdir`, `rm`, `cp`, `mv`, `chmod`, `ln`, `touch`, `curl`, `resolve`, `nc`, `hashdump`, `enablepriv`, `lsassdump` execute in-process · `readfile` as an alias for `cat` · Windows identity: `make_token` builds a NEW_CREDENTIALS token and holds it for subsequent `exec`; `rev2self` drops it; `runas` spawns a child in a fresh logon session under supplied credentials |
 | **Network verbs (in-process)** | `curl` — HTTP/HTTPS client with `-X`, `-H`, `-d`, `-k`, `-i`, `-L`, `-o`, `-m`, `--max-size` · `resolve` — DNS lookups for A, AAAA, CNAME, MX, NS, TXT, PTR · `nc` — TCP connect/banner grab with `-z`, `-w`, `--send` · No `/bin/curl`, no `dig`, no `/bin/nc` |
 | **Command execution** | `exec` spawns a child process · `sh` routes a command through a stdin-piped shell so the command never appears in argv · `shell` holds a `/bin/sh` (Linux) or `cmd.exe` (Windows) alive across check-ins so `cd`, `env`, and shell variables persist between commands. **Bad opsec** — the client warns and confirms before starting one. `sh` is the recommended form for one-off commands; `shell` is for sessions where state persistence is worth a long-lived child process on the target |
-| **In-memory payloads** | `execmem <path> exe` on Windows — in-process Go PE loader: maps the image, resolves imports, applies base relocations, walks the TLS directory, executes the entry point; no PowerShell, no temp file · `execmem <path> elf` on Linux (`memfd_create`, `/dev/shm` fallback) · `execute-assembly <local.exe>` runs a .NET assembly by spawning a **sacrificial worker process**. The worker hosts the CLR, loads the target with `Assembly.Load(byte[])`, and captures stdout/stderr. When the target calls `Environment.Exit` — the Sharp* family does, at the end of `Main` — the worker dies and the beacon survives. Only a fixed, non-secret bootstrap touches disk, and only under `%TEMP%` with `FILE_FLAG_DELETE_ON_CLOSE`. The sacrificial binary is settable per-session with the `spawnto` verb; the default is a fresh copy of the beacon binary · On-disk source unlinked before invocation on every path |  
+| **In-memory payloads** | `execmem <path> exe` on Windows — in-process Rust PE loader: maps the image, resolves imports, applies base relocations, walks the TLS directory, executes the entry point; no PowerShell, no temp file · `execmem <path> elf` on Linux (`memfd_create`, `/dev/shm` fallback) · `execute-assembly <local.exe>` runs a .NET assembly by spawning a **sacrificial worker process**. The worker hosts the CLR, loads the target with `Assembly.Load(byte[])`, and captures stdout/stderr. When the target calls `Environment.Exit` — the Sharp* family does, at the end of `Main` — the worker dies and the beacon survives. Only a fixed, non-secret bootstrap touches disk, and only under `%TEMP%` with `FILE_FLAG_DELETE_ON_CLOSE`. The sacrificial binary is settable per-session with the `spawnto` verb; the default is a fresh copy of the beacon binary · On-disk source unlinked before invocation on every path |  
 | **Inline scripts** | `pyexec`, `psexec`, `shexec` deliver script source base64-encoded in the task and pipe it to `python3 -`, `powershell.exe -Command -`, or `/bin/sh -s` via stdin · Source never appears in argv · `--stdin` variant reads the source from the operator's terminal in paste mode |
-| **BOF / COFF** | Windows-only execution · `bofs` (main-scope) manages the **shared server-side registry** — `list`, `add`, `remove` · `bof` (beacon-scope) runs a registered BOF by name, or a local `.o` file by path · Arguments packed according to the BOF's declared `bof_pack` format when one is registered, falling back to a single space-joined `z` string · The registry is persisted to `logs/.tornadoc2_bofs.json`, with raw COFF bytes under `bofs/<name>.o` · Server never executes the bytes — the beacon's in-process Go COFF loader does |
+| **BOF / COFF** | Windows-only execution · `bofs` (main-scope) manages the **shared server-side registry** — `list`, `add`, `remove` · `bof` (beacon-scope) runs a registered BOF by name, or a local `.o` file by path · Arguments packed according to the BOF's declared `bof_pack` format when one is registered, falling back to a single space-joined `z` string · The registry is persisted to `logs/.tornadoc2_bofs.json`, with raw COFF bytes under `bofs/<name>.o` · Server never executes the bytes — the beacon's in-process Rust COFF loader does |
 | **C2 profile catalogue** | `c2-profiles` (alias `c2p`) lists every profile the server can build against, with the fields an operator needs to pick one — the three request paths, the User-Agent, and the shaping roles the profile declares · `c2-profiles <name>` prints the raw JSON so it can be copied as a starting point for a new profile or pasted into a build config · Thirty profiles ship in-tree covering enterprise SaaS (Teams, Slack, Salesforce, ServiceNow-adjacent APIs), developer infrastructure (GitHub, GitLab, Stripe, Sentry-adjacent APIs), and consumer applications (Instagram, TikTok, Netflix, YouTube), plus a dedicated DNS-transport profile · **Multi-profile handler.** The listener builds a per-path shape map at startup and serves every profile under `profiles/c2/` concurrently. Agents built against different profiles coexist on one handler, each getting the shape its own profile declared — same port, same certificate, same process. No team-server restart to change profiles, no second listener for a second fingerprint, no "active profile" state. Contrast with Cobalt Strike, Sliver, Havoc, and Brute Ratel, which all bind one profile per team server. Thirty profiles ship in-tree; the handler scales to any number without architectural change
 | **Scheduling** | Configurable sleep interval and jitter · Re-check-in on session expiry · Kill date enforcement · Working-hours window · Server-side recurring tasks with persistent storage and optional output retention |
 | **Cryptography** | ECDSA P-256 task signing · ECDSA result signing · ECDSA identity signing at check-in · P-256 ECDH wire key agreement · Trust-on-first-use public key pinning per session |
-| **OPSEC** | Compile-time evasion profiles · Anti-sandbox, anti-debug, anti-VM heuristics · AMSI/ETW patching · Sleep mask with four modes: `rc4` and `aes-ctr` on Linux and Windows, `cronos` and `hwbp` on Windows amd64 · No kernel timer, no APC, no new thread in either Windows mode · Indirect syscalls · Self-deletion of the on-disk binary · String obfuscation · Garble · UPX · Shell history suppression · Jittered first check-in |
+| **OPSEC** | Compile-time evasion profiles · Anti-sandbox, anti-debug, anti-VM heuristics · AMSI/ETW patching · Sleep mask with four modes: `rc4` and `aes-ctr` on Linux and Windows, `cronos` and `hwbp` on Windows amd64 · No kernel timer, no APC, no new thread in either Windows mode · Indirect syscalls · Self-deletion of the on-disk binary · String obfuscation · UPX · Shell history suppression · Jittered first check-in |
 | **Chunked transfer** | Upload: `truncate` / `writechunk` / `sha256file` · Download: `filesize` / `readchunk` / `sha256file` · 256 KiB base chunk size, jittered within `[base/2, base]` · **Pipelined, 16 chunks in flight** so the beacon's task queue is never idle · **Runs on a background worker thread** — the prompt stays live and no per-chunk output floods the terminal · `jobs` lists active transfers, `jobs kill <id>` cancels · Local and remote SHA-256 verified · On a verified download, pushes to the loot store automatically |
 | **Extensions** | WASM extension host with a four-function ABI · wazero interpreter, no JIT to `PROT_EXEC` · 16 MiB memory ceiling per module · Runtime push, hot-swap, and unload over the ECDSA-signed task channel · Sub-verbs: `list`, `info`, `load`, `unload`, `list-loaded`, `call` |
 | **Staged payloads** | A ~4 MB stager that checks in, fetches a full agent, decrypts it in memory, and executes it · Linux uses `memfd_create` with a `/dev/shm` fallback · Windows uses `FILE_FLAG_DELETE_ON_CLOSE` · Optional AES-256-GCM per-payload encryption · ECDSA signature verification on the served payload |
@@ -533,8 +542,9 @@ every decision:
 
 There is no runtime configuration. The callback URL, sleep interval,
 working-hours window, kill date, C2 profile, TLS fingerprint, and
-evasion set are all set at build time via `-ldflags`. The binary that
-leaves the operator machine is the binary that runs. Nothing reads
+evasion set are all set at build time via `TC2_*` environment
+variables consumed by `build.rs`. The binary that leaves the operator
+machine is the binary that runs. Nothing reads
 from disk. Nothing reads from the environment. Nothing accepts
 command-line arguments.
 
@@ -678,7 +688,7 @@ alongside the other two in
 [The contribution-path summary](#the-contribution-path-summary).
 
 **Adding a transport is two classes plus mechanical glue.** A new
-transport is one Python listener class and one Go client class,
+transport is one Python listener class and one Rust client class,
 both inheriting from the existing base classes. Those two classes
 hold the entire design: wire parsing, chunking, reassembly,
 session handling, error paths. The engine does not know which
@@ -688,13 +698,14 @@ listener terminated the socket. `beacon/listener.py`,
 transport-agnostic.
 
 Around the two classes sits a small amount of mechanical glue
-that follows the same template for every transport: a config
-struct field on the agent, a package var, one `case` in the
-agent's dispatch switch, a linker-flag receiver and copy in the
-stageless build, the builder's per-transport validation and flag
-emission, the remote build manager's parameter pass-through, and
-the handler's CLI flag and listener-startup call. Every one of
-those edits is a name-swap of the same template — there is no
+that follows the same template for every transport: a config 
+struct field on the agent, a package var, one `match` arm
+in the agent's dispatch switch, a `TC2_*` env var read and `pub
+const` emission in `build.rs`, the builder's per-transport
+validation and env var emission, the remote build manager's
+parameter pass-through, and the handler's CLI flag and
+listener-startup call. Every one of those edits is 
+a name-swap of the same template — there is no
 dispatch table, no engine code, and no operator-client change.
 The client talks to the server API; the transport is a
 server-to-agent concern.
@@ -856,10 +867,10 @@ executable segment, flips it to read/write with `VirtualProtect`
 on Windows or `mprotect` on Linux, encrypts the region above a
 fixed tail with a per-cycle key, sets the region back to
 read/execute, and calls a native sleep stub that does not enter
-the Go runtime. On return, the segment is decrypted and restored.
+the async runtime. On return, the segment is decrypted and restored.
 
 Both modes leave a fixed tail of the executable segment
-unencrypted because the sleep stub lives there. The Go linker
+unencrypted because the sleep stub lives there. The linker
 places functions in a stable-enough order that the check at
 runtime refuses the build if the stub lands outside the tail; the
 build error names the function and the tail bounds. Do not
@@ -870,31 +881,31 @@ thing turning an unexplained crash into an actionable error.
 thread to a fiber, creates a second fiber whose entry point is a
 native function, encrypts the executable segment and the primary
 fiber's stack region, and switches to the encrypt fiber. That
-fiber performs the wait directly and switches back. The Go
+fiber performs the wait directly and switches back. The async
 runtime never sees the encrypted window, because the encrypt fiber
 runs on a stack the runtime does not know about and does not call
-back into Go.
+back into runtime.
 
 **`hwbp` — Windows amd64 only.** The agent installs a Vectored
 Exception Handler and sets DR0 to the entry point of
 `NtWaitForSingleObject`. When the beacon thread enters the wait,
 the CPU raises a `#DB` exception before the first instruction of
 the target function executes. The VEH — a native assembly
-function, not a Go callback — encrypts the executable segment and
+function, not a Rust callback — encrypts the executable segment and
 the calling thread's stack region, performs the wait via a direct
 syscall, decrypts, and adjusts `RIP` to return past the
 breakpoint. No timer, no APC, no new thread, and no kernel event
 that a detection rule can pattern on.
 
-**The goroutine stack is not encrypted.** All four modes encrypt
-the executable segment. None of them encrypt the goroutine stack,
-because the Go runtime may be preempted by a `SIGURG`-delivered
-async signal at any point during the sleep, and the runtime's
-signal handler walks the stack. Encrypting a stack the handler
-needs to walk crashes the process. The limitation is documented
-in `currentStackRegion` in `agent/evasion/sleepmask_stack_windows.go`
-and is the same for every sleep-mask design that runs on the Go
-runtime.
+**The thread stack is not encrypted.** All four modes encrypt
+the executable segment. None of them encrypt the calling thread's
+stack, because the signal that preempts a long-running task
+walks the stack. Encrypting a stack the
+handler needs to walk crashes the process. The limitation is
+documented in `current_stack_region` in
+`agent/src/evasion/sleepmask_stack_windows.rs` and is the same for
+every sleep-mask design that runs on an async runtime.
+
 
 - **Indirect syscalls.** On Windows, the agent reads the system
   service number out of the ntdll stub without executing it, then
@@ -910,7 +921,8 @@ On kill or kill-deadline:
 
 ### Extensions
 
-- **Sandboxed WASM.** Extensions load into a wazero interpreter.
+- **Sandboxed WASM.** Extensions load into a `wasmtime` interpreter
+  (or `wasmi` for a pure-Rust, no-LLVM build).
 - **Four host functions, all read-only or write-only.**
 - **No binary hash change.** The agent binary is identical with zero
   extensions loaded and with fifty.
@@ -938,29 +950,28 @@ timer and APC artifacts,  but the `cronos` fiber API and the
 in particular touches `DR0` and `DR7`, and a security product 
 that watches debug-register state will see the writes.
 
-The HTTP transport's uTLS ClientHello mimicry does not carry over to
+The HTTP transport's BoringSSL ClientHello mimicry does not carry over to
 **QUIC** or **WireGuard**. Both are explicitly listed below because
 the failure mode is easy to miss: the `--tls-profile` build flag is
 accepted by the builder for every transport, but not every transport
 applies the profile at runtime.
 
 - **QUIC** composes its own TLS 1.3 ClientHello inside the QUIC
-  Initial packet. Go's QUIC stack does not accept a uTLS dialer, so
+  Initial packet. `quinn` does not accept a `boring` dialer, so
   the profile cannot be applied even in principle without replacing
   the QUIC library.
-- **WebSocket** uses the Go standard library's `crypto/tls` by
-  default but honours `--tls-profile` when a browser profile is
-  selected. The WebSocket dialer is fed an `*http.Client` whose
-  transport performs the TLS handshake through the same
-  `tlsfp.NewHTTPClient` helper the HTTP transport uses, so the
-  ClientHello a network observer sees on a WebSocket handshake
-  matches the profile the operator selected. On a `--tls-profile go`
-  build the ClientHello is the standard library's.
+- **WebSocket** uses `rustls` by default but honours `--tls-profile`
+  when a browser profile is selected. The WebSocket dialer is fed a
+  `reqwest::Client` whose transport performs the TLS handshake
+  through the same `tlsfp::new_http_client` helper the HTTP transport
+  uses, so the ClientHello a network observer sees on a WebSocket
+  handshake matches the profile the operator selected. On a
+  `--tls-profile rustls` build the ClientHello is `rustls`'s.
 - **WireGuard** carries a TLS connection inside the tunnel. The
   fingerprint is not visible on the public wire — a network
-  observer sees only the WireGuard handshake — so the uTLS profile
-  is unnecessary rather than impossible. The current implementation
-  uses the standard library for the inner connection.
+  observer sees only the WireGuard handshake — so the BoringSSL
+  profile is unnecessary rather than impossible. The current
+  implementation uses `rustls` for the inner connection.
 
 **APC injection does not defeat EDR.** The `migrate <pid> --method
 apc` path removes the `CreateRemoteThread` event, but
@@ -1238,7 +1249,7 @@ The engine is transport-agnostic. Ten transports ship in-tree.
 `beacon/listener.py` — `BeaconListener`. Runs on `--beacon-port`,
 terminates TLS, reuses the handler's certificate material. ALPN
 advertises only `http/1.1` because Werkzeug cannot parse the HTTP/2
-preface. The Go client is configured to fall back cleanly.
+preface. The Rust client is configured to fall back cleanly.
 
 A per-source-IP token bucket wraps the WSGI app before Flask routes
 the request. The bucket allows 30 requests per second sustained with
@@ -1277,9 +1288,9 @@ proxy.
 - `aioquic` on the handler (`pip install aioquic`). The listener
   refuses to start without it, logs a clear refusal, and leaves the
   other transports running.
-- `github.com/quic-go/quic-go` in the agent's `go.mod`. The builder
-  pulls it in on first use; run `go mod tidy` inside `agent/` after
-  adding the transport.
+- `quinn` in the agent's `Cargo.toml`. The builder pulls it in on
+  first use; run `cargo build` inside `agent/` after adding the
+  transport.
 - The agent's `transport_mode` must be `quic` alone. In this version,
   QUIC cannot be combined with another transport in the same binary.
   The reason is that the failover ring is built around the HTTP
@@ -1313,9 +1324,9 @@ correctly for a QUIC-only build; override the prompt only if the
 listener is behind a redirector or a NAT translation.
 
 **ClientHello fingerprint.** QUIC composes its own TLS 1.3
-ClientHello inside the QUIC Initial packet. Go's QUIC stack does not
-accept a uTLS dialer, so `--tls-profile` is accepted by the builder
-but ignored at runtime for a QUIC-only build.
+ClientHello inside the QUIC Initial packet. `quinn` does not
+accept a `boring` dialer, so `--tls-profile` is accepted by the
+builder but ignored at runtime for a QUIC-only build.
 
 The QUIC client is nevertheless shaped to match a modern browser's
 HTTP/3 stack as closely as Go's QUIC library allows:
@@ -1356,15 +1367,15 @@ write, because the frame is JSON rather than HTTP — QUIC carries
 real HTTP/3 headers. The QUIC listener subclasses `BeaconListener`
 and returns the Flask response verbatim, so header and cookie
 placement travel back on the HTTP/3 response exactly as they do on
-HTTP/1.1. The Go QUIC client calls the same `extractEnvelope` helper
-the HTTP transport uses, so a shaped envelope that lives in an
+HTTP/1.1. The Rust QUIC client calls the same `extract_envelope` helper the
+HTTP transport uses, so a shaped envelope that lives in an
 `X-Request-ID` header or a `Set-Cookie` value is recovered
 identically on both transports.
 
 **Scheduling headers work identically.** The `X-Beacon-Sleep`,
 `X-Beacon-Jitter`, `X-Beacon-Kill`, `X-Beacon-WorkStart`, and
 `X-Beacon-WorkEnd` headers travel on every `/tasks` response exactly
-as they do on the HTTP transport. The Go QUIC client parses them
+as they do on the HTTP transport. The Rust QUIC client parses them
 through the same code path. Sleep interval, jitter, kill deadline,
 and the working-hours window are therefore all runtime-configurable
 on a QUIC session, matching HTTP.
@@ -1375,8 +1386,8 @@ It does not protect against UDP egress filtering that is applied
 uniformly (a network that blocks all UDP except an internal resolver
 reaches the QUIC listener only if the QUIC port is explicitly
 permitted), and it does not hide the SNI in the ClientHello — the
-SNI is visible unless Encrypted Client Hello is in use, which Go's
-QUIC stack does not implement.
+SNI is visible unless Encrypted Client Hello is in use, which `quinn`
+does not implement.
 
 ### WebSocket
 
@@ -1408,8 +1419,8 @@ have carried over a plain request/response pair.
 - `simple-websocket` on the handler
   (`pip install simple-websocket`). The listener refuses to start
   without it and leaves the other transports running.
-- `github.com/coder/websocket` in the agent's `go.mod`. Run
-  `go mod tidy` inside `agent/` after adding the transport.
+- `tokio-tungstenite` in the agent's `Cargo.toml`. Run
+  `cargo build` inside `agent/` after adding the transport.
 - The agent's `transport_mode` must be `websocket` alone. In this
   version, WebSocket cannot be combined with another transport in
   the same binary: the session cookie is one value and the two
@@ -1435,13 +1446,13 @@ the operator typed as the callback URL works for both HTTP and
 WebSocket builds.
 
 **TLS ClientHello fingerprint.** WebSocket speaks real TLS, and the
-`--tls-profile` build flag applies. The WebSocket dialer is fed an
-`*http.Client` whose transport routes the handshake through the same
-`tlsfp.NewHTTPClient` helper the HTTP transport uses, so a
+`--tls-profile` build flag applies. The WebSocket dialer is fed a
+`reqwest::Client` whose transport routes the handshake through the
+same `tlsfp::new_http_client` helper the HTTP transport uses, so a
 `--tls-profile chrome --transport websocket` build produces a
 ClientHello byte-identical to what the HTTP transport would send on
-the same profile. The default `--tls-profile go` leaves the
-handshake on the standard library's default.
+the same profile. The default `--tls-profile rustls` leaves the
+handshake on `rustls`'s default.
 
 The C2 profile's paths, User-Agent, and extra headers also travel
 on the WebSocket upgrade request, so the request shape and the TLS
@@ -1513,8 +1524,8 @@ the two.
 
 **Requirements on the agent side:**
 
-- `github.com/chrj/wgnet` in the agent's `go.mod`. Run
-  `go mod tidy` inside `agent/` after adding the transport. The
+- `boringtun` in the agent's `Cargo.toml`. Run
+  `cargo build` inside `agent/` after adding the transport. The
   userspace WireGuard stack is linked into the binary at build
   time; there is no runtime dependency on the target.
 - The agent's `transport_mode` must be `wireguard` alone. In this
@@ -1605,7 +1616,7 @@ flags, not by any profile field.
 **TLS ClientHello fingerprint.** The inner HTTPS connection the
 agent makes to the server's tunnel IP is a real TLS handshake, but
 **the `--tls-profile` build flag has no effect on it.** The inner
-connection uses the Go standard library's `crypto/tls`, not uTLS.
+connection uses `rustls`, not `boring`.
 This is a smaller gap than the WebSocket case: the inner TLS never
 crosses the public wire — a network observer sees only the
 WireGuard handshake, which carries no ClientHello at all — so the
@@ -1660,7 +1671,7 @@ TCP socket on `--dns-port`. The agent sends every chunk over UDP
 first; when a UDP response carries the DNS TC (truncated) bit, the
 client retries that chunk over TCP. This matters because a TXT
 reply larger than 512 bytes does not fit in a plain UDP packet and
-the Go DNS library does not auto-fallback — without the retry,
+`hickory-resolver` does not auto-fallback — without the retry,
 every check-in or tasks reply above that size would silently lose
 its payload. A 512-byte UDP ceiling therefore applies to individual
 replies, but the effective per-reply ceiling on the TCP path is
@@ -1812,7 +1823,7 @@ allow ping for reachability testing but nothing else.
 **Requirements:**
 
 - Linux only on both sides. The Python side refuses to start on
-  Windows, and the Go side refuses to build with `transport=icmp`
+  Windows, and the Rust side refuses to build with `transport=icmp`
   for `target_os=windows`.
 - The team server needs `CAP_NET_RAW` on the Python process. Run
   the handler as root, or `setcap cap_net_raw+ep $(which python3)`.
@@ -1820,9 +1831,9 @@ allow ping for reachability testing but nothing else.
   start; the other transports are unaffected.
 - The C2's public IPv4 address must be reachable from the target.
   This is a build-time flag, `--icmp-host`.
-- **The agent dials IPv4 only.** The Go client opens an `ip4:icmp`
-  raw socket and sends to the address given by `--icmp-host`. There
-  is no IPv6 path in the shipped agent.
+- **The agent dials IPv4 only.** The Rust client opens an
+  `IPPROTO_ICMP` raw socket and sends to the address given by
+  `--icmp-host`. There is no IPv6 path in the shipped agent.
 - **The listener also opens an IPv6 raw socket when the host allows
   it.** If `socket.AF_INET6` and `IPPROTO_ICMPV6` are available, the
   Python `ICMPTransport` starts a second receive loop and responds
@@ -1871,7 +1882,7 @@ It is not large enough for a full agent or a large uploaded file.
 they are on the DNS transport. The client only reads the reply to
 the final chunk; the intermediate ACKs exist so a UDP-style dropped
 packet on chunk 7 of 20 does not silently discard the whole
-transfer. The Go client retries each chunk up to three times with
+transfer. The Rust client retries each chunk up to three times with
 the same transfer id, so a retransmit of a chunk that already
 landed is idempotent.
 
@@ -2322,8 +2333,8 @@ failure a loud one.
 
 **One instance per child, and the next is opened immediately.** The
 accept loop calls `ConnectNamedPipe` on the current instance, then
-spawns a goroutine to serve the connection and immediately creates a
-fresh instance for the next child. A second child connecting while
+spawns an async task to serve the connection and immediately creates
+a fresh instance for the next child. A second child connecting while
 the first is being served does not wait; a third does not wait
 either, up to the 255-instance ceiling. Each connection is served
 independently and shares only the relay's `pinnedKeys` map under a
@@ -2344,14 +2355,14 @@ through a `WaitForSingleObject` on an event with a 30-second
 timeout. A parent that hangs on `ConnectNamedPipe`, or a child
 that stops reading mid-frame, produces a bounded wait rather than
 an indefinite block. The 30-second value is a named constant
-(`pipeDeadline` in both `transport_smb_windows.go` and
-`smb_relay_windows.go`) and is not configurable at runtime.
+(`pipe_deadline` in both `transport_smb_windows.rs` and
+`smb_relay_windows.rs`) and is not configurable at runtime.
 
 The deadline is a defensive bound, not an operational cadence. A
 pipe operation that takes 30 seconds is a broken peer, not a slow
 one; the pivot handshake and a normal round trip both complete in
 single-digit milliseconds on any responsive network. The deadline
-exists so a hung peer releases its goroutine and the transport can
+exists so a hung peer releases its async task and the transport can
 reconnect on the next poll.
 
 **Build the parent:**
@@ -2601,7 +2612,7 @@ difference — every other layer is the same code.
 
 The parent accepts one child at a time per listen socket, but is not
 limited to one child overall: each accepted connection is served in
-its own goroutine, and a new `Accept()` is issued immediately. Up to
+its own async task, and a new `Accept()` is issued immediately. Up to
 4096 distinct child fingerprints are accepted over the lifetime of
 the parent process — the same TOFU pin cap the SMB relay and the TCP
 bind relay carry. A second child that dials while the first is
@@ -2926,13 +2937,13 @@ match the token on the child.
   launch to generate the server keypair. Not required at runtime
   after that; if the key file at `.keys/wireguard/server.key` is
   pre-generated, the handler starts without the tool present
-- **Go toolchain 1.24+** — compiles agents locally and for remote
-  operators
+- **Rust toolchain (stable)** — compiles agents locally and for remote
+  operators. Install with `rustup`: https://rustup.rs
 
 **Operator workstation (runs the client):**
 
 - Python 3.7 or later
-- No Go toolchain required — remote builds happen on the server
+- No Rust toolchain required — remote builds happen on the server
 - The remote client does not need Donut, OpenSSL, `aioquic`, or any
   other build tooling. It talks to the team server over mTLS. The
   build wizard reads the QUIC listener's port from the server's
@@ -3001,39 +3012,50 @@ protocol-level lives in either frontend.
   the builder prints a warning and produces a binary that supports
   `migrate --self` only. See [Migration](#migration) for the
   contract the stub must satisfy.
-- **`garble`** — control-flow obfuscation (used by `opsec` and
-  `paranoid` profiles). Installed automatically by
-  `install-go-build.sh` at a pinned version; the manual equivalent
-  is `go install mvdan.cc/garble@v0.17.0`.
+- **`garble`** — *not applicable to the Rust tooling.* The Rust build
+  does not have a garble equivalent. Symbol stripping and LTO are set
+  in `Cargo.toml` (`strip = "symbols"`, `lto = "fat"`); string
+  obfuscation requires a user-supplied proc-macro and is not shipped
+  in-tree.
 - **`UPX`** — binary packing (used by `paranoid`).
 - **`rustup` + `wasm32-unknown-unknown` target** — building WASM
   extensions.
 - **`libnotify-bin`** — desktop notifications on Linux.
 - **`terminal-notifier`** — desktop notifications on macOS.
 
-**Go modules pulled by `go mod tidy` inside the agent package:**
+**Rust crates pulled by `cargo build` inside the agent package:**
 
-- `github.com/refraction-networking/utls` — browser TLS ClientHello
-- `github.com/tetratelabs/wazero` — WASM extension host
-- `github.com/miekg/dns` — DNS transport
-- `github.com/quic-go/quic-go` — QUIC / HTTP/3 transport
-- `github.com/coder/websocket` — WebSocket transport
-- `github.com/chrj/wgnet` — WireGuard transport
+- `boring` — BoringSSL bindings, browser TLS ClientHello
+- `wasmtime` (or `wasmi`) — WASM extension host
+- `hickory-resolver` + `hickory-proto` — DNS transport
+- `quinn` — QUIC / HTTP/3 transport
+- `tokio-tungstenite` — WebSocket transport
+- `boringtun` — WireGuard transport
 
-### Go build bootstrap
+The following are also required by the Rust agent and are not
+pulled by the Go version of this tree:
+
+- `tokio` — async runtime
+- `reqwest` — HTTP transport
+- `rustls` — TLS (default profile)
+- `aes-gcm` — wire encryption
+- `p256` — ECDSA and ECDH
+- `serde` + `serde_json` — wire types
+
+### Rust build bootstrap
 
 Before the first agent build — and after any change to the agent's
-dependency set — run `install-go-build.sh` from the repository root.
-The script is idempotent: it backs up the current `go.mod` and
-`go.sum`, rewrites `go.mod` with the correct module name and the
-direct dependency list, installs `garble` at its pinned version,
-resolves the full module graph with `go mod tidy`, normalizes every
-`.go` file with `gofmt -w`, runs `go vet`, and verifies that both
-target platforms still compile.
+dependency set — run `install-rust-build.sh` from the repository root.
+The script is idempotent: it verifies the Rust toolchain and the
+cross-compilation targets are installed, builds `Bootstrap.dll` from
+`Bootstrap.cs` when the source is newer, warms the Cargo cache with
+`cargo fetch`, runs `cargo fmt --check` and `cargo clippy` for lint,
+and cross-compiles the agent binary for both target triples.
 
 ```bash
-./install-go-build.sh                    # operate on ./tornadoc2/agent
-./install-go-build.sh <path>             # operate on <path>
+./install-rust-build.sh                  # operate on ./tornadoc2/agent
+./install-rust-build.sh <path>           # operate on <path>
+```
 ```
 
 | Variable | Default | Read by | Effect |
@@ -3065,7 +3087,8 @@ waste.
 
 **Team server** — `install-deps-server.sh`. Installs the Python
 handler's dependencies (flask, cryptography, dnslib, aioquic,
-simple-websocket, pyroute2), the Go 1.24+ toolchain and garble,
+simple-websocket, pyroute2), the Rust stable toolchain (via
+`rustup`), the cross-compilation targets the agent build needs,
 wireguard-tools, libcap2-bin, openssl, and the build tooling the
 handler needs to compile agents. Detects Debian / RHEL / Arch
 family and uses the native package manager where it can; falls
@@ -3118,9 +3141,9 @@ The server installer covers:
 
 | Family | System packages |
 |--------|-----------------|
-| Debian / Ubuntu / Kali / Mint / Pop | `python3`, `python3-pip`, `python3-flask`, `python3-cryptography`, `python3-dnslib`, `openssl`, `libssl-dev`, `libffi-dev`, `build-essential`, `git`, `curl`, `golang-go`, `wireguard-tools`, `upx-ucl`, `gcc-mingw-w64-x86-64`, `libcap2-bin`, `libnotify-bin` |
-| RHEL / CentOS / Rocky / Alma / Fedora / Amazon | `python3`, `python3-pip`, `python3-flask`, `python3-cryptography`, `python3-dnslib`, `openssl`, `openssl-devel`, `libffi-devel`, `gcc`, `gcc-c++`, `make`, `git`, `curl`, `golang`, `wireguard-tools`, `upx`, `mingw64-gcc`, `libcap`, `libnotify` |
-| Arch / Manjaro / EndeavourOS / Garuda | `python`, `python-pip`, `python-flask`, `python-cryptography`, `python-dnslib`, `openssl`, `libffi`, `base-devel`, `git`, `curl`, `go`, `wireguard-tools`, `upx`, `mingw-w64-gcc`, `libcap`, `libnotify` |
+| Debian / Ubuntu / Kali / Mint / Pop | `python3`, `python3-pip`, `python3-flask`, `python3-cryptography`, `python3-dnslib`, `openssl`, `libssl-dev`, `libffi-dev`, `build-essential`, `git`, `curl`, `wireguard-tools`, `upx-ucl`, `gcc-mingw-w64-x86-64`, `libcap2-bin`, `libnotify-bin` |
+| RHEL / CentOS / Rocky / Alma / Fedora / Amazon | `python3`, `python3-pip`, `python3-flask`, `python3-cryptography`, `python3-dnslib`, `openssl`, `openssl-devel`, `libffi-devel`, `gcc`, `gcc-c++`, `make`, `git`, `curl`, `wireguard-tools`, `upx`, `mingw64-gcc`, `libcap`, `libnotify` |
+| Arch / Manjaro / EndeavourOS / Garuda | `python`, `python-pip`, `python-flask`, `python-cryptography`, `python-dnslib`, `openssl`, `libffi`, `base-devel`, `git`, `curl`, `wireguard-tools`, `upx`, `mingw-w64-gcc`, `libcap`, `libnotify` |
 
 Plus, via `pip` for every family on the server:
 
@@ -3132,11 +3155,9 @@ Plus, via `pip` for every family on the server:
 - `simple-websocket` — WebSocket transport.
 - `pyroute2` — WireGuard transport.
 
-And, via `go install`:
-
-- `mvdan.cc/garble@v0.17.0` — used by the `opsec` and `paranoid`
-  OPSEC profiles. The installer places the binary in `$GOPATH/bin`
-  and adds that directory to `PATH` for the current shell.
+The Rust toolchain is installed via `rustup` system-wide (to
+`/usr/local/rustup` and `/usr/local/cargo`), so it is visible to the
+handler process regardless of which user it runs as.
 
 Three optional items the server installer checks but does not
 force:
@@ -3149,10 +3170,9 @@ force:
 - **UPX** — used only by the `paranoid` OPSEC profile. Installed
   as a system package when available; a warning and a skip
   otherwise.
-- **Rust + wasm32-unknown-unknown** — required only for building
-  WASM extensions. The installer does not install rustup; it adds
-  the `wasm32-unknown-unknown` target to an existing rustup and
-  points at the upstream install line otherwise.
+- **`wasm32-unknown-unknown` target** — required only for building
+  WASM extensions. The server installer installs rustup itself
+  (system-wide) and adds the `wasm32-unknown-unknown` target.
 
 Neither installer applies Linux capabilities itself. The ICMP and
 WireGuard transports need `CAP_NET_RAW` and `CAP_NET_ADMIN`
@@ -3161,10 +3181,10 @@ action. Both installers detect the current state and print the
 exact `setcap` lines to run; the operator decides whether the
 change is appropriate for the host.
 
-After `install-deps-server.sh` completes, run `install-go-build.sh`
-from the repository root to repair `go.mod`, resolve the module
-graph, and confirm both target platforms compile. The scripts are
-independent and any can be rerun on its own.
+After `install-deps-server.sh` completes, run `install-rust-build.sh`
+from the repository root to warm the Cargo cache and confirm both
+target triples compile. The scripts are independent and any can be
+rerun on its own.
 
 **Linux capability for the ICMP transport.** The ICMP listener
 requires `CAP_NET_RAW`. Grant it once:
@@ -3196,7 +3216,7 @@ On a fresh host, install every dependency first:
 
 The installer detects the distribution family (Debian-derived,
 RHEL-derived, or Arch-derived), installs the system packages, and
-fetches the Python and Go tools the handler needs. See
+fetches the Python and Rust tools the handler needs. See
 [Requirements & Installation › Dependency installers](#dependency-installers)
 for what it covers and what it deliberately leaves to the operator.
 Rerun it any time; it is idempotent.
@@ -3471,7 +3491,7 @@ Flags:
 | `--identity-role <name>` | Agent identity role. Disambiguates two agents built from the same tree that run on the same host under the same user — without a role, both resolve to one session, one cookie, one task queue, and one row in the beacon list. The builder defaults the role to `smb-child`, `tcp-bind`, or `tcp-rev` for the three pivot child transports; every other build defaults to empty, which reproduces the pre-role fingerprint. The role travels in its own wire field, not as a hostname suffix. Set explicitly to name two non-pivot builds, or to override the transport default | empty |
 | `--profile <name>` | `default`, `stealth`, `opsec`, `paranoid` | `default` |
 | `--c2-profile <name>` | A profile name under `profiles/c2/` | Handler default |
-| `--tls-profile <name>` | `go`, `chrome`, `firefox`, `safari`. Has effect on HTTP, DoH, and WebSocket. Accepted but ignored on QUIC and WireGuard | `go` |
+| `--tls-profile <name>` | `rustls` , `chrome`, `firefox`, `safari`. Has effect on HTTP, DoH, and WebSocket. Accepted but ignored on QUIC and WireGuard | `rustls` |
 | `--kill-days <N>` | Days until self-destruct (0 = no deadline) | `30` |
 | `--work-hours <spec>` | `HH:MM-HH:MM` or `off`. Start must not equal end unless both are `00:00` — a wrapped window such as `22:00-06:00` is supported | `08:00-19:00` |
 | `--work-off` | Shorthand for `--work-hours off` (both bounds `00:00`) | — |
@@ -3766,20 +3786,16 @@ Optional build args, all off by default except the first two:
 | `INSTALL_UPX` | `1` | Install `upx-ucl` for the `paranoid` OPSEC profile |
 | `INSTALL_MINGW` | `1` | Install MinGW-w64 for `output_format=dll` builds |
 | `INSTALL_DONUT` | `0` | When `1`, installs `donut-shellcode` (the Python binding with a bundled `donut` binary) if no vendored binary is present at `beacon/bin/donut`. Required for `--format shellcode` builds and for `inject: true` on a Windows build |
-| `INSTALL_RUST` | `0` | Add rustup + `wasm32-unknown-unknown` for building WASM extensions |
-| `BOOTSTRAP_GO` | `1` | Run `install-go-build.sh` at build time to warm the Go module cache |
-| `GO_VERSION` | `1.24.4` | Pinned Go toolchain version |
+| `INSTALL_WASM` | `0` | Add the `wasm32-unknown-unknown` target for building WASM extensions. rustup itself is always installed |
+| `BOOTSTRAP_RUST` | `1` | Run `install-rust-build.sh` at build time to warm the Cargo cache |
+| `RUST_VERSION` | `stable` | Pinned Rust toolchain version |
 
 ```bash
 # Minimal image — no UPX, no MinGW, no WASM toolchain.
-docker build \
-    --build-arg INSTALL_UPX=0 \
-    --build-arg INSTALL_MINGW=0 \
-    --build-arg INSTALL_RUST=0 \
-    -t tornadoc2:slim .
+docker build --build-arg INSTALL_UPX=0 --build-arg INSTALL_MINGW=0 --build-arg INSTALL_WASM=0 -t tornadoc2:slim .
 
 # Full image with WASM toolchain.
-docker build --build-arg INSTALL_RUST=1 -t tornadoc2:full .
+docker build --build-arg INSTALL_WASM=1 -t tornadoc2:full .
 ```
 
 **Run.**
@@ -3874,12 +3890,12 @@ docker buildx build \
     --push .
 ```
 
-The Go toolchain is downloaded from `go.dev` for the matching
+The Rust toolchain is downloaded by rustup for the matching 
 architecture. Every other step is architecture-agnostic. Two
 prerequisites are worth naming:
 
 - **On a Linux host, QEMU binfmt must be registered before the
-  build.** The arm64 leg downloads and executes an arm64 Go
+  build.** The arm64 leg downloads and executes an arm64 Rust
   toolchain; on an amd64 host that requires kernel-level
   emulation. Docker Desktop provides it automatically; Docker
   Engine on Linux does not. Register once:
@@ -3888,7 +3904,7 @@ prerequisites are worth naming:
   docker run --privileged --rm tonistiigi/binfmt --install all
   ```
 
-  Without it, the build fails at the Go toolchain layer with
+  Without it, the build fails at the Rust toolchain layer with
   `exec format error`.
 
 - **MinGW is amd64-host only.** Debian publishes
@@ -3912,8 +3928,8 @@ and `--push` cannot be combined for a multi-arch build — `--load`
 supports only a single platform.
 
 **Container architecture is independent of agent architecture.**
-The Go toolchain in the arm64 image can produce amd64 agents and
-vice versa; Go cross-compilation does not require the host to
+The Rust toolchain in the arm64 image can produce amd64 agents and
+vice versa; Rust cross-compilation does not require the host to
 match the target. The multi-arch build exists so the image itself
 runs natively on both host architectures, not because agent
 builds need matching images.
@@ -3951,16 +3967,16 @@ build with a warm layer cache is fast.
 
 | Configuration | Cold build | Warm cache |
 |---|---|---|
-| Default (UPX + MinGW + Go bootstrap) | 20–40 min | 2–5 min |
+| Default (UPX + MinGW + Cargo bootstrap) | 20–40 min | 2–5 min |
 | `INSTALL_UPX=0 INSTALL_MINGW=0` | 12–20 min | 1–3 min |
-| `INSTALL_UPX=0 INSTALL_MINGW=0 INSTALL_RUST=0 BOOTSTRAP_GO=0` | 5–10 min | 30 s |
+| `INSTALL_UPX=0 INSTALL_MINGW=0 INSTALL_WASM=0 BOOTSTRAP_RUST=0` | 5–10 min | 30 s |
 
-Most of the cold time is the Go toolchain download. The
-`BOOTSTRAP_GO=1` layer is what pulls the module graph on first
-build so operator builds later in the container are fast.
+Most of the cold time is the Rust toolchain download. The `BOOTSTRAP_RUST=1` layer is 
+what pulls the Cargo dependency graph on first build
+so operator builds later in the container are fast.
 
-**Air-gapped hosts.** A host with no internet access cannot
-pull from a registry or run `go mod download` during a build.
+**Air-gapped hosts.** A host with no internet access cannot pull from a 
+registry or run `cargo fetch` during a build.
 Transfer a `docker save` archive built on a connected host:
 
 ```bash
@@ -3984,7 +4000,7 @@ services:
     # ... rest unchanged
 ```
 
-The Go toolchain is downloaded from `go.dev` for the matching
+The Rust toolchain is downloaded by rustup for the matching 
 architecture. Every other step is architecture-agnostic.
 
 **What does not work inside the container.**
@@ -4046,7 +4062,7 @@ profile's toggles one key at a time.
   "transport_failover_after": 3,
 
   "url": "",
-  "tls_profile": "go",
+  "tls_profile": "rustls",
   "c2_profile": "",
 
   "wireguard_server_pubkey": "",
@@ -4096,7 +4112,6 @@ profile's toggles one key at a time.
     "sleep_mask": "aes-ctr",
     "syscall_method": "indirect",
     "string_obfuscation": true,
-    "garble": true,
     "upx": false,
     "ppid_spoof": true,
     "antidebug": true,
@@ -4125,7 +4140,7 @@ profile's toggles one key at a time.
 | `transport_mode` | string | `http`, `quic`, `websocket`, `dns`, `doh`, `icmp`, `wireguard`, `http,dns`, `http,doh`, `dns,doh`, `smb`, `tcp`, `tcprev` | all |
 | `transport_failover_after` | int | Consecutive failures before rotation; `0` disables | multi-transport lists only |
 | `url` | string | HTTPS URL | HTTP only |
-| `tls_profile` | string | `go`, `chrome`, `firefox`, `safari`. Applied on HTTP, DoH, and WebSocket; accepted but ignored on QUIC and WireGuard | HTTP, DoH, and WebSocket |
+| `tls_profile` | string | `rustls` , `chrome`, `firefox`, `safari`. Applied on HTTP, DoH, and WebSocket; accepted but ignored on QUIC and WireGuard | HTTP, DoH, and WebSocket |
 | `c2_profile` | string | name under `profiles/c2/` | HTTP only |
 | `dns_domain` | string | FQDN | DNS and DoH (required) |
 | `dns_resolver` | string | `host:port` | DNS only, optional |
@@ -4580,7 +4595,7 @@ implant actually sees:
   polls 24/7.
 
 After the payload is launched, the stager zeroes its copy of the
-decrypted bytes and exits. The scrub is best-effort — the Go runtime
+decrypted bytes and exits. The scrub is best-effort — the allocator
 may have already copied the slice — but it reduces the window in
 which plaintext is legible in the heap or in swap.
 
@@ -4620,7 +4635,7 @@ window between `WriteFile` and the launch. Windows deletes the file
 when the **last handle to it closes** — the child process holds its
 own handle for the lifetime of its running image, so the file is
 removed when the child exits, not when the stager exits. The stager's
-own handle is kept alive only so that Go's garbage collector cannot
+own handle is kept alive only so that Rust's RAII drop order cannot
 close it early and mark the file for deletion before the child has
 finished loading the image.
 
@@ -4940,7 +4955,7 @@ traces back to a specific export.
 Three verbs speak network protocols directly from the agent's own
 socket. No `/bin/curl`, no `dig`, no `/bin/nc`.
 
-**`curl`** — HTTP/HTTPS client using Go's `net/http`. Flags:
+**`curl <url>`** — HTTP/HTTPS client using `reqwest`. Flags:
 
 | Flag | Effect |
 |------|--------|
@@ -4959,7 +4974,7 @@ Verification is on by default. Pass `-k` for the self-signed endpoints
 that internal services commonly use (IMDS at `169.254.169.254`,
 vCenter, Kubernetes API servers).
 
-**`resolve`** — DNS lookups through the stdlib resolver. No `dig`, no
+**`resolve`** — DNS lookups through the `hickory-resolver`. No `dig`, no
 `nslookup`, no child process.
 
 ```
@@ -5574,7 +5589,7 @@ args: [<b64_assembly>, "<args>"]}
 
 Executes a previously-uploaded file in memory.
 
-**Windows.** In-process Go PE loader: maps the image, resolves the
+**Windows.** In-process Rust PE loader: maps the image, resolves the
 import table, applies base relocations, walks the TLS directory to
 register callbacks, applies per-section protections, and calls the
 entry point on a new OS thread. No PowerShell child, no `csc`, no
@@ -5950,7 +5965,7 @@ The BOF's two `BeaconDataExtract` calls then read one string each.
 ### Windows-only execution
 
 BOF execution is a **Windows-only capability.** A COFF object is a
-Windows-native format; the Beacon API and the Go COFF loader both
+Windows-native format; the Beacon API and the Rust COFF loader both
 depend on the Windows ABI. This is enforced at three layers:
 
 1. **Catalogue.** The `bof` entry carries `platforms: ['windows']`.
@@ -5963,7 +5978,7 @@ depend on the Windows ABI. This is enforced at three layers:
    session with 400 and writes a `beacon.use` audit entry naming the
    offending verb and the actual OS.
 
-A Linux agent has no `execBOF` implementation and the Go compiler
+A Linux agent has no `exec_bof` implementation and the Rust compiler
 rejects the build if the dispatch path is somehow reached.
 
 The `bofs` command itself is available from any platform — the
@@ -5994,8 +6009,8 @@ bytes of the file for a known COFF machine type and writes the bytes
 to disk. On download, it opens the file, verifies the on-disk digest
 against the registry entry, and returns the bytes base64-encoded.
 
-Execution happens on the target, when the beacon's Go code hands the
-COFF to its in-process Go COFF loader. There is no PowerShell child,
+Execution happens on the target, when the beacon's Rust code hands the
+COFF to its in-process Rust COFF loader. There is no PowerShell child,
 no `csc` invocation, no `Add-Type`, and no temp file on the target
 side. The server has no path to that code.
 
@@ -6235,8 +6250,8 @@ Both the parent and the child should be built with the same --c2-profile. The pa
 
 `tornadoc2/shapecheck.py` validates a C2 profile before deployment.
 It runs the profile through the same checks the Python handler
-applies at startup and the same round-trip probe the Go agent's
-`ValidateShapingSpec` applies at build time, and reports every
+applies at startup and the same round-trip probe the Rust agent's
+`validate_shaping_spec` applies at build time, and reports every
 failure in one place.
 
 ### Why it exists
@@ -6246,8 +6261,8 @@ cannot catch:
 
 | Divergence | Effect | Check |
 |---|---|---|
-| Python's `\w` is Unicode-aware; Go's is ASCII-only | A segment containing `é` passes the handler and fails the agent build | `EXT002`, `EXT003` |
-| Python strips whitespace on `encoding`; Go does not | `" base64url"` produces different codecs on each side — the two disagree on the wire format | `ENC002` |
+| Python's `\w` is Unicode-aware; Rust's `regex` is Unicode-aware by default but the agent's validation may not be | A segment containing `é` passes the handler and fails the agent build | `EXT002`, `EXT003` |
+| Python strips whitespace on `encoding`; Rust does not | `" base64url"` produces different codecs on each side — the two disagree on the wire format | `ENC002` |
 
 Both pass `validate()` on the handler and break at build time or
 at the first round-trip. `shapecheck` catches them, plus
@@ -6314,7 +6329,7 @@ root).
 that hits a real error class without refusing one that carries
 only warnings.
 
-### Python/Go round-trip
+### Python/Rust round-trip
 
 For each shape, `shapecheck` runs `wrap()` and `unwrap()`
 against seven probe payloads — flat object, empty object, list,
@@ -6588,8 +6603,8 @@ full beacon: it checks in on the same schedule the parent did,
 presents the same machine fingerprint, and reattaches to the same
 server-side session.
 
-**Two-pass build.** Injection forces a second `go build` on the same
-source tree. Pass 1 produces a normal beacon binary. A
+**Two-pass build.** Injection forces a second `cargo build` on the
+same source tree. Pass 1 produces a normal beacon binary. A
 platform-specific loader — Donut on Windows, a vendored ELF-loader
 stub on Linux — wraps that binary into the embedded shellcode.
 Pass 2 produces the shipped binary, which contains pass-1-as-
@@ -6604,8 +6619,7 @@ from the parent.
 #### Windows injection — `default` backend
 
 Classic remote-thread injection via the Win32 API, reached through
-`syscall.NewLazyDLL("kernel32.dll")` — no `golang.org/x/sys/windows`
-dependency, matching the agent's stdlib-only policy on that side.
+the `windows` crate.
 
 1. `OpenProcess(PROCESS_ALL_ACCESS)` against the target.
 2. `VirtualAllocEx` an RWX region (`PAGE_EXECUTE_READWRITE`) in the
@@ -6616,15 +6630,15 @@ dependency, matching the agent's stdlib-only policy on that side.
 6. `GetExitCodeThread` reads the thread's exit code.
 7. `VirtualFreeEx` and `CloseHandle` on both handles.
 
-A Donut shellcode that successfully bootstraps the Go runtime and
+A Donut shellcode that successfully bootstraps the async runtime and
 starts checking in typically returns from its bootstrap thread in
 well under a second — it detaches the beacon loop into its own
-goroutine — so a wait timeout is treated as informational, not as a
+task — so a wait timeout is treated as informational, not as a
 failure. The exit code is read and reported regardless.
 
-The 13 MB payload — a typical Go beacon's Donut-wrapped PE — is a
-single `WriteProcessMemory` call, not a chunked write. There is no
-`PROCESS_ALL_ACCESS` requirement beyond the initial `OpenProcess`.
+The payload — a typical Rust beacon's Donut-wrapped PE, well under
+13 MB — is a single `WriteProcessMemory` call, not a chunked write.
+There is no `PROCESS_ALL_ACCESS` requirement beyond the initial `OpenProcess`.
 
 #### Linux injection
 
@@ -6797,18 +6811,16 @@ on Linux against the target.
   beacon for another platform still works; `migrate` is filtered out
   of the operator's catalogue there.
 
-- **Linux injection is x86-64 only.** The `userRegs` layout in
-  `inject_linux.go` mirrors `sys/user.h` on x86-64. An arm64 Linux
+- **Linux injection is x86-64 only.** The `user_regs_struct` layout
+  in `agent/src/inject_linux.rs` mirrors `sys/user.h` on x86-64. An arm64 Linux
   build has no injection path and refuses the verb at the same build
   gate as a build without the shellcode embedded.
 
 - **A binary size cost.** The embedded shellcode is a full loader-
-  wrapped copy of the pass-1 binary, base64-encoded. A typical Go
-  beacon grows by roughly 13 MB on Windows (Donut-wrapped PE) or
+  wrapped copy of the pass-1 binary, base64-encoded. A typical Rust
+  beacon grows by roughly 8 MB on Windows (Donut-wrapped PE) or
   by the base64-inflated size of the pass-1 ELF plus a ~1 KB stub
-  on Linux. Operators who do not need the inject path and are
-  size-constrained should leave `inject: false`. Every other
-  capability is unaffected.
+  on Linux.
 
 ---
 
@@ -7333,9 +7345,10 @@ password-spray cycle discovering the lockout the hard way.
 | `ssh_key` | Windows: shells out to the system `ssh.exe` (Windows 10 1809+) with the key written to a `FILE_FLAG_DELETE_ON_CLOSE` temp file. Linux: shells out to `ssh -i` with the key in `/dev/shm` or `/tmp`, scrubbed on exit. |
 
 **Kinds that are not validatable.** `aes256`, `aes128`, and `krbtgt`
-need a hand-built Kerberos AS-REQ with the raw key. The Go stdlib has
-no Kerberos, and the ASN.1 for the pre-auth is a project of its own.
-`creds validate` refuses these locally with a message naming the gap;
+need a hand-built Kerberos AS-REQ with the raw key. Neither the Rust
+standard library nor the crates in-tree ship a Kerberos
+implementation, and the ASN.1 for the pre-auth is a project of its
+own. `creds validate` refuses these locally with a message naming the gap;
 the records can still be stored and retrieved, and a check can be
 added later without a schema change.
 
@@ -7900,72 +7913,72 @@ platform restriction is stated, each runs on both Linux and Windows.
 
 ### Inspection
 
-| Verb | Implementation |
-|------|----------------|
-| `cat <path>` | `os.ReadFile` |
-| `ls [path]` | `os.ReadDir` + `os.Stat` |
-| `readfile <path>` | Alias for `cat` |
-| `find <path> [-name pat] [-size +N\|-N] [-mtime -N\|+N] [-type f\|d]` | `filepath.WalkDir` with `-name` glob, size in bytes, mtime in days |
-| `grep <pattern> <path> [-r] [-i] [-l]` | `regexp` + `bufio.Scanner`; `-r` recurses, `-i` case-insensitive, `-l` lists matching files |
-| `head <path> [-n N]` | `bufio.Scanner`, first N lines (default 20) |
-| `tail <path> [-n N]` | `bufio.Scanner`, last N lines (default 20) |
-| `stat <path>` | `os.Stat` plus mode, uid, gid, mtime, size |
-| `strings <file> [-n N]` | Printable-ASCII extraction, min run length default 4 |
-| `hexdump <file> [-n N] [-o offset]` | Hex + ASCII view, capped at 64 KiB by default |
-| `sha1 <path>` | `crypto/sha1` streaming |
-| `sha256 <path>` | `crypto/sha256` streaming |
-| `md5 <path>` | `crypto/md5` streaming |
-| `cksum <path>` | `hash/crc32` |
-| `wc <path>` | Line/word/byte count |
-| `nl <path>` | Line numbering |
-| `rev <path>` | Per-line reversal |
-| `sort <path>` | `sort.Strings` (or numeric with `-n`) |
-| `uniq <path>` | Adjacent-duplicate collapse |
-| `tr <set1> <set2>` | Byte-level translate; empty `set2` deletes |
-| `base64 <path>` | `encoding/base64` encode |
-| `which <cmd>` | `os.Stat` walk over `PATH` |
-| `readlink <path>` | `os.Readlink` (Linux) |
-| `realpath <path>` | `filepath.EvalSymlinks` + `filepath.Abs` |
-| `du <path>` | `filepath.Walk` size sum |
+| Verb |
+|------|
+| `cat <path>` |
+| `ls [path]` |
+| `readfile <path>` |
+| `find <path> [-name pat] [-size +N\|-N] [-mtime -N\|+N] [-type f\|d]` |
+| `grep <pattern> <path> [-r] [-i] [-l]` |
+| `head <path> [-n N]` |
+| `tail <path> [-n N]` |
+| `stat <path>` |
+| `strings <file> [-n N]` |
+| `hexdump <file> [-n N] [-o offset]` | 
+| `sha1 <path>` |
+| `sha256 <path>` |
+| `md5 <path>` |
+| `cksum <path>` |
+| `wc <path>` |
+| `nl <path>` |
+| `rev <path>` |
+| `sort <path>` |
+| `uniq <path>` |
+| `tr <set1> <set2>` |
+| `base64 <path>` |
+| `which <cmd>` |
+| `readlink <path>` |
+| `realpath <path>` |
+| `du <path>` |
 
 ### System
 
-| Verb | Implementation |
-|------|----------------|
-| `ps` | `/proc` walk (Linux) / Toolhelp32 snapshot (Windows) |
-| `id` | `os.Getuid` + `os.Getgid` (Linux) / `user.Current()` (Windows) |
-| `env` | `os.Environ` |
-| `pwd` | `os.Getwd` |
-| `whoami` | `user.Current()` |
-| `whoami /priv` | `OpenProcessToken` + `GetTokenInformation` (Windows only) |
-| `hostname` | `os.Hostname` |
-| `uname` | `runtime.GOOS` + `runtime.GOARCH` |
-| `df [path]` | `syscall.Statfs` (Linux) / `GetDiskFreeSpaceExW` (Windows) |
-| `uptime` | `/proc/uptime` (Linux) / `GetTickCount64` (Windows) |
-| `date` | Local and UTC time via `time.Now()` |
-| `getpid` / `getppid` | `os.Getpid` / `os.Getppid` |
-| `ifconfig` | `net.Interfaces` |
-| `netstat` | `/proc/net/tcp{,6}` and `/proc/net/udp{,6}` (Linux) / `GetExtendedTcpTable` and `GetExtendedUdpTable` (Windows) |
-| `arp` | `/proc/net/arp` (Linux) / `GetIpNetTable` (Windows) |
-| `route` | `/proc/net/route` (Linux) / `GetIpForwardTable` (Windows) |
-| `users` | `/etc/passwd` (Linux) / `NetUserEnum` (Windows) |
-| `groups` | `/etc/group` (Linux) / `NetLocalGroupEnum` (Windows) |
-| `av-list` | Known systemd unit scan (Linux) / WMI `AntiVirusProduct` via COM (Windows) |
-| `screenshot` | GDI capture to base64 PNG (Windows only — see [Screenshot](#screenshot) for the Linux refusal) |
+| Verb |
+|------|
+| `ps` |
+| `id` |
+| `env` |
+| `pwd` |
+| `whoami` |
+| `whoami /priv` |
+| `hostname` |
+| `uname` |
+| `df [path]` |
+| `uptime` |
+| `date` |
+| `getpid` / `getppid` |
+| `ifconfig` |
+| `netstat` |
+| `arp` |
+| `route` |
+| `users` |
+| `groups` |
+| `av-list` |
+| `screenshot` |
 
 ### File ops
 
-| Verb | Implementation |
-|------|----------------|
-| `mkdir <path>` | `os.MkdirAll` |
-| `rm [-r] <path>` | `os.Remove` / `os.RemoveAll` |
-| `cp <src> <dst>` | `io.Copy` |
-| `mv <src> <dst>` | `os.Rename` |
-| `chmod <octal> <path>` | `os.Chmod` (Linux) |
-| `ln [-s] <target> <link>` | `os.Symlink` (Linux) |
-| `touch [-r <ref>] <path>` | `os.OpenFile` with `O_CREATE`, optional reference mtime |
-| `gzip <file>` | `compress/gzip` |
-| `gunzip <file>` | `compress/gzip` |
+| Verb |
+|------|
+| `mkdir <path>` |
+| `rm [-r] <path>` |
+| `cp <src> <dst>` |
+| `mv <src> <dst>` |
+| `chmod <octal> <path>` |
+| `ln [-s] <target> <link>` |
+| `touch [-r <ref>] <path>` |
+| `gzip <file>` |
+| `gunzip <file>` |
 
 ### Network
 
@@ -7981,47 +7994,47 @@ socket. No `/bin/curl`, no `dig`, no `/bin/nc`.
 
 ### Credential collection
 
-| Verb | Implementation |
-|------|----------------|
-| `hashdump [<outdir>]` | Windows: `SeBackupPrivilege` via `AdjustTokenPrivileges`, `RegSaveKeyExW` on `HKLM\SAM` and `HKLM\SYSTEM`. Linux: reads `/etc/passwd` and `/etc/shadow`, merges on username into `unshadow(8)` format. Both return a JSON envelope; the client writes the hives to disk, then decrypts them with the first available `secretsdump` form (`impacket-secretsdump`, `secretsdump.py`, `impacket_secretsdump`, `secretsdump`, or `python -m impacket.examples.secretsdump`). **When no secretsdump is installed, the client falls back to a pure-Python SAM parser** that reimplements the boot-key / hashed-boot-key / per-RID double-RC4 chain and produces the same output. The operator sees no difference in the result. |
-| `enablepriv <--list\|--list-all\|--vuln\|<privilege> [--disable]\|--all [--disable]>` | `OpenThreadToken` (falling back to `OpenProcessToken`), `LookupPrivilegeValueW`, `AdjustTokenPrivileges`. The privilege catalogue and risk buckets live on the client, not the agent. Windows only. |
-| `lsassdump --dump [--fork] [--duplicate] [--elevate] [--out <path>]` | Direct `MiniDumpWriteDump` via `dbghelp.dll`, with `NtCreateSection` + `NtCreateProcessEx` and system handle-table walk fallbacks. Windows only — see [LSASS minidump](#lsass-minidump). |
+| Verb |
+|------|
+| `hashdump [<outdir>]` |
+| `enablepriv <--list\|--list-all\|--vuln\|<privilege> [--disable]\|--all [--disable]>` |
+| `lsassdump --dump [--fork] [--duplicate] [--elevate] [--out <path>]` |
 
 ### Execution
 
-| Verb | Description |
-|------|-------------|
-| `exec <cmd> [args...]` | Direct spawn; argv visible in `ps` |
-| `sh <cmd> [args...]` | stdin-piped shell; the command does not appear in argv |
-| `shell [start \| stop \| status \| exec <cmd>]` | Persistent interactive shell — a `/bin/sh` (Linux) or `cmd.exe` (Windows) held open across check-ins. State (working directory, environment variables, shell variables, function definitions) persists between commands. **Bad opsec** — the shell is a long-lived child of the beacon, visible in the target's process tree, and every command typed is a `write()` to its stdin. The client warns before `shell start` and asks for confirmation. Prefer `sh` for one-off commands |
-| `make_token <DOMAIN\\user> <password> \| --revert` | Windows. `LogonUserW(LOGON32_LOGON_NEW_CREDENTIALS)` builds a logon-type-9 token and installs it in the same slot `steal_token` uses. Every subsequent `exec` runs as that user. The verb accepts `DOMAIN\user`, `user@domain`, or a bare `user`; the token is validated on first network use, not at build time. `--revert` is an alias for `rev2self` |
-| `rev2self` | Windows. `RevertToSelf` plus a slot clear. Drops whichever token is held — from `steal_token` or from `make_token` — and returns the calling thread to the process default |
-| `runas <DOMAIN\\user> <password> <command> [args...]` | Windows. `CreateProcessWithLogonW` with `LOGON_WITH_PROFILE`, hidden window, returns the new PID immediately. Does not wait for the child and does not capture its output; use `make_token` + `exec` when output is needed. Requires the Secondary Logon (`seclogon`) service |
+| Verb |
+|------|
+| `exec <cmd> [args...]` |
+| `sh <cmd> [args...]` |
+| `shell [start \| stop \| status \| exec <cmd>]` |
+| `make_token <DOMAIN\\user> <password> \| --revert` |
+| `rev2self` |
+| `runas <DOMAIN\\user> <password> <command> [args...]` |
 
 ### Scheduling
 
-| Verb | Description |
-|------|-------------|
-| `sleep <N> [jitter]` | Update check-in interval |
-| `workhours <start> <end>` | Update working-hours window |
-| `spawnto <path>` | Update the sacrificial process used by `execute-assembly` (Windows). `spawnto -` clears the value and reverts to self-spawn |
-| `kill` / `exit` | Self-destruct |
+| Verb |
+|------|
+| `sleep <N> [jitter]` |
+| `workhours <start> <end>` |
+| `spawnto <path>` |
+| `kill` / `exit` |
 
 ### In-memory execution and transfer
 
 These execute without a subprocess:
 
-| Verb | Implementation |
-|------|----------------|
-| `truncate <path>` | `os.OpenFile` with `O_TRUNC` |
-| `writechunk <b64> <path>` | base64 decode + append |
-| `readchunk <path> <off> <size>` | `os.Open` + `Seek` + `Read` |
-| `filesize <path>` | `os.Stat` |
-| `sha256file <path>` | streaming SHA-256 |
-| `execute_assembly <b64> <args>` | spawn sacrificial worker; worker hosts CLR, loads assembly with `Assembly.Load(byte[])`, captures stdout/stderr to a file the parent reads |
-| `execmem <path> <exe\|elf>` | platform-specific in-memory loader |
-| `bof <b64_coff> <entry> <b64_args>` | in-process Go COFF loader |
-| `migrate <--self\|pid\|name> [--method <name>]` | detach-spawn or foreign-process injection; `--method default\|apc` selects the injection backend (see [Migration](#migration)) |
+| Verb |
+|------|
+| `truncate <path>` |
+| `writechunk <b64> <path>` |
+| `readchunk <path> <off> <size>` |
+| `filesize <path>` |
+| `sha256file <path>` |
+| `execute_assembly <b64> <args>` |
+| `execmem <path> <exe\|elf>` |
+| `bof <b64_coff> <entry> <b64_args>` |
+| `migrate <--self\|pid\|name> [--method <name>]` |
 
 `exec` is the only verb that spawns a child process. `sh` routes a
 command through a stdin-piped shell. `pyexec`, `psexec`, `shexec`, and
@@ -8430,7 +8443,7 @@ replace underneath the person running it.
 |---------|----------|----------|
 | `default` | None | Lab testing |
 | `stealth` | String obfuscation | Standard engagements |
-| `opsec` | String obfuscation, garble, AMSI bypass, ETW patch, anti-sandbox, anti-debug, anti-VM, PPID spoof, sleep mask (`aes-ctr`), indirect syscalls | Monitored environments |
+| `opsec` | String obfuscation, AMSI bypass, ETW patch, anti-sandbox, anti-debug, anti-VM, PPID spoof, sleep mask (`aes-ctr`), indirect syscalls | Monitored environments |
 | `paranoid` | Everything in `opsec` plus the fiber-based `cronos` sleep mask and UPX | High-risk targets with mature EDR |
 
 The `paranoid` profile sets `sleep_mask: "cronos"`. `cronos` is
@@ -8621,9 +8634,9 @@ Two operational notes on profile selection:
 
 - **Pair the C2 profile with a matching `--tls-profile`.** A C2
   profile that claims a Chrome User-Agent while the TLS ClientHello
-  is the Go standard library is a two-signal mismatch: a passive
-  observer who fingerprints the handshake sees Go, not Chrome, and
-  the User-Agent becomes evidence rather than cover. Build with
+  is `rustls`'s is a two-signal mismatch: a passive observer who
+  fingerprints the handshake sees `rustls`, not Chrome, and the
+  User-Agent becomes evidence rather than cover. Build with
   `--c2-profile <name> --tls-profile chrome` for the consumer and
   enterprise profiles in the tree. The flag applies to HTTP, DoH,
   and WebSocket; it is accepted but ignored on QUIC and WireGuard.
@@ -8732,7 +8745,7 @@ Common alternatives: `session`, `SESSIONID`, `JSESSIONID`,
 The listener writes `Set-Cookie: <cookie_name>=<value>; Path=/;
 Secure; HttpOnly`, reads the same name from incoming requests, and
 the WebSocket dispatcher uses the same name for its request header
-and its response extraction. The Go transports send `Cookie:
+and its response extraction. The Rust transports send `Cookie:
 <cookie_name>=<value>` on every subsequent request.
 
 A profile that declares a `cookie_name` containing characters
@@ -8893,11 +8906,10 @@ and the outer UDP port are all set by the WireGuard protocol and by
 the four `--wireguard-*` build flags, not by the profile.
 
 `--tls-profile` does **not** apply to the inner TLS handshake on a
-WireGuard build. The inner connection uses the Go standard
-library's `crypto/tls`, not uTLS, so the ClientHello is the
-standard library's regardless of what the build asked for. This is
-a smaller gap than the WebSocket or HTTP case: the inner TLS never
-crosses the public wire — a network observer sees only the
+WireGuard build. The inner connection uses `rustls`, not `boring`,
+so the ClientHello is `rustls`'s regardless of what the build asked
+for. This is a smaller gap than the WebSocket or HTTP case: the 
+inner TLS never crosses the public wire — a network observer sees only the
 WireGuard handshake, which carries no ClientHello at all — so the
 missing uTLS profile is invisible to anything outside the tunnel.
 See [What this tool does not claim](#what-this-tool-does-not-claim)
@@ -8959,14 +8971,14 @@ Together they are the primary ways the framework grows.
 
 ### Adding a transport
 
-A new transport is **two classes plus mechanical glue in seven
+A new transport is **two classes plus mechanical glue in six
 files**.
 
 **The two classes hold the design.**
 
 1. A Python listener class that inherits from `BeaconListener`
    (or `DNSTransport` for query-response protocols).
-2. A Go client class that inherits from the transport interface.
+2. A Rust client type that implements the transport trait.
 
 Everything the transport actually *does* — parsing the wire
 format, chunking, reassembly, session handling, error paths —
@@ -8984,11 +8996,10 @@ work in any of them, only a name-swap of the same pattern.
 
 | File | What is added |
 |------|---------------|
-| `agent/core/config.go` | One `Config` struct field per build-time value |
-| `agent/core/main.go` | Package vars, `Main()` assignments, one `case` in the `newAgent()` switch |
-| `agent/stageless/ldflags.go` | One package var per field, with default value |
-| `agent/stageless/main.go` | One line in the `core.Config{...}` literal per field |
-| `beacon/builder.py` | Transport validation plus one `-X main.X=Y` linker flag per field |
+| `agent/src/config.rs` | One `Config` struct field per build-time value |
+| `agent/src/bin/beacon.rs` | Package vars, one `match` arm in the `dispatch_transport` switch |
+| `agent/build.rs` | One `TC2_*` env var read, one `pub const` in `config_generated.rs` |
+| `beacon/builder.py` | Transport validation plus one `TC2_*` env var emission per field |
 | `beacon/build_manager.py` | One `cfg.X = params.get('x')` line per field |
 | `beacon_handler.py` | One CLI flag per listener port plus one `start()` call |
 
@@ -9002,18 +9013,18 @@ does not touch the transport implementation.
 
 The ten transports in the tree are the proof of the pattern:
 
-| Transport | Python class | Go client |
-|-----------|--------------|-----------|
-| HTTPS | `BeaconListener` | HTTP |
-| QUIC / HTTP/3 | `QUICListener(BeaconListener)` | quic-go |
-| WebSocket | `WebSocketListener` | coder/websocket |
-| DNS TXT | `DNSTransport` | miekg/dns |
-| DoH | (same as DNS on the server) | DoH client |
-| ICMP | `ICMPTransport(DNSTransport)` | raw socket |
-| WireGuard | `WireGuardTransport` | chrj/wgnet |
-| SMB pivot | inherited from `BeaconListener` | named-pipe client |
-| TCP bind pivot | inherited from `BeaconListener` | TCP client (child dials) |
-| TCP reverse pivot | inherited from `BeaconListener` | TCP client (parent listens) |
+| Transport | Python class | Rust client |
+|-----------|--------------|-------------|
+| HTTPS | `BeaconListener` | `reqwest` |
+| QUIC / HTTP/3 | `QUICListener(BeaconListener)` | `quinn` |
+| WebSocket | `WebSocketListener` | `tokio-tungstenite` |
+| DNS TXT | `DNSTransport` | `hickory-resolver` |
+| DoH | (same as DNS on the server) | DoH client over `reqwest` |
+| ICMP | `ICMPTransport(DNSTransport)` | raw socket via `socket2` |
+| WireGuard | `WireGuardTransport` | `boringtun` |
+| SMB pivot | inherited from `BeaconListener` | named-pipe client via `windows` |
+| TCP bind pivot | inherited from `BeaconListener` | TCP client via `tokio::net` (child dials) |
+| TCP reverse pivot | inherited from `BeaconListener` | TCP client via `tokio::net` (parent listens) |
 
 Each is a pair of classes plus the same set of mechanical edits.
 
@@ -9038,9 +9049,9 @@ transports are closed-source and cannot be added. Sliver requires
 modifying the core transport registry and the agent's transport
 dispatch. Mythic's C2 profiles are Docker containers that speak an
 RPC protocol — powerful, but a full service to write and deploy.
-A two-class transport plus template-matched glue across seven
+A two-class transport plus template-matched glue across six
 files is a weekend project for anyone who has read the base class
-once, and the seven-file glue is the same shape for every
+once, and the six-file glue is the same shape for every
 transport that has ever been added.
 
 ### Adding a C2 profile
@@ -9122,7 +9133,7 @@ different change cadences:
 
 | Surface | Effort | Contributor | What changes | Handler restart |
 |---------|--------|-------------|--------------|-----------------|
-| Transport | Two classes plus mechanical glue in seven files | Network engineer who has read the base class | Two new classes; seven template-matched edits | Yes |
+| Transport | Two classes plus mechanical glue in six files | Network engineer who has read the base class | Two new classes; six template-matched edits | Yes |
 | C2 profile | One JSON file | Operator who knows the target's traffic shape | One JSON document, no code | Yes |
 | WASM extension | One `.wasm` module | Developer who knows the host ABI | One module, pushed at runtime | No |
 
@@ -9173,10 +9184,10 @@ The agent carries a sandboxed WASM extension host.
 
 | Property | How |
 |----------|-----|
-| No disk artifact | Base64 travels in a task, decodes into memory, and is handed to wazero |
-| No executable memory page | wazero interpreter, never JITed to `PROT_EXEC` |
+| No disk artifact | Base64 travels in a task, decodes into memory, and is handed to `wasmtime` |
+| No executable memory page | `wasmtime` interpreter (compiler disabled) or `wasmi`, never JITed to `PROT_EXEC` |
 | No new syscall | WASM modules cannot issue syscalls |
-| No new process | Nothing in the extension path calls `exec.Command` |
+| No new process | Nothing in the extension path calls `std::process::Command` |
 | No binary hash change | The agent binary is identical with zero extensions and with fifty |
 | Memory ceiling | 16 MiB per module |
 
@@ -10908,10 +10919,11 @@ swallowed and the session continues.
 | `inject_method 'fiber' is a self-execution technique` | A JSON config set `inject_method` to `fiber` or `threadpool` | These techniques do not fit `migrate <pid>`; leave `inject_method` at `"default"` until `execmem` grows a `--method` flag |
 | `tcp reverse: dial …` on the child, and no pin log on the parent | The child cannot reach the parent's TCP listener | Confirm the parent printed `tcp reverse pivot: listening on …` at startup, that the address in `--tcp-rev-target` matches, and that no firewall is blocking the port between the child and the parent |
 | `tcp reverse pivot: auth failed from …` on the parent | The child's `tcp_rev_token` does not match the parent's | Rebuild the child with the token the parent printed at build time (`--tcp-rev-token-gen` on the parent side) |
-| `pattern Bootstrap.dll: no matching files found` | The Windows agent's `dotnet_loader_windows.go` embeds a bootstrap that was not compiled | Build `Bootstrap.dll` with `mcs` (Linux) or `csc` (Windows) and place it next to `Bootstrap.cs`, or check the prebuilt DLL into the tree. `install-go-build.sh` compiles it automatically when it is missing |
+| `pattern Bootstrap.dll: no matching files found` | The Windows agent's `dotnet_loader_windows.rs` embeds a bootstrap that was not compiled | Build `Bootstrap.dll` with `mcs` (Linux) or `csc` (Windows) and place it next to `Bootstrap.cs`, or check the prebuilt DLL into the tree. `install-rust-build.sh` compiles it automatically when it is missing
+ |
 | `dn: ExecuteInDefaultAppDomain hr=0x80070020` | `ExecuteInDefaultAppDomain` could not open the bootstrap — usually a share-mode mismatch on the delete-on-close temp file | Confirm the bootstrap was written with `FILE_SHARE_READ\|WRITE\|DELETE`; the delivered loader already does |
 | `dn: ExecuteInDefaultAppDomain hr=0x80131515` or `0x8007000E` on a hardened host | AMSI blocked the assembly load — the `opsec` profile's AMSI patch is not in place | Confirm the AMSI patch runs during agent init on Windows, not lazily; rebuild with `--profile opsec` if the deployment did not already |
-| `bof: symbol "": unresolved symbol ""` | COFF symbol-name parser reads the wrong half of the 8-byte name field | Use the current `bof_loader_windows.go`, which discriminates on the low 4 bytes (long names have a zero low half; short names do not) |
+| `bof: symbol "": unresolved symbol ""` | COFF symbol-name parser reads the wrong half of the 8-byte name field | Use the current `bof_loader_windows.rs`, which discriminates on the low 4 bytes (long names have a zero low half; short names do not) |
 | `unexpected fault address` immediately after a BOF returns | The scrub after execution writes into pages the section-finalize pass set to `PAGE_EXECUTE_READ` or `PAGE_READONLY` | Restore the blob to `PAGE_READ_WRITE` with `VirtualProtect` before the scrub, then free |
 
 ### An injection fails
@@ -10962,35 +10974,34 @@ first run and never overwritten once the full bundle is present.
 - Curated cipher list.
 - ALPN advertises only `http/1.1`.
 
-### ClientHello fingerprint (uTLS)
+### ClientHello fingerprint (BoringSSL)
 
-The beacon's TLS handshake is not the Go standard library's unless the
-build asked for it. The `--tls-profile` flag selects one of four
-ClientHello profiles:
+The beacon's TLS handshake is not `rustls`'s unless the build asked
+for it. The `--tls-profile` flag selects one of four ClientHello
+profiles:
 
 | Profile | Source |
 |---------|--------|
-| `go` | `crypto/tls` (default, no uTLS) |
-| `chrome` | `utls.HelloChrome_120` |
-| `firefox` | `utls.HelloFirefox_120` |
-| `safari` | `utls.HelloSafari_16_0` |
+| `rustls` | `rustls` (default, no BoringSSL) |
+| `chrome` | `boring` Chrome 120 preset |
+| `firefox` | `boring` Firefox 120 preset |
+| `safari` | `boring` Safari 16 preset |
 
-The presets are version-pinned on purpose: a `go mod tidy` that pulls
-a newer uTLS cannot silently change what the agent looks like on the
-wire. A future uTLS release that adds a newer Chrome preset is a
-deliberate code change, not an accidental one.
+The presets are version-pinned on purpose: a `cargo update` that
+pulls a newer `boring` cannot silently change what the agent looks
+like on the wire. A future `boring` release that adds a newer Chrome
+preset is a deliberate code change, not an accidental one.
 
 The profile applies to the HTTP transport and to DoH. It does not
 apply to DNS, ICMP, or the pivot session — those transports carry
 their own framing.
 
-When the profile is a browser, the agent uses uTLS for the
-ClientHello and the standard library for everything else. Fields of
-`tls.Config` that uTLS does not support (a custom `VerifyPeerCertificate`
-callback, a custom `KeyLogWriter`, explicit `CurvePreferences`) are
-logged as a single build-time warning and not applied. This is a
-deliberate failure mode: silently dropping a verification hook would
-be worse than a loud warning.
+When the profile is a browser, the agent uses `boring` for the
+ClientHello and `rustls` for everything else. Fields of
+`rustls::ClientConfig` that `boring` does not support are logged as
+a single build-time warning and not applied. This is a deliberate
+failure mode: silently dropping a verification hook would be worse
+than a loud warning.
 
 ### mTLS
 

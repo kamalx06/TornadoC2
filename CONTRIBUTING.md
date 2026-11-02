@@ -20,24 +20,24 @@ both legitimate and malicious purposes.
 
 ---
 
-> **Status: the Go agent is frozen.** Development has stopped on
-> the Go agent and is moving to a Rust rewrite. Agent-side
-> contributions — new verbs, new evasions, new transports, new
-> pivot transports — are **paused pending the Rust agent**. Bug
-> fixes and mechanical improvements to the frozen Go agent are
-> accepted on a triage basis; anything larger waits for the Rust
-> port, where the code will not exist in Go. The server side —
-> handler, operator console, pivot infrastructure, audit chain,
-> credential and loot stores, team chat, dead-man's switch, wire
-> protocol — continues to receive contributions unchanged.
+> **Status: the agent is Rust.** The Go agent was ported to Rust
+> as a ground-up rewrite — no FFI to Go, no cgo, no embedded Go
+> runtime. The wire protocol, compile-time configuration model,
+> ECDSA identity, and task signing are unchanged. The Rust agent
+> under `agent/src/` is the only agent this tree ships; there is
+> no Go tree to maintain.
 >
-> See [README › What comes next](README.md#what-comes-next) for
-> the rationale and the migration plan. The agent-side sections
-> of this document (Agent Verb, Evasion Feature, Transport, Pivot
-> Transport) remain accurate as reference for maintaining the
-> frozen tree; they will be split into a Go-agent maintenance
-> guide and a Rust-agent contribution guide when the Rust agent
-> ships.
+> Agent-side contributions — new verbs, new evasions, new
+> transports, new pivot transports — are open and target the Rust
+> crate. See the sections below for the Rust patterns. The server
+> side — handler, operator console, pivot infrastructure, audit
+> chain, credential and loot stores, team chat, dead-man's switch,
+> wire protocol — is unaffected by the rewrite and continues to
+> receive contributions unchanged.
+>
+> See [README › The Rust agent](README.md#the-rust-agent) for the
+> rationale, and [README › Extending TornadoC2](README.md#extending-tornadoc2)
+> for the extension surfaces.
 
 ---
 
@@ -71,17 +71,15 @@ contributions, roughly in order of impact:
    [Reporting Bugs](#reporting-bugs).
 2. **Security reports** — do not open a public issue for security
    flaws. See [SECURITY.md](SECURITY.md).
-3. **Agent contributions — maintenance only during the Go freeze.**
-   The Go agent is frozen (see the banner above); new verbs, new
-   evasions, and new platform support on the Go agent are not
-   being accepted. Bug fixes and mechanical improvements to
-   existing Go code are. The active agent work — a Rust rewrite
-   targeting feature parity — will open its own contribution path
-   when it ships.
-4. **Transport contributions — maintenance only during the Go
-   freeze.** Bug fixes and mechanical improvements to the ten
-   in-tree transports and the peer-to-peer pivot model are
-   accepted; new transports are not.
+3. **Agent contributions.** New native verbs, new evasion
+   primitives, new platform support on the Rust agent. The
+   pattern is the same mechanical template every existing verb
+   follows — see
+   [Contributing an Agent Verb](#contributing-an-agent-verb).
+4. **Transport contributions.** New transports, new pivot
+   transports, and improvements to the ten in-tree transports and
+   the peer-to-peer pivot model. The six-file glue is described
+   under [Contributing a Transport](#contributing-a-transport).
 5. **WASM extensions** — new capabilities pushed to the agent at
    runtime.
 6. **C2 profiles** — new HTTP fingerprints that mimic a specific
@@ -135,37 +133,51 @@ not fit the project's direction.
   Requires the `wireguard` kernel module and `CAP_NET_ADMIN` on
   the Python process.
 
-**Agent-side (Go):**
+**Agent-side (Rust):**
 
-- Go toolchain 1.24 or later.
-- `go mod tidy` inside `agent/` pulls the six direct
-  dependencies and their transitive graph:
-  - `github.com/miekg/dns` — DNS and DoH transports
-  - `github.com/quic-go/quic-go` — QUIC / HTTP/3 transport
-  - `github.com/coder/websocket` — WebSocket transport
-  - `github.com/chrj/wgnet` — WireGuard transport
-  - `github.com/refraction-networking/utls` — browser TLS
-    ClientHello fingerprinting
-  - `github.com/tetratelabs/wazero` — WASM extension host
+- **Rust stable toolchain** (1.75 or later) and the target
+  triples the builder cross-compiles to:
+  `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`,
+  `x86_64-pc-windows-gnu`, `i686-pc-windows-gnu`. `rustup target
+  add <triple>` installs each. The pins live in
+  `agent/rust-toolchain.toml`.
+- `cargo build` inside `agent/` resolves every dependency in
+  `Cargo.toml` from the local cargo cache. The direct
+  dependencies are the crate root under `agent/Cargo.toml`;
+  key ones:
+  - `reqwest` + `rustls` — HTTP transport
+  - `quinn` — QUIC / HTTP/3 transport
+  - `tokio-tungstenite` — WebSocket transport
+  - `hickory-resolver` + `hickory-proto` — DNS and DoH
+  - `boringtun` — WireGuard transport
+  - `boring` — BoringSSL ClientHello fingerprinting
+  - `aes-gcm`, `p256`, `sha2`, `hkdf` — crypto
+  - `serde` + `serde_json` — wire types
+  - `windows` — Windows API bindings
+  - `wasmi` (default) or `wasmtime` — WASM extension host;
+    pulled in only when `--features wasm-host` is enabled
 
   A build that does not select one of those transports still
-  pulls its dependency into the module graph, because the imports
-  are unconditional. The linker prunes unused packages from the
-  final binary; a build with `transport_mode: "http"` does not
-  ship QUIC code, but `go mod tidy` still resolves the module.
+  resolves the crate in `Cargo.lock`, because the dependency is
+  unconditional in `Cargo.toml`. The `lto = "fat"` setting in
+  `[profile.release]` prunes unused code from the final binary,
+  so a build with `transport_mode: "http"` does not ship QUIC
+  code — but the crate is still in the dependency graph.
 
 **Optional:**
 
-- `garble` — control-flow obfuscation (used by `opsec` and
-  `paranoid` profiles). Install with
-  `go install mvdan.cc/garble@v0.17.0` or run
-  `install-go-build.sh` to install the pinned version.
 - `UPX` — binary packing (used by `paranoid`).
 - `Donut` — shellcode output format, `execute-assembly`, and
   `inject: true` builds on Windows
   ([TheWover/donut](https://github.com/TheWover/donut/releases)).
-- `rustup` plus the `wasm32-unknown-unknown` target — building
-  WASM extensions.
+- **`wasm32-unknown-unknown` target** — building WASM
+  extensions that the agent loads via `--wasm-extensions`.
+  `rustup target add wasm32-unknown-unknown`.
+- **`install-rust-build.sh`** — one-shot bootstrap: verifies the
+  Rust toolchain and target triples, builds `Bootstrap.dll`
+  from `Bootstrap.cs`, warms the Cargo cache, runs `cargo fmt
+  --check` and `cargo clippy`, and cross-compiles for both
+  target triples. Run it after any change to `agent/Cargo.toml`.
 - **`tornadoc2/shapecheck.py`** — profile validator. Ships in-tree;
   no install required beyond the Python standard library. Run
   `python3 tornadoc2/shapecheck.py` before submitting any profile
@@ -231,8 +243,17 @@ The wizard walks through every parameter. For scripted builds, use
 Before opening a pull request:
 
 1. **Build the agent for the platform your change touches.** A
-   change to `agent/core/main.go` should compile for Linux and
-   Windows, both amd64 and arm64, without warnings.
+   change to `agent/src/core/` should compile for Linux and
+   Windows, both amd64 and arm64:
+
+       cd agent
+       cargo build --release --target x86_64-unknown-linux-gnu \
+                              --target x86_64-pc-windows-gnu \
+                              --target aarch64-unknown-linux-gnu
+
+   A change under `#[cfg(feature = "wasm-host")]` also needs
+   `--features wasm-host` on the build, so both feature states
+   are exercised.
 2. **Run both the wizard and the config-file build path.** A
    change to `builder.py` should be exercised through both. The
    `tornadoc2/beacon_handler.py` wizard, the
@@ -244,8 +265,10 @@ Before opening a pull request:
    listener, engine, a transport, or the pivot model should be
    exercised against a live agent built from the change.
 4. **Exercise the security-relevant paths.** If your change is in
-   `crypto.py`, `wire.py`, `TaskSigner`, or a verifier, test both
-   the accept and reject paths with valid and invalid signatures.
+   `agent/src/crypto/wire.rs`, `agent/src/core/verify.rs`, or a
+   verifier, test both the accept and reject paths with valid and
+   invalid signatures. Note that `verify` in the Rust agent is a
+   module (`core/verify.rs`), not a class.
 5. **For a C2 profile or shaping change, run `shapecheck` and
    build the agent.** `shapecheck` catches the static classes —
    path syntax, `\w` divergence, placeholder placement, encoding
@@ -325,7 +348,9 @@ Include:
 
 - Target OS and CPU architecture.
 - Operator OS, Python version, and CPU architecture.
-- Go toolchain version (from `go version`).
+- Rust toolchain version (from `rustc --version` and
+  `cargo --version`), plus the output of
+  `rustup show active-toolchain`.
 - Which transports were enabled at the handler, and which were
   built into the agent.
 - Whether the beacon was built with `--verbose`.
@@ -389,36 +414,56 @@ The project has a consistent style. Match it.
   the exception — it is emitted as dedicated linker flags because
   the DNS transport reads it before the profile is parsed.
 
-### Go
+### Rust
 
-- **Package-level vars for values set with `-X`.** The builder's
-  linker flags resolve against these names; renaming requires a
-  matching change in `builder.py`.
-- **`diag()` for anything that should only appear with
-  `--verbose`.** Never `fmt.Println` from the agent.
-- **`context.Context` propagation for anything that dials or
-  waits.** A cancelled task or a shutdown should abort the
-  operation, not leave it running until its own timeout.
-- **`defer` for cleanup.** Close what you open in the same
-  function, in a `defer` on the line after you open it.
-- **Splitting transports across files is encouraged.** HTTP, QUIC,
-  WebSocket, DNS, DoH, ICMP, WireGuard, SMB, and TCP each have
-  their own file; a new transport should follow the same pattern.
-- **`//go:build windows` (or `linux`) for platform-specific
-  files.** Anything that calls `syscall`, `windows`, or a
-  platform-specific `crypto` API belongs behind a build tag.
+- **`TC2_*` environment variables for build-time values.**
+  `agent/build.rs` reads each `TC2_*` var and emits a
+  `pub const` into `config_generated.rs`. The builder sets the
+  env var; the agent reads the const. Renaming requires a
+  matching change in `beacon/builder.py` (the emitter) and
+  `agent/src/config.rs` (the consumer). The `-X`-linker-flag
+  pattern the Go tree used has no Rust equivalent — build.rs +
+  `env!` is the equivalent.
+- **`diag!` for anything that should only appear with
+  `--verbose`.** Never `println!` from the agent. The macro
+  expands to nothing in a non-verbose build; the visible
+  toggle is `TC2_VERBOSE=true` at build time.
+- **`tokio::select!` and `CancellationToken` for anything that
+  dials or waits.** A cancelled task or a shutdown should abort
+  the operation, not leave it running until its own timeout.
+- **`Drop` for cleanup.** A `File`, `TcpStream`, or
+  `JoinHandle` releases on scope exit; an explicit `close()` is
+  rare. When the release has to happen before end of scope, wrap
+  in a small RAII type rather than calling a `close()` method.
+- **Splitting transports across files is encouraged.** HTTP,
+  QUIC, WebSocket, DNS, DoH, ICMP, WireGuard, SMB, and TCP each
+  have their own file under `agent/src/transport/`; a new
+  transport should follow the same pattern.
+- **`#[cfg(target_os = "windows")]` (or `"linux"`) for
+  platform-specific modules.** The idiomatic Rust layout is
+  `mod.rs` with `#[cfg(target_os = "...")] #[path = "windows.rs"]
+  mod imp;` re-exported by `pub use imp::*;` — the closest 1:1
+  translation of the Go build-tag layout.
 - **Comments explain the invariant, not the syntax.** A comment
-  on a `Close` call says why the file must be closed before the
-  function returns; it does not say "close the file".
-- **The Windows injection path is stdlib-only.** Do not add
-  `golang.org/x/sys/windows` to `inject_windows.go` — it reaches
-  `kernel32.dll` through `syscall.NewLazyDLL` on purpose.
-- **Shape specs live in `agent/features/shaping.go`.** The
-  `ShapeSpec` struct carries `Template`, `Extract`, `Encoding`,
-  and `Placement`. The `encoding` and `placement` fields are read
-  by `ShapeWrap` / `ShapeUnwrap` for encoding, and by the
-  transport for placement — the shaping package itself only knows
-  about the payload bytes, not the HTTP envelope.
+  on a `Drop` impl says why the resource must be released
+  before end of scope; it does not say "close the file".
+- **Shape specs live in `agent/src/features/shaping.rs`.** The
+  `ShapeSpec` struct carries `template`, `extract`, `encoding`,
+  and `placement`. `shape_wrap` / `shape_unwrap` read the payload
+  bytes; the transport reads the placement. The shaping module
+  itself does not know about the HTTP envelope.
+- **`#![deny(unsafe_op_in_unsafe_fn)]` and `#![warn(missing_docs)]`
+  at the crate root.** Adding a new public item without a doc
+  comment is a warning; adding a raw pointer operation inside an
+  `unsafe fn` without an inner `unsafe` block is an error. Both
+  are already enabled in `agent/src/lib.rs` — do not disable them
+  in a submodule.
+- **`Cargo.toml` `[profile.release]` is load-bearing.** `strip =
+  "symbols"`, `lto = "fat"`, `codegen-units = 1`, `panic =
+  "abort"`, `opt-level = "z"` — changing any of these changes
+  the shipped binary size and the memory layout a scanner sees.
+  The Windows OPSEC story (no `.pdata`-reachable runtime, no
+  reflection metadata) depends on them.
 
 ### Both
 
@@ -456,12 +501,13 @@ Some things are deliberately out of scope. A pull request that adds
 one of the following will be declined with an explanation, not
 silently ignored.
 
-**Also declined during the Go freeze:** a new native verb, a new
-evasion primitive, a new transport, or a new pivot transport on
-the Go agent. See the status banner at the top of this document.
-These are not "out of scope" for the project — they are out of
-scope for the *frozen tree*, and the Rust agent is where they
-land.
+**Also declined:** a new Cargo feature that is not gated the same
+way `wasm-host` is. Every size-sensitive feature — anything that
+pulls a dependency a lean build should not carry — belongs behind
+a feature flag, off by default, and named on the `beacon-build`
+command line. A contribution that adds a dependency to the
+`[dependencies]` section instead of `[features]` will be sent
+back. See the `wasm-host` feature for the pattern.
 
 - **Runtime configuration files.** The agent has no config file,
   no environment variable, no command-line argument. Every
@@ -478,8 +524,8 @@ land.
 - **Persistence on the target.** The agent has no persistence
   mechanism. Adding one (scheduled task, registry run key, cron
   entry, launchd plist) is out of scope.
-- **A non-Go agent.** The agent is a single Go binary. A Python
-  or C replacement would not be considered.
+- **A non-Rust agent.** The agent is a single Rust binary. A
+  Python or C replacement would not be considered.
 - **A second WSGI server.** The handler depends on werkzeug-specific
   behaviour to read the peer certificate. gunicorn, uwsgi, and
   Hypercorn break mTLS client authentication. The built-in server
@@ -491,8 +537,11 @@ land.
 - **A plugin system in the handler.** The handler is deliberately
   minimal. WASM extensions run on the agent, not the server.
 - **A build that requires network access at compile time.** Every
-  dependency must be resolvable from the local module cache;
-  `go build` should not fetch anything at build time.
+  dependency must be resolvable from the local Cargo cache;
+  `cargo build` should not fetch anything at build time.
+  `install-rust-build.sh` runs `cargo fetch` once to warm the
+  cache; a fresh build after that must succeed without network
+  access.
 - **Anything that logs more than it receives.** A change that
   writes request bodies, PEM material, or raw task args to disk
   without need is a regression in the logging discipline.
@@ -526,135 +575,160 @@ land.
 
 ## Contributing an Agent Verb
 
-> **Maintenance-only during the Go freeze.** No new native verbs
-> are being accepted on the Go agent. The pattern below stays
-> accurate for **maintaining** an existing verb — a bug fix, a
-> platform correction, a mechanical improvement — and will be the
-> reference for porting the verb to Rust once the Rust agent
-> ships. A PR that adds a new verb to the Go agent will be
-> declined with a pointer at the Rust roadmap.
+A new native verb touches four places in the Rust tree. The
+pattern is mechanical once you have seen one.
 
-A new native verb touches three places. The pattern is mechanical
-once you have seen one.
+### 1. Add the implementation first
 
-### 1. Add the implementation to the right file first
+Native verbs split across `agent/src/verbs/` for
+platform-agnostic utilities and the platform-specific `native/`
+modules for syscall-adjacent verbs.
 
-Native verbs split across three files, and the right one depends on
-what the verb does and which platform it targets. **Edit one of
-these first** — the remaining registration steps below assume the
-implementation already exists in the correct location:
+| Where | What goes there |
+|-------|-----------------|
+| `agent/src/verbs/file.rs` | Cross-platform file inspection — `cat`, `ls`, `head`, `tail`, `stat`, `strings`, `hexdump` |
+| `agent/src/verbs/search.rs` | `find`, `grep` |
+| `agent/src/verbs/hash.rs` | `sha1`, `sha256`, `md5`, `cksum` |
+| `agent/src/verbs/text.rs` | `wc`, `nl`, `rev`, `sort`, `uniq`, `tr` |
+| `agent/src/verbs/encoding.rs` | `base64`, `gzip`, `gunzip` |
+| `agent/src/verbs/fs_ops.rs` | `mkdir`, `rm`, `cp`, `mv`, `chmod`, `ln`, `touch` |
+| `agent/src/verbs/path.rs` | `which`, `readlink`, `realpath`, `du` |
+| `agent/src/verbs/network.rs` | `curl`, `resolve`, `nc` |
+| `agent/src/verbs/shell.rs` | `shell start/stop/status/exec` |
+| `agent/src/native/linux/*.rs` | Linux-only syscalls — `ps`, `id`, `ifconfig`, ELF loader, hashdump |
+| `agent/src/native/windows/*.rs` | Windows-only APIs — process enumeration, tokens, PE loader, BOF, .NET, lsassdump |
 
-| File | What goes there |
-|------|-----------------|
-| `agent/native/native_extra.go` | Cross-platform verbs that work on both Linux and Windows — file inspection (`sha1`, `cksum`, `wc`, `nl`, `rev`, `sort`, `uniq`, `tr`), compression (`gzip`, `gunzip`), encoding (`base64`), path resolution (`which`), network utilities (`curl`, `resolve`, `nc`), and anything else whose implementation is identical on both OSes and does not need platform-specific syscalls. |
-| `agent/native/native_linux.go` | Verbs that require a Linux-specific syscall or interface — `/proc` walks (`ps`), `uid` / `gid` lookups (`id`), interface enumeration (`ifconfig` on Linux), anything that reads from `/sys`, `/proc`, or `/dev`. Build-tagged `//go:build linux`. |
-| `agent/native/native_windows.go` | Verbs that require a Windows-specific API — Toolhelp process enumeration (`ps`), token inspection (`id`), `net.Interfaces` is cross-platform but token or handle operations are not (`steal_token`), the in-memory PE loader (`execmem exe`), the .NET assembly host (`execute_assembly`), the COFF loader (`bof`). Build-tagged `//go:build windows`. |
+The current `agent/src/verbs/mod.rs` holds the dispatcher —
+`is_native_extra_verb(&str) -> bool` and `native_extra_verb(&mut
+Agent, Task) -> Result`. The `.execute()` match in
+`agent/src/core/dispatch.rs` routes on `verb` and calls into the
+dispatcher. A new utility verb is one `match` arm in
+`verbs/mod.rs` plus the implementation; a new platform verb is
+one `match` arm in the platform module's dispatcher.
 
-If a verb has the same name on both platforms but a different
-implementation — `ps` and `id` are the current examples — put the
-platform-specific halves in `native_linux.go` and
-`native_windows.go` under the same function name, and the dispatcher
-in `agent/core/main.go` calls it without knowing which file it came
-from.
+For a cross-platform file verb in `verbs/file.rs`:
 
-For a cross-platform file verb in `native_extra.go`:
+```rust
+//! Cross-platform file inspection verbs.
 
-```go
-// catVerb reads a file and returns its bytes.
-func (a *Agent) catVerb(t protocol.Task) protocol.Result {
-	if len(t.Args) == 0 {
-		return protocol.Result{ID: t.ID,
-			Error: "cat requires a path"}
-	}
-	data, err := os.ReadFile(t.Args[0])
-	if err != nil {
-		return protocol.Result{ID: t.ID, Error: err.Error()}
-	}
-	return protocol.Result{ID: t.ID,
-		Output: encodeOutput(data)}
+use crate::core::helpers::encode_output;
+use crate::protocol::{Result as TaskResult, Task};
+use std::fs;
+
+/// `cat <path>` — read a file and return its bytes.
+///
+/// Reads through `std::fs::read`, which opens with read-only
+/// access and returns the whole file as a `Vec<u8>`. The
+/// framework's output envelope base64-encodes the bytes, so
+/// binary files round-trip. Errors are surfaced as the task's
+/// `error` field, not as a swallowed empty result — the operator
+/// sees the OS error string verbatim.
+pub fn cat(t: &Task) -> TaskResult {
+    if t.args.is_empty() {
+        return TaskResult {
+            id: t.id,
+            error: Some("cat requires a path".into()),
+            ..Default::default()
+        };
+    }
+    match fs::read(&t.args[0]) {
+        Ok(data) => TaskResult {
+            id: t.id,
+            output: encode_output(&data),
+            ..Default::default()
+        },
+        Err(e) => TaskResult {
+            id: t.id,
+            error: Some(e.to_string()),
+            ..Default::default()
+        },
+    }
 }
 ```
 
-For a Linux-specific verb in `native_linux.go`:
+For a Linux-only verb in `native/linux/system.rs`:
 
-```go
-//go:build linux
+```rust
+//! Linux-only system verbs.
+//!
+//! This module is `#[cfg(target_os = "linux")]`; the sibling
+//! `windows.rs` carries the same function names on Windows, and
+//! `mod.rs` re-exports whichever the target compiled.
 
-package native
+use crate::protocol::Result as TaskResult;
 
-// NativeID returns the current uid, gid, and group memberships,
-// read directly from the syscall package without shelling out to
-// `id`.
-func NativeID() (string, error) {
-	// os.Getuid() and os.Getgid() are cheap and correct; the
-	// group list is the reason this is Linux-specific — Windows
-	// has no direct equivalent.
-	...
+/// `id` — uid, gid, and group memberships.
+///
+/// Reads directly from `nix::unistd::getuid` / `getgid` and the
+/// supplementary-group list. There is no child process; `id(1)`
+/// is not invoked.
+pub fn id(_t: &Task) -> TaskResult {
+    // ...
 }
 ```
 
-For a Windows-specific verb in `native_windows.go`:
+For a Windows-only verb in `native/windows/token.rs`:
 
-```go
-//go:build windows
+```rust
+//! Windows token and privilege verbs.
 
-package native
+use crate::protocol::Result as TaskResult;
 
-// NativePS walks the process table through
-// CreateToolhelp32Snapshot. The Windows implementation differs
-// from the /proc walk on Linux; the caller in core/ sees the same
-// function name on both.
-func NativePS() (string, error) {
-	...
+/// `whoami /priv` — list the current process token's privileges.
+pub fn whoami_priv(_t: &Task) -> TaskResult {
+    // ...
 }
 ```
 
-The convention: the verb name ends in `Verb`, the receiver is
-`*Agent`, the argument is a `protocol.Task`, and the return is a
-`protocol.Result`. Errors go in `Result.Error`; successful output
-goes in `Result.Output` (base64-encoded via `encodeOutput`).
+The convention: a `pub fn verb(t: &Task) -> TaskResult`, one
+file per verb family, `#[cfg]`-gated in the module's `mod.rs`
+for platform-specific modules.
 
-For a verb that spawns a process, use `exec.CommandContext` with the
-`ctx` from the task so cancellation propagates.
+For a verb that spawns a process, use
+`tokio::process::Command` inside `tokio::select!` against a
+`CancellationToken` derived from the task's timeout. A
+`std::process::Command` with a manual kill-on-timeout is
+acceptable when the verb is synchronous, but the async form is
+preferred for anything long-running.
 
-For a verb that can be called through a pivot, **do not assume the
-transport is HTTP.** A pivoted child's task arrives through the
-parent's transport and the args are already base64-decoded by the
-pivot session. If the verb takes a binary arg (a COFF blob, a
-shellcode), confirm the size fits the transport's ceiling — DNS caps
-a logical request at roughly 47 KiB, and a large module (a WASM
-extension, a .NET assembly) cannot be delivered over DNS at all.
-ICMP caps a reply at 1400 bytes, so a verb whose result exceeds
-that on an ICMP-only beacon drops the reply rather than truncating
-it — see the ICMP transport section in the README for the exact
-ceiling.
+For a verb that can be called through a pivot, **do not assume
+the transport is HTTP.** A pivoted child's task arrives through
+the parent's transport. If the verb takes a binary arg (a COFF
+blob, a shellcode), confirm the size fits the transport's
+ceiling — DNS caps a logical request at roughly 47 KiB; ICMP
+caps a reply at 1400 bytes. A verb whose result exceeds that on
+an ICMP-only beacon drops the reply rather than truncating it.
 
-**Split across files only when the platform actually differs.**
-A verb that compiles cleanly on both OSes from `native_extra.go`
-should not be split. The three-file layout exists so that a verb
-which needs a Windows API is not forced to carry a Linux stub, and
-vice versa.
+### 2. Register the verb in the dispatcher
 
-### 2. Register the verb in the dispatch switch
+In `agent/src/verbs/mod.rs`:
 
-In `agent/core/main.go`, in the `execute` method:
-
-```go
-	case "cat":
-		return a.catVerb(t)
+```rust
+pub fn native_extra_verb(agent: &mut Agent, t: Task) -> TaskResult {
+    match t.verb.as_str() {
+        // ...
+        "cat" => crate::verbs::file::cat(&t),
+        // ...
+        other => TaskResult {
+            id: t.id,
+            error: Some(format!("unknown verb: {other}")),
+            ..Default::default()
+        },
+    }
+}
 ```
 
-Place the case in the block that matches the verb's nature
-(inspection, file ops, network, execution). The blocks are
-grouped; adding to the wrong one is confusing but not wrong.
+For a platform verb, the platform module's dispatcher takes the
+match arm — `native::linux::dispatch(&mut agent, t)` for
+`target_os = "linux"`, `native::windows::dispatch(&mut agent,
+t)` for `target_os = "windows"`. The `mod.rs` re-export means
+the call site in `dispatch.rs` does not need to know which
+platform's implementation is linked.
 
-### 3. Advertise the verb to the operator catalogue
+### 3. Advertise it to the operator catalogue
 
-The operator client fetches the catalogue from the server at banner
-time. The catalogue lives in `beacon/constants.py` and is filtered
-by the operator's role and the target's OS.
-
-Add an entry so tab completion and `help` see the new verb:
+The catalogue is served from the server's command table. Add
+the entry in `beacon/constants.py`:
 
 ```python
 {
@@ -668,43 +742,44 @@ Add an entry so tab completion and `help` see the new verb:
 ```
 
 If the verb only makes sense on one OS, set `platforms` and the
-server will filter it out for the other. The client re-fetches the
-catalogue on `use` for the target's OS, so the tab-completion set
-follows automatically.
-
-If the verb is only meaningful for a capability the operator may
-not hold (for example, a BOF is Windows-only and requires the
-`beacon.build` capability to have uploaded the COFF), say so in the
-catalogue entry — the client filters on `capability` the same way
+server will filter it out for the other. The client re-fetches
+the catalogue on `use` for the target's OS, so tab completion
+follows automatically. If the verb is only meaningful for a
+capability the operator may not hold, say so in the
+`capability` field — the client filters on that the same way
 it filters on `platforms`.
 
 ### 4. Document it
 
-Add a row to the README's native-verbs table in the
-[Operator Reference](README.md#beacon-console-beacon-id) section.
-If the verb has flags, add a short subsection describing them and
-include at least one worked example.
+Add a row to the README's native-verbs table under
+[Operator Reference › Beacon console](README.md#beacon-console-beacon-id).
+If the verb has flags, add a short subsection describing them
+and at least one worked example.
 
 ### Testing
 
-Build for both Linux and Windows and verify the verb works on the
-platform it targets. If it takes arguments, exercise the error path
-for a missing or malformed arg. If it is reachable through a pivot,
-verify it also works when the child's transport is SMB or TCP.
+Build for both Linux and Windows and verify the verb works on
+the platform it targets:
+
+    cd agent
+    cargo build --release \
+        --target x86_64-unknown-linux-gnu \
+        --target x86_64-pc-windows-gnu
+
+If it takes arguments, exercise the error path for a missing or
+malformed arg. If it is reachable through a pivot, verify it
+also works when the child's transport is SMB or TCP.
 
 ---
 
-## Contributing an Evasion Feature
+# Contributing an Evasion Feature
 
-> **Maintenance-only during the Go freeze.** No new evasion
-> primitives are being accepted on the Go agent. The pattern below
-> stays accurate for maintaining existing primitives and will be
-> the reference for the Rust port.
-
-Compile-time evasion features are set via linker flags and read at
-startup. Every evasion feature is **compile-time only** — there is
-no runtime toggle, and a feature that reads from disk or the
-environment breaks the core design.
+Compile-time evasion features are set via `TC2_*` environment
+variables, consumed by `agent/build.rs`, emitted as `pub const`
+items in `config_generated.rs`, and read from `agent/src/config.rs`
+at startup. Every evasion feature is **compile-time only** —
+there is no runtime toggle, and a feature that reads from disk or
+the environment at runtime breaks the core design.
 
 Evasion features fall into two kinds, and the work starts in a
 different place depending on which one you are adding.
@@ -713,49 +788,49 @@ different place depending on which one you are adding.
 
 | Path | What it holds |
 |------|----------------|
-| `agent/evasion/*.go` | Runtime evasion primitives: anti-sandbox heuristics, anti-debug checks, anti-VM probes, AMSI patching, ETW patching, PPID spoofing, sleep-mask implementations, indirect syscall stubs, string deobfuscation. **Most new evasion work happens here first** — a new primitive is a new file or a new function in an existing file under this directory. |
-| `agent/evasion/sleepmask_*.go` | Sleep-mask variants. `sleepmask_aesctr.go`, `sleepmask_rc4.go`, `sleepmask_cronos.go`, and `sleepmask_hwbp.go` are the reference implementations. `cronos` and `hwbp` are Windows-amd64 only; `rc4` and `aes-ctr` are the cross-platform masks. A new mask is a new file here plus a case in the mask dispatcher. |
-| `agent/syscalls/syscall_*.go` | Syscall method implementations. `direct` and `indirect` are the shipped methods; a new method is a new file plus a case in the dispatcher. |
-| `agent/core/main.go` | The call sites. A new evasion primitive is wired in from `Main()` or from the sleep loop, not from a new entry point. |
-| `beacon/builder.py` | The build toggle. Every evasion primitive has a matching field in `BeaconBuildConfig` and a matching `-X main.<Name>Raw=` flag. |
-| `agent/stageless/ldflags.go` and `agent/stageless/main.go` | The linker-flag receiver and the `core.Config` copy. |
+| `agent/src/evasion/` | Runtime evasion primitives — anti-sandbox heuristics, anti-debug, anti-VM, AMSI patch, ETW patch, PPID spoof, sleep-mask, indirect syscalls. **Most new evasion work happens here.** |
+| `agent/src/evasion/sleepmask/` | The sleep-mask variants. `linux.rs`, `linux_amd64.rs` (with `global_asm!`), `windows.rs`, `cronos_windows.rs`, `hwbp_windows.rs`, `native_windows.rs`, `stack_windows.rs`. A new mask is a new file here plus one arm in `sleepmask/mod.rs`'s dispatcher. |
+| `agent/src/evasion/syscall.rs` | Syscall method implementations — `direct`, `indirect`. A new method is one arm in the dispatcher. |
+| `agent/src/core/run_loop.rs` | The call sites. A new evasion primitive is wired in from the run loop, not from a new entry point. |
+| `agent/build.rs` | The `TC2_*` env var reader. Add one `emit_bool!` / `emit_str!` per new toggle. |
+| `beacon/builder.py` | The build toggle — one `BeaconBuildConfig` field plus one `env['TC2_X'] = ...` emission. |
 
-**Changing an existing evasion primitive** — a better anti-VM probe,
-a tighter AMSI patch, an updated sleep-mask pattern — is an edit to
-an existing file under `agent/evasion/` plus, if the toggle name
-changes, the corresponding builder field. The three-file linker
-pattern from the section below is only needed when you are adding a
-**new toggle**, not when you are improving the code behind an
-existing one.
+**Changing an existing evasion primitive** — a better anti-VM
+probe, a tighter AMSI patch, an updated sleep-mask pattern — is
+an edit to an existing file under `agent/src/evasion/` plus, if
+the toggle name changes, the corresponding builder field and
+`build.rs` emitter. The multi-file linker pattern below is only
+needed when adding a **new toggle**, not when improving the code
+behind an existing one.
 
-**Adding a new primitive** — a new anti-debug check, a new sleep
-mask algorithm, a new syscall method — starts with a new file under
-`agent/evasion/`, then walks through the six steps below to make it
-a build-time toggle.
+**Adding a new primitive** — a new anti-debug check, a new
+sleep-mask algorithm, a new syscall method — starts with a new
+file under `agent/src/evasion/`, then walks through the six
+steps below to make it a build-time toggle.
 
 ### The two-file rule for evasion primitives
 
-An evasion primitive lives in `agent/evasion/` and nowhere else.
-Do not put evasion logic in `agent/core/main.go` — the top-level
-file calls into the evasion package, not the other way around. The
-current `agent/core/main.go` reads:
+An evasion primitive lives in `agent/src/evasion/` and nowhere
+else. Do not put evasion logic in `agent/src/core/run_loop.rs` —
+the top-level loop calls into the evasion module, not the other
+way around. The current `run_loop.rs` reads:
 
-```go
-if AntiSandboxEnabled {
-    if evasion.SandboxDetected() { ... }
+```rust
+if config::ANTISANDBOX {
+    if evasion::antisanbox::detected() { ... }
 }
-if AntiDebug {
-    if evasion.DebuggerDetected() { ... }
+if config::ANTIDEBUG {
+    if evasion::antidebug::detected() { ... }
 }
-if AntiVm {
-    if evasion.InVM() { ... }
+if config::ANTIVM {
+    if evasion::antivm::detected() { ... }
 }
 ```
 
-The pattern to match: `agent/core/main.go` holds the *decision* to
-run the check; `agent/evasion/` holds the *implementation* of the
-check. A contribution that puts the implementation in `core/main.go`
-will be sent back to move it.
+The pattern to match: `run_loop.rs` holds the *decision* to run
+the check; `evasion/` holds the *implementation*. A
+contribution that puts the implementation in `run_loop.rs` will
+be sent back to move it.
 
 ### 1. Add the toggle to `BeaconBuildConfig`
 
@@ -768,32 +843,33 @@ In `beacon/builder.py`:
 Set a sensible default. `False` for anything that changes runtime
 behaviour; the `default` OPSEC profile enables nothing.
 
-### 2. Add the flag to `_build_ldflags`
+### 2. Add the env-var emission in `_build_env_vars`
 
 ```python
-    for name, value in (
+    for env_key, value in (
         ...
-        ('MyNewEvasionRaw', cfg.my_new_evasion),
+        ('TC2_MY_NEW_EVASION', cfg.my_new_evasion),
     ):
-        flags.append(f"-X main.{name}={'true' if value else 'false'}")
+        env[env_key] = 'true' if value else 'false'
 ```
 
-### 3. Declare the variable in `stageless/ldflags.go`
+### 3. Add the reader in `agent/build.rs`
 
-```go
-    MyNewEvasionRaw = "false"
+```rust
+    emit_bool!("TC2_MY_NEW_EVASION", "MY_NEW_EVASION");
 ```
 
-And read it in `stageless/main.go`:
+`emit_bool!` emits `pub const MY_NEW_EVASION: bool = true;` or
+`= false;` into `config_generated.rs` depending on the value.
 
-```go
-    MyNewEvasion: MyNewEvasionRaw == "true",
+### 4. Read it in `agent/src/config.rs`
+
+```rust
+pub use crate::config_generated::MY_NEW_EVASION;
 ```
 
-### 4. Read it in `agent/core/main.go`
-
-Add the field to the `Config` struct and copy it into package state
-in `Main(cfg Config)`.
+The re-export is a one-liner; `config_generated.rs` is `include!`d
+into the crate root by `lib.rs`.
 
 ### 5. Consider a named OPSEC profile
 
@@ -802,67 +878,64 @@ If the feature belongs in a named profile (`stealth`, `opsec`,
 `OPSEC_PROFILES` and update the profile table in the README's
 [OPSEC Profiles](README.md#opsec-profiles) section.
 
-A feature that goes into `paranoid` but not `opsec` is a deliberate
-choice — `paranoid` is allowed to be slower and larger. A feature
-that goes into `opsec` but not `stealth` is also deliberate —
-`stealth` is the profile for engagements where size and speed
-matter and only the cheapest evasions are acceptable.
+A feature that goes into `paranoid` but not `opsec` is a
+deliberate choice — `paranoid` is allowed to be slower and
+larger. A feature that goes into `opsec` but not `stealth` is
+also deliberate — `stealth` is the profile for engagements
+where size and speed matter and only the cheapest evasions are
+acceptable.
 
 ### 6. Do not silently fall back
 
-If the feature is a mask, a patch, or an evasion, a runtime failure
-must not fall through to unmasked behaviour without a diagnostic.
-A `diag()` line is the minimum; a hard failure is often correct.
+If the feature is a mask, a patch, or an evasion, a runtime
+failure must not fall through to unmasked behaviour without a
+diagnostic. A `diag!` line is the minimum; a hard failure is
+often correct.
 
-For sleep mask in particular: if the mask cannot be applied, the
-agent must not sleep in plaintext — a beacon whose `.text` is left
-unmasked is exactly the state a memory scanner is looking for. Fail
-loudly and, if the profile is aggressive enough, exit.
+For the sleep mask in particular: if the mask cannot be applied,
+the agent must not sleep in plaintext — a beacon whose `.text`
+is left unmasked is exactly the state a memory scanner is
+looking for. Fail loudly and, if the profile is aggressive
+enough, exit.
 
-### 7. Do not add a linker flag for something the profile already carries
+### 7. Do not add a build toggle for something the profile already carries
 
 If the feature is a profile-level setting — a status code, a
 cookie name, a response header, an encoding, a placement — it
-belongs in the profile JSON, not in a new linker flag. The
-builder already serializes the entire merged profile dict into
-`-X main.ProfileJSON`, so any field the agent's `protocol.Profile`
-struct declares is automatically available at runtime. Reaching
-for a linker flag when the profile schema would work is a
-regression in the design.
+belongs in the profile JSON, not in a new `TC2_*` env var. The
+builder serializes the entire merged profile dict into
+`TC2_PROFILE_JSON`, so any field the agent's
+`protocol::Profile` struct declares is automatically available
+at runtime. Reaching for a `TC2_*` toggle when the profile
+schema would work is a regression in the design.
 
-The one exception is a value the profile cannot carry because it
-is not part of the merged dict — the `dns_label` block reaches
-the DNS transport through dedicated linker flags because the
-DNS wire format is not the profile's concern and the transport
-needs the values before the profile is parsed. Reach for a
-linker flag only when the profile JSON cannot carry the value.
+The one exception is a value the profile cannot carry because
+it is not part of the merged dict — the `dns_label` block
+reaches the DNS transport through dedicated `TC2_DNS_*` env
+vars because the DNS wire format is not the profile's concern
+and the transport needs the values before the profile is
+parsed. Reach for a `TC2_*` env var only when the profile JSON
+cannot carry the value.
 
 ---
 
 ## Contributing a Transport
 
-> **Maintenance-only during the Go freeze.** No new transports are
-> being accepted on the Go agent. The seven-file pattern below
-> stays accurate as reference for maintaining the ten in-tree
-> transports and will be the template for porting each transport
-> to Rust. A contributor who wants to add a new transport should
-> watch the Rust roadmap rather than open a Go PR.
+A new transport is **two types plus mechanical glue in six
+files.** The two types hold the design; the six files carry a
+fixed template every existing transport follows.
 
-A new transport is **two classes plus mechanical glue in seven
-files.** The two classes hold the design; the seven files carry a
-fixed template that every existing transport already follows.
+This is the single most important contribution shape to
+understand. The transport abstraction was built so that a new
+transport is a contained change — the engine, the beacon
+registry, the task queue, and the operator client are all
+transport-agnostic and need no change. If your change touches any
+of them, the abstraction has leaked and the review will say so.
 
-This is the single most important contribution shape to understand.
-The transport abstraction was built so that a new transport is a
-contained change — the engine, the beacon registry, the task queue,
-and the operator client are all transport-agnostic and need no
-change. If your change touches any of them, the abstraction has
-leaked and the review will say so.
-
-### The two classes
+### The two types
 
 1. **Server side:** `beacon/transport/<name>.py`, subclassing the
-   base transport class in `beacon/transport/base.py`. The engine
+   base transport type in `beacon/transport/base.py`. The engine
    calls three methods on it:
    - `start()` — bind and start listening. Return `True` on
      success.
@@ -878,13 +951,13 @@ leaked and the review will say so.
    | HTTP-shaped | HTTP, QUIC, WebSocket | The three JSON endpoints shared with the listener |
    | Raw-framed direct | DNS, DoH, ICMP | Each carries the same JSON body inside its own envelope |
    | Tunnelled HTTP | WireGuard | An HTTPS request carried inside a userspace WireGuard device |
-   | Pivot | SMB, TCP bind | The peer-to-peer pivot session — see the next section |
+   | Pivot | SMB, TCP bind, TCP reverse | The peer-to-peer pivot session |
 
-   HTTP-shaped transports reuse the entire `BeaconListener` Flask
-   app and the C2 profile's route auto-discovery. A new transport
-   in that class subclasses `BeaconListener` and overrides
-   `start` and `stop`; the request handlers do not change. The
-   QUIC listener is the reference for this pattern.
+   HTTP-shaped transports reuse the entire `BeaconListener`
+   Flask app and the C2 profile's route auto-discovery. A new
+   transport in that class subclasses `BeaconListener` and
+   overrides `start` and `stop`; the request handlers do not
+   change. The QUIC listener is the reference for this pattern.
 
    Raw-framed direct transports write their own wire format and
    their own dispatch. The DNS transport is the reference for
@@ -896,115 +969,101 @@ leaked and the review will say so.
    then carry an ordinary HTTPS request inside it. WireGuard is
    the current example: from the listener's point of view the
    request is an HTTP request like any other, and it reuses the
-   entire `BeaconListener` request pipeline unchanged. A future
-   transport in this class would follow the same pattern —
-   terminate the outer tunnel, then hand the inner request to
-   the existing Flask app.
+   entire `BeaconListener` request pipeline unchanged.
 
-2. **Client side:** `agent/transport/<name>.go`, implementing the
-   `protocol.Transport` interface:
+2. **Client side:** `agent/src/transport/<name>.rs`,
+   implementing the `protocol::Transport` trait:
 
-   ```go
-   type Transport interface {
-       Name() string
-       CheckIn(identity Identity, pubkeyPEM, identitySig string,
-               identityTs int64, wire *WireSession) (*CheckinResponse, error)
-       FetchTasks(wire *WireSession) ([]Task, error)
-       PostResult(r Result, wire *WireSession) error
-       Close() error
+   ```rust
+   #[async_trait::async_trait]
+   pub trait Transport: Send + Sync {
+       fn name(&self) -> &'static str;
+       async fn check_in(
+           &self,
+           identity: &Identity,
+           pubkey_pem: &str,
+           identity_sig: &str,
+           identity_ts: i64,
+           wire: Option<&WireSession>,
+       ) -> Result<CheckinResponse, TransportError>;
+       async fn fetch_tasks(
+           &self,
+           wire: Option<&WireSession>,
+       ) -> Result<Vec<Task>, TransportError>;
+       async fn post_result(
+           &self,
+           r: Result,
+           wire: Option<&WireSession>,
+       ) -> Result<(), TransportError>;
+       async fn close(&self);
    }
    ```
 
-   The reference implementations are `transport_http.go`,
-   `transport_dns.go`, `transport_doh.go`, and
-   `transport_quic.go`. Splitting per-platform code into
-   `transport_<name>_windows.go` / `transport_<name>_linux.go`
+   The reference implementations are `transport/http.rs`,
+   `transport/dns.rs`, `transport/doh.rs`, and
+   `transport/quic.rs`. Splitting per-platform code into
+   `transport/<name>_windows.rs` / `transport/<name>_linux.rs`
    is the pattern for transports that need OS-specific syscalls.
 
-### The seven files of glue
+### The six files of glue
 
-The two classes above are the entire design. The seven files below
-connect them to the build system and the running handler. Every one
-is a name-swap of the same template — there is no design work in any
-of them.
+The two types above are the entire design. The six files below
+connect them to the build system and the running handler. Every
+one is a name-swap of the same template — there is no design work
+in any of them.
 
 | File | What is added |
 |------|---------------|
-| `agent/core/config.go` | One `Config` struct field per build-time value |
-| `agent/core/main.go` | Package vars, `Main()` assignments, one `case` in the `newAgent()` switch |
-| `agent/stageless/ldflags.go` | One package var per field, with default value |
-| `agent/stageless/main.go` | One line in the `core.Config{...}` literal per field |
-| `beacon/builder.py` | Transport validation plus one `-X main.X=Y` linker flag per field |
+| `agent/src/config.rs` | One `pub const` re-export per build-time value |
+| `agent/src/bin/beacon.rs` | One `match` arm in `dispatch_transport` |
+| `agent/build.rs` | One `TC2_*` env var read and `pub const` emission |
+| `beacon/builder.py` | Transport validation plus one `TC2_*` env var emission per field |
 | `beacon/build_manager.py` | One `cfg.X = params.get('x')` line per field |
 | `beacon_handler.py` | One CLI flag per listener port plus one `start()` call |
 
 The operator client — `tornado_client/repl.py` and
-`tornado_client/gui.py` — needs no change at all. The client talks
-to the server API; the transport is a server-to-agent concern. The
-build wizards in those two files do need one line per new transport
-(a display label and a `transport_mode` value in the transport
-list), but that is a data entry, not a code change — the wizard
-itself does not touch the transport implementation.
+`tornado_client/gui.py` — needs no change at all. The client
+talks to the server API; the transport is a server-to-agent
+concern. The build wizards in those two files do need one line
+per new transport (a display label and a `transport_mode` value
+in the transport list), but that is a data entry, not a code
+change.
 
 ### A worked example
 
 For a hypothetical transport named `foo` with two build-time
 values `foo_addr` and `foo_token`:
 
-```go
-// agent/core/config.go
-type Config struct {
-    ...
-    FooAddr  string
-    FooToken string
+```rust
+// agent/src/config.rs — re-export
+pub use crate::config_generated::{
+    FOO_ADDR, FOO_TOKEN,
+};
+```
+
+```rust
+// agent/build.rs — emit the consts
+emit_str!("TC2_FOO_ADDR",  "FOO_ADDR");
+emit_str!("TC2_FOO_TOKEN", "FOO_TOKEN");
+```
+
+```rust
+// agent/src/bin/beacon.rs — transport dispatch
+match mode.as_str() {
+    "foo" => {
+        if config::FOO_ADDR.is_empty() {
+            return Err("transport=foo but FOO_ADDR is empty".into());
+        }
+        let t: Box<dyn Transport> = Box::new(
+            crate::transport::foo::FooTransport::new(
+                config::FOO_ADDR,
+                config::FOO_TOKEN,
+            )?,
+        );
+        transports.push(t);
+    }
+    // ...
 }
-```
-
-```go
-// agent/core/main.go — package vars
-var (
-    ...
-    FooAddr  string
-    FooToken string
-)
-```
-
-```go
-// agent/core/main.go — Main()
-FooAddr  = cfg.FooAddr
-FooToken = cfg.FooToken
-```
-
-```go
-// agent/core/main.go — newAgent()
-case "foo":
-    if FooAddr == "" {
-        return nil, errors.New("transport=foo but no FooAddr")
-    }
-    fooT, err := transport.NewFooTransport(FooAddr, FooToken)
-    if err != nil {
-        return nil, err
-    }
-    a.transports = append(a.transports, fooT)
-    a.transportNames = append(a.transportNames, "foo")
-```
-
-```go
-// agent/stageless/ldflags.go
-var (
-    ...
-    FooAddr  = ""
-    FooToken = ""
-)
-```
-
-```go
-// agent/stageless/main.go
-core.Main(core.Config{
-    ...
-    FooAddr:  FooAddr,
-    FooToken: FooToken,
-})
 ```
 
 ```python
@@ -1013,9 +1072,9 @@ if 'foo' in modes:
     if not cfg.foo_addr:
         raise RuntimeError(
             "transport_mode='foo' requires foo_addr")
-    flags.append(f"-X main.FooAddr={cfg.foo_addr}")
+    env['TC2_FOO_ADDR'] = cfg.foo_addr
     if cfg.foo_token:
-        flags.append(f"-X main.FooToken={cfg.foo_token}")
+        env['TC2_FOO_TOKEN'] = cfg.foo_token
 ```
 
 ```python
@@ -1050,25 +1109,26 @@ operator client is touched.
 
 ### Handle the wire-encryption question
 
-If your transport is **direct** (the agent speaks to the server on
-its own socket, like HTTP or DNS), it supports wire encryption the
-same way HTTP does. The build embeds `server_ecdh_pubkey_b64` and
-the transport wraps request and response bodies in the AES-GCM
-envelope.
+If your transport is **direct** (the agent speaks to the server
+on its own socket, like HTTP or DNS), it supports wire
+encryption the same way HTTP does. The build embeds
+`TC2_SERVER_ECDH_PUBKEY` and the transport wraps request and
+response bodies in the AES-GCM envelope.
 
-If your transport is a **pivot** (traffic goes through a parent),
-the parent must be able to read the child's identity in the pivot
-handshake — but the child's C2 envelope is carried opaquely, so
-wire encryption on the child's own C2 body is **allowed**. See
+If your transport is a **pivot** (traffic goes through a
+parent), the parent must be able to read the child's identity
+in the pivot handshake — but the child's C2 envelope is carried
+opaquely, so wire encryption on the child's own C2 body is
+**allowed**. See
 [Contributing a Pivot Transport](#contributing-a-pivot-transport).
 
 ### Consider the C2 profile's scope
 
 If your transport is HTTP-shaped (the same three endpoints, the
 same JSON body), the C2 profile applies to it automatically:
-the paths, User-Agent, extra headers, shaping block, status codes,
-cookie name, and response headers all flow through unchanged.
-QUIC and WebSocket are in this class.
+the paths, User-Agent, extra headers, shaping block, status
+codes, cookie name, and response headers all flow through
+unchanged. QUIC and WebSocket are in this class.
 
 If your transport has its own framing (DNS, DoH, ICMP), the C2
 profile does **not** apply. The `dns_label` block is the only
@@ -1076,26 +1136,25 @@ exception — it is read by DNS and DoH because it changes the
 QNAME, which is the wire format those two transports share.
 
 WireGuard is the unusual case: it terminates a userspace tunnel
-and then speaks HTTPS inside it. The profile's HTTP-shaped fields
-apply end to end on the inner request, because from the listener's
-point of view the request is an ordinary HTTPS request that
-happens to arrive on the tunnel interface. The `dns_label` block
-is not consumed by WireGuard; it only reshapes the QNAME, which
-WireGuard does not use.
+and then speaks HTTPS inside it. The profile's HTTP-shaped
+fields apply end to end on the inner request, because from the
+listener's point of view the request is an ordinary HTTPS
+request that happens to arrive on the tunnel interface. The
+`dns_label` block is not consumed by WireGuard.
 
 ### Decide whether the transport is single-only
 
 If your transport can be combined with another in the failover
 ring, decide at build time. The ring is built around the HTTP
-transport's headers, so a transport that does not carry the same
-`X-Beacon-*` scheduling headers cannot participate. QUIC,
+transport's headers, so a transport that does not carry the
+same `X-Beacon-*` scheduling headers cannot participate. QUIC,
 WebSocket, and WireGuard are single-transport-only for this
 reason. DNS, DoH, and HTTP are mutually combinable.
 
 The builder is the only place that enforces the rule for a
-transport that cannot be combined. The agent's `newAgent` also
-checks, but the error is clearer at build time and the operator
-sees it before the binary is written.
+transport that cannot be combined. The agent's transport
+dispatcher also checks, but the error is clearer at build time
+and the operator sees it before the binary is written.
 
 ### Register it in the wizards
 
@@ -1131,11 +1190,10 @@ existing entries:
 
 ## Contributing a Pivot Transport
 
-> **Maintenance-only during the Go freeze.** No new pivot
-> transports are being accepted on the Go agent. The handshake and
-> frame pattern below stays accurate as reference for maintaining
-> the three in-tree pivots (SMB, TCP bind, TCP reverse) and will
-> be the template for the Rust port.
+A new pivot transport must implement the same handshake and
+frame format the three in-tree pivots (SMB, TCP bind, TCP
+reverse) use. The transport that carries the frames differs; the
+handshake and framing do not.
 
 Pivot transports (SMB and TCP bind, plus the TCP reverse variant)
 solve a different problem from direct transports: 
@@ -1201,15 +1259,16 @@ carries the frames:
 
 - Server side: `beacon/transport/<name>.py`, subclassing the
   pivot base class in `beacon/transport/pivot.py`.
-- Client side: `agent/transport/<name>.go`, implementing the same
-  pivot interface `transport_smb.go` and `transport_tcp.go` use.
+- Client side: `agent/src/transport/<name>.rs`, implementing the
+  same pivot interface `transport/smb/windows.rs` and
+  `transport/tcp_bind.rs` use.
 - Builder: `_build_ldflags` must refuse `--pivot-key` on a build
   whose role is neither parent nor child, and must refuse a
   parent/child combination whose keypair does not match.
 
-The seven-file glue from the direct-transport section applies
+The six-file glue from the direct-transport section applies
 unchanged — a pivot transport still needs its config field, its
-switch case, its ldflag, and its handler flag.
+dispatch arm, its `build.rs` reader, and its handler flag.
 
 ### What works through a pivot
 
@@ -1252,6 +1311,20 @@ supports.
 ---
 
 ## Contributing a WASM Extension
+
+> **The WASM extension host is opt-in at build time.** It is a
+> Cargo feature, not a runtime toggle. An agent only has the
+> `extension` verbs if it was built with `--wasm-extensions`
+> (or `"wasm_extensions": true` in a JSON config), which pulls
+> `wasmi` (default) or `wasmtime` into the binary. The size cost
+> is ~1 MB with `wasmi`, 3–7 MB with `wasmtime`. An agent built
+> without the feature has no interpreter to push a module into
+> and will return a clear error if the operator tries.
+>
+> A contribution that adds a new extension should be tested
+> against an agent built with `--wasm-extensions`. See
+> [README › Beacon Extensions](README.md#beacon-extensions) for
+> the full posture.
 
 Extensions run in the agent's WASM sandbox and can only call four
 host functions. Everything an extension can do is defined by those
@@ -1395,15 +1468,14 @@ fixed-length keys, and the outer UDP port are all set by the
 WireGuard protocol and by the four `--wireguard-*` build flags,
 not by the profile.
 
-`--tls-profile` does **not** apply to the inner TLS handshake on a
-WireGuard build. The inner connection uses the Go standard
-library's `crypto/tls`, not uTLS, so the ClientHello is the
-standard library's regardless of what the build asked for. This
-is a smaller gap than the WebSocket or HTTP case: the inner TLS
-never crosses the public wire — a network observer sees only the
-WireGuard handshake, which carries no ClientHello at all — so
-the missing uTLS profile is invisible to anything outside the
-tunnel.
+`--tls-profile` does **not** apply to the inner TLS handshake on
+a WireGuard build. The inner connection uses `rustls`, not
+`boring`, so the ClientHello is `rustls`'s regardless of what
+the build asked for. This is a smaller gap than the WebSocket or
+HTTP case: the inner TLS never crosses the public wire — a
+network observer sees only the WireGuard handshake, which carries
+no ClientHello at all — so the missing BoringSSL profile is
+invisible to anything outside the tunnel.
 
 ### 1. Layout
 
@@ -2017,11 +2089,19 @@ Before opening a pull request:
 - [ ] **The commit message names what changed and why.** "Fix X
       because Y" is a message; "update file" is not.
 - [ ] **The build compiles for the platforms the change touches.**
-      A Go change should build for Linux and Windows, both amd64
-      and arm64, without warnings. A Python change should import
-      cleanly on Python 3.7 through current.
-- [ ] **`gofmt -l` and `go vet ./...` are clean** under `agent/`
-      if the change touches Go.
+      A Rust change should build for Linux and Windows, both
+      amd64 and arm64, without warnings:
+
+          cd agent
+          cargo build --release \
+              --target x86_64-unknown-linux-gnu \
+              --target x86_64-pc-windows-gnu \
+              --target aarch64-unknown-linux-gnu
+
+      A Python change should import cleanly on Python 3.7
+      through current.
+- [ ] **`cargo fmt --check` and `cargo clippy -- -D warnings` are
+      clean** under `agent/` if the change touches Rust.
 - [ ] **The change was exercised against a running handler.**
       Describe how in the PR body: which flags, which transport,
       which target OS.
@@ -2046,9 +2126,9 @@ Before opening a pull request:
       is documented.** Whether the profile applies, whether
       placement applies, whether `--tls-profile` applies — all
       three answers belong in the transport's section.
-- [ ] **If the change adds a transport, the seven-file glue
-      appears in all seven files.** A missing edit in
-      `agent/stageless/main.go` or `beacon/build_manager.py` is
+- [ ] **If the change adds a transport, the six-file glue
+      appears in all six files.** A missing edit in
+      `agent/src/config.rs` or `beacon/build_manager.py` is
       the most common omission.
 - [ ] **If the change touches a C2 profile, `shapecheck` is
       clean on it.** Run
@@ -2065,6 +2145,10 @@ Before opening a pull request:
       with an existing profile's paths.** The handler refuses a
       colliding profile at load time; the PR should confirm the
       new profile loads cleanly alongside the in-tree ones.
+- [ ] **If the change touches the WASM extension host or an
+      extension**, it compiles and runs both with and without
+      `--features wasm-host`. The `wasm-host` feature must never
+      be on by default and must never be pulled in implicitly.
 - [ ] **No secrets, no real infrastructure, no engagement data.**
       Test artifacts must not include real callback URLs, real
       team CA material, real target hostnames, or real beacon

@@ -14,26 +14,28 @@ FROM python:3.13-slim-trixie
 #                     beacon/bin/donut. Required for --format
 #                     shellcode builds and for inject: true on a
 #                     Windows build
-#   INSTALL_RUST      Adds rustup + wasm32-unknown-unknown for building
-#                     WASM extensions. Off by default — the extensions
-#                     that ship in-tree are pre-built
-#   BOOTSTRAP_GO      Run install-go-build.sh at build time to warm the
-#                     module cache. Requires network at build time
+#   INSTALL_WASM      Adds the wasm32-unknown-unknown target for
+#                     building WASM extensions. Off by default — the
+#                     extensions that ship in-tree are pre-built.
+#                     rustup itself is always installed; the agent
+#                     cannot be built without it
+#   BOOTSTRAP_RUST    Run install-rust-build.sh at build time to warm
+#                     the Cargo cache. Requires network at build time
 # ---------------------------------------------------------------------------
-ARG GO_VERSION=1.24.4
+ARG RUST_VERSION=stable
 ARG INSTALL_UPX=1
 ARG INSTALL_MINGW=1
 ARG INSTALL_DONUT=0
-ARG INSTALL_RUST=0
-ARG BOOTSTRAP_GO=1
+ARG INSTALL_WASM=0
+ARG BOOTSTRAP_RUST=1
 ARG TARGETARCH=amd64
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    GOFLAGS=-mod=mod \
-    GOPATH=/go \
-    PATH=/go/bin:/usr/local/go/bin:$PATH
+    RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    PATH=/usr/local/cargo/bin:$PATH
 
 # ---------------------------------------------------------------------------
 # System packages
@@ -76,27 +78,24 @@ RUN if [ "$INSTALL_MINGW" = "1" ] && [ "$TARGETARCH" = "amd64" ]; then \
         echo "[build]   for DLL builds, or cross-compile from outside."; \
     fi
 
-# Optional: Rust + wasm32-unknown-unknown (building WASM extensions)
-RUN if [ "$INSTALL_RUST" = "1" ]; then \
-        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-            | sh -s -- -y --profile minimal --default-toolchain stable; \
-        /root/.cargo/bin/rustup target add wasm32-unknown-unknown; \
+# rustup is always installed. Only the wasm32 target is optional.
+RUN if [ "$INSTALL_WASM" = "1" ]; then \
+        rustup target add wasm32-unknown-unknown; \
     fi
 
 # ---------------------------------------------------------------------------
-# Go toolchain
+# Rust toolchain
 # ---------------------------------------------------------------------------
 RUN set -eux; \
-    case "${TARGETARCH}" in \
-      amd64) goarch=amd64 ;; \
-      arm64) goarch=arm64 ;; \
-      *) echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
-    esac; \
-    curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-${goarch}.tar.gz" \
-        -o /tmp/go.tar.gz; \
-    tar -C /usr/local -xzf /tmp/go.tar.gz; \
-    rm /tmp/go.tar.gz; \
-    go version
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+        | sh -s -- -y --profile minimal --default-toolchain ${RUST_VERSION} --no-modify-path; \
+    rustup target add \
+        x86_64-unknown-linux-gnu \
+        aarch64-unknown-linux-gnu \
+        x86_64-pc-windows-gnu \
+        i686-pc-windows-gnu \
+        x86_64-pc-windows-msvc; \
+    cargo --version; rustc --version
 
 # ---------------------------------------------------------------------------
 # Python dependencies
@@ -113,18 +112,13 @@ RUN set -eux; \
     rm -rf /var/lib/apt/lists/*
 
 # ---------------------------------------------------------------------------
-# Go tools
-# ---------------------------------------------------------------------------
-RUN CGO_ENABLED=0 go install mvdan.cc/garble@v0.17.0
-
-# ---------------------------------------------------------------------------
 # Repository
 # ---------------------------------------------------------------------------
 WORKDIR /opt/TornadoC2
 COPY . .
 
-RUN if [ "$BOOTSTRAP_GO" = "1" ] && [ -x ./install-go-build.sh ]; then \
-        ./install-go-build.sh || echo "[build] bootstrap-go skipped (non-fatal)"; \
+RUN if [ "$BOOTSTRAP_RUST" = "1" ] && [ -x ./install-rust-build.sh ]; then \
+        ./install-rust-build.sh || echo "[build] bootstrap-rust skipped (non-fatal)"; \
     fi
 
 RUN if [ "$INSTALL_DONUT" = "1" ]; then \

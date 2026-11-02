@@ -55,7 +55,7 @@ jobs:
             type=raw,value=edge,enable=${{ github.ref == 'refs/heads/main' }}
 
       # Cache is what makes the second and subsequent builds fast.
-      # Without it, every push rebuilds the Go toolchain, MinGW, and
+      # Without it, every push rebuilds the Rust toolchain, MinGW, and
       # UPX layers from scratch. With it, only the source layers
       # change.
       - name: Build and push
@@ -68,12 +68,12 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            GO_VERSION=1.24.4
+            RUST_VERSION=stable
             INSTALL_UPX=1
             INSTALL_MINGW=1
             INSTALL_DONUT=0
-            INSTALL_RUST=0
-            BOOTSTRAP_GO=1
+            INSTALL_WASM=0
+            BOOTSTRAP_RUST=1
           cache-from: type=gha
           cache-to: type=gha,mode=max
           provenance: true

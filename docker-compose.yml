@@ -4,12 +4,12 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
-        GO_VERSION: "1.24.4"
+        RUST_VERSION: "stable"
         INSTALL_UPX: "1"
         INSTALL_MINGW: "1"
         INSTALL_DONUT: "0"
-        INSTALL_RUST: "0"
-        BOOTSTRAP_GO: "1"
+        INSTALL_WASM: "0"
+        BOOTSTRAP_RUST: "1"
     image: tornadoc2:latest
     pull_policy: build
     container_name: tornadoc2

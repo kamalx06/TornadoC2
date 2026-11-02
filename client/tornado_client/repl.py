@@ -3893,6 +3893,12 @@ class Client:
                   f"\"pivot_key_path\": \"mtls_certs/pivot.pem\""
                   f"{CLR['reset']}{CLR['dim']} in the JSON, or run "
                   f"the wizard and let it prompt.{CLR['reset']}")
+            print(f"  {CLR['dim']}To compile the WASM extension "
+                  f"host into the agent (+~1 MB), set "
+                  f"{CLR['reset']}{CLR['cyan']}\"wasm_extensions\": "
+                  f"true{CLR['reset']}{CLR['dim']} in the JSON "
+                  f"config, or select yes in the wizard's "
+                  f"extension-host section.{CLR['reset']}")
             return
 
         payload = self._build_wizard()
@@ -4697,6 +4703,42 @@ class Client:
             state['inject'] = bool(v)
             return None
 
+        def section_wasm(state):
+            """Ask whether to compile the WASM extension host in.
+
+            The host is off by default. wasmi (the default runtime)
+            adds roughly 1 MB to the binary; wasmtime adds 3–7 MB.
+            An agent without the feature has no `extension` verbs
+            and does not link an interpreter, so the operator's
+            size budget is unaffected by the feature's existence
+            in the tree.
+
+            This is a size trade the operator makes explicitly,
+            not one an OPSEC profile makes on their behalf. No
+            profile enables it. Skipped for stager builds, which
+            have no extension host regardless of the choice.
+            """
+            if state.get('output_format') == 'stager':
+                state['wasm_extensions'] = False
+                return None
+
+            print(f"    {c['dim']}The WASM extension host loads "
+                f"sandboxed modules at runtime. Off by default — "
+                f"the interpreter costs roughly 1 MB with wasmi "
+                f"(the default), or 3–7 MB with wasmtime. Builds "
+                f"without the feature have no `extension` verbs "
+                f"and do not link an interpreter. Turn it on only "
+                f"if you intend to push `.wasm` modules to this "
+                f"agent during the engagement.{c['reset']}")
+
+            v = ask_yes(
+                'Compile the WASM extension host into the agent?',
+                default=False)
+            if v in ('BACK', 'CANCEL'):
+                return v
+            state['wasm_extensions'] = bool(v)
+            return None
+
         def section_confirm(state):
             modes = state['transport'].split(',')
 
@@ -4800,6 +4842,12 @@ class Client:
                     col=c['yellow'])
             else:
                 row('injection', 'no')
+            if state.get('wasm_extensions'):
+                row('wasm extensions',
+                    'yes — adds the extension host (+~1 MB)',
+                    col=c['yellow'])
+            else:
+                row('wasm extensions', 'no')
             if state['output_format'] == 'stager':
                 row('stage name', state.get('stager_name', ''))
 
@@ -4898,6 +4946,8 @@ class Client:
                 section_mtls,          _always,   '9b/9'),
             (None,            'In-memory injection',
                 section_inject,        _always,   '9c/9'),
+            (None,            'WASM extension host',
+                section_wasm,          _always,   '9d/9'),
             (None,            'Confirm',
                 section_confirm,       _always,   ''),
         ]
@@ -4978,7 +5028,7 @@ class Client:
                         'work_hours_end', 'verbose',
                         'use_mtls', 'mtls_dir', 'mtls_cert',
                         'mtls_key', 'mtls_ca',
-                        'inject'):
+                        'inject', 'wasm_extensions'):
                     state.pop(tk, None)
                 i = j
                 continue
@@ -5065,6 +5115,8 @@ class Client:
                 payload['stage_key_hex'] = state['stager_key']
         if state.get('inject'):
             payload['inject'] = True
+        if state.get('wasm_extensions'):
+            payload['wasm_extensions'] = True
         if state.get('use_mtls'):
             mtls = {'enabled': True}
             for k in ('mtls_dir', 'mtls_cert', 'mtls_key', 'mtls_ca'):

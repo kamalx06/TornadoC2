@@ -11,7 +11,8 @@ set -uo pipefail
 #   * Python 3.7+ and the handler's Python dependencies
 #     (flask, cryptography, dnslib, aioquic, simple-websocket,
 #     pyroute2)
-#   * The Go 1.24 toolchain and garble
+#   * The Rust stable toolchain (via rustup) and the cross-compilation
+#     targets for Windows and Linux/arm64
 #   * wireguard-tools and the WireGuard kernel module
 #   * libcap2-bin (for the setcap grants the ICMP and WireGuard
 #     transports need)
@@ -21,8 +22,8 @@ set -uo pipefail
 #
 #   * mono-devel / mono   — the C# compiler (mcs) for the .NET
 #                           bootstrap DLL that the Windows agent
-#                           embeds via //go:embed. Without mcs (or
-#                           csc on a Windows host) the Windows
+#                           embeds via include_bytes!. Without mcs
+#                           (or csc on a Windows host) the Windows
 #                           agent cannot be built; the Linux agent
 #                           is unaffected. The compiler is required
 #                           because Bootstrap.dll is generated from
@@ -88,11 +89,6 @@ PIP_REQUIRED=(
 # Optional Python packages. Skipped under --minimal.
 PIP_PACKAGES_OPTIONAL=(
     "donut-shellcode"
-)
-
-# Go modules installed into $GOPATH/bin.
-GO_INSTALL_TOOLS=(
-    "mvdan.cc/garble@v0.17.0"
 )
 
 # --------------------------------------------------------------------
@@ -358,18 +354,20 @@ case "$FAMILY" in
             # falls through to pip below
             python3-flask python3-cryptography python3-dnslib
             # TLS and native build tooling
-            openssl libssl-dev libffi-dev build-essential
+            openssl libssl-dev libffi-dev build-essential pkg-config
             # Base utilities
             git curl ca-certificates
-            # Go toolchain
-            golang-go
+            # Rust toolchain is installed via rustup below, not from
+            # the distribution archive (Debian's rustc is too old).
+            # The base packages it needs (build-essential, curl) are
+            # already above; pkg-config was added for openssl-sys.
             # WireGuard support
             wireguard-tools
             # Capability helper for ICMP and WireGuard
             libcap2-bin
             # C# compiler for the .NET bootstrap DLL (Bootstrap.dll)
             # that the Windows agent embeds. Without mcs the Windows
-            # target is skipped by install-go-build.sh.
+            # target is skipped by install-rust-build.sh.
             mono-devel
             # Optional (skipped under --minimal, harmless otherwise)
             upx-ucl
@@ -406,12 +404,12 @@ case "$FAMILY" in
             # Python bindings; the fallback covers anything missing
             python3-flask python3-cryptography python3-dnslib
             # TLS and native build tooling
-            openssl openssl-devel libffi-devel
+            openssl openssl-devel libffi-devel pkgconf-pkg-config
             gcc gcc-c++ make
             # Base utilities
             git curl ca-certificates
-            # Go toolchain
-            golang
+            # Rust toolchain is installed via rustup below.
+            # pkgconf-pkg-config was added for openssl-sys.
             # WireGuard support
             wireguard-tools
             # Capability helper
@@ -443,11 +441,11 @@ case "$FAMILY" in
             # official repos on a current install.
             python-flask python-cryptography python-dnslib
             # TLS and native build tooling
-            openssl libffi base-devel
+            openssl libffi base-devel pkgconf
             # Base utilities
             git curl ca-certificates
-            # Go toolchain
-            go
+            # Rust toolchain is installed via rustup below.
+            # pkgconf was added for openssl-sys.
             # WireGuard support
             wireguard-tools
             # Capability helper
@@ -538,30 +536,58 @@ if [[ $MINIMAL -eq 0 ]]; then
 fi
 
 # --------------------------------------------------------------------
-# Go toolchain
+# Rust toolchain
+#
+# rustup is installed system-wide (to /usr/local/rustup and
+# /usr/local/cargo) rather than to a single user's home. This makes
+# the toolchain visible to the handler process regardless of which
+# user it runs as — the Dockerfile uses the same paths.
 
-if ! command -v go >/dev/null 2>&1; then
-    die "go is not on PATH — the system-package install should have \
-added it. On a host where golang-go or golang is not packaged, install \
-the official tarball from https://go.dev/dl/ and re-run this script."
-fi
+if ! command -v cargo >/dev/null 2>&1; then
+    say "cargo not found — installing rustup system-wide"
 
-GO_VERSION_ACTUAL="$(go env GOVERSION 2>/dev/null | sed 's/^go//')"
-ok "go: $(go version)"
+    export RUSTUP_HOME=/usr/local/rustup
+    export CARGO_HOME=/usr/local/cargo
 
-# The agent's go.mod declares `go 1.24`. Reject anything older so the
-# failure is legible here rather than three minutes into a build.
-GO_MAJOR="${GO_VERSION_ACTUAL%%.*}"
-GO_REST="${GO_VERSION_ACTUAL#*.}"
-GO_MINOR="${GO_REST%%.*}"
-if [[ -n "$GO_MAJOR" && -n "$GO_MINOR" ]]; then
-    if (( GO_MAJOR < 1 )) || (( GO_MAJOR == 1 && GO_MINOR < 24 )); then
-        die "Go ${GO_VERSION_ACTUAL} is older than the 1.24 the agent \
-requires. Debian 13, Ubuntu 24.04, RHEL 9, Fedora 40, and Arch ship \
-Go 1.24+. An older release needs the official tarball from \
-https://go.dev/dl/"
+    mkdir -p "$RUSTUP_HOME" "$CARGO_HOME"
+
+    if ! curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | $SUDO env RUSTUP_HOME="$RUSTUP_HOME" \
+                       CARGO_HOME="$CARGO_HOME" \
+                       sh -s -- -y --profile minimal \
+                                --default-toolchain stable \
+                                --no-modify-path; then
+        die "rustup installation failed. Check network access to \
+https://sh.rustup.rs and re-run."
+    fi
+
+    export PATH="$CARGO_HOME/bin:$PATH"
+
+    if ! command -v cargo >/dev/null 2>&1; then
+        die "rustup installed but cargo is not on PATH. Add \
+$CARGO_HOME/bin to PATH and re-run."
     fi
 fi
+
+ok "cargo: $(cargo --version)"
+ok "rustc: $(rustc --version)"
+
+# Cross-compilation targets the agent build needs. These are cheap
+# to add and idempotent.
+for target in \
+    x86_64-unknown-linux-gnu \
+    aarch64-unknown-linux-gnu \
+    x86_64-pc-windows-gnu \
+    i686-pc-windows-gnu \
+    x86_64-pc-windows-msvc; do
+    if rustup target list --installed 2>/dev/null | grep -qx "$target"; then
+        ok "rust target: $target"
+    else
+        say "adding rust target: $target"
+        rustup target add "$target" || \
+            warn "could not add target $target"
+    fi
+done
 
 # --------------------------------------------------------------------
 # C# compiler for the bootstrap DLL
@@ -584,31 +610,7 @@ else
     warn "next to Bootstrap.cs"
     warn ""
     warn "the Linux agent will build; the Windows target will be"
-    warn "skipped by install-go-build.sh until the DLL exists"
-fi
-
-GOBIN="$(go env GOPATH)/bin"
-case ":$PATH:" in
-    *":$GOBIN:"*) ;;
-    *) export PATH="$PATH:$GOBIN"
-       warn "added $GOBIN to PATH for this run — add it to your shell profile too" ;;
-esac
-
-# --------------------------------------------------------------------
-# garble
-
-say "installing garble"
-if command -v garble >/dev/null 2>&1; then
-    ok "garble already installed: $(command -v garble)"
-else
-    for tool in "${GO_INSTALL_TOOLS[@]}"; do
-        if go install "$tool"; then
-            ok "installed $tool"
-        else
-            warn "go install $tool failed — only the opsec and paranoid"
-            warn "profiles need it"
-        fi
-    done
+    warn "skipped by install-rust-build.sh until the DLL exists"
 fi
 
 # --------------------------------------------------------------------
@@ -735,5 +737,5 @@ fi
 printf '\n'
 say "server dependency installation complete"
 say "next steps:"
-say "  1.  ./install-go-build.sh       (repair go.mod, resolve modules, build)"
+say "  1.  ./install-rust-build.sh     (warm Cargo cache, cross-compile)"
 say "  2.  python3 tornadoc2.py --beacon-port 8881"
