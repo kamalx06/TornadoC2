@@ -56,6 +56,7 @@ loss, or legal consequences arising from the use of this project.
 - [Remote Build](#remote-build)
 - [Operator Reference](#operator-reference)
 - [GUI Operator Console](#gui-operator-console)
+- [AI Operator Console and MCP Server](#ai-operator-console-and-mcp-server)
 - [In-Memory Execution](#in-memory-execution)
 - [BOF Registry](#bof-registry)
 - [C2 Profile Catalogue](#c2-profile-catalogue)
@@ -182,7 +183,7 @@ The design choices in this framework are consequences of that decision, not inde
 
 **A team server that treats the team as the point.** The operator side is a coordination server, not a single-user console with a team feature bolted on. RBAC with a `guardian` role distinct from `admin`, because terminating an engagement is a different responsibility from running one. A hash-chained audit log with per-mutation correlation on every response, because what a team did during an engagement matters after the engagement ends. A shared credential vault where validation runs on the beacon rather than on the team server, because a bind attempt from the wrong network either fails silently or succeeds against a system the engagement is not authorised to touch. Owner-restricted task cancel so one operator cannot quietly remove another's queued work. Session viewers so an operator knows when someone else is on the same beacon. Engagement-wide and per-beacon notes, a content-addressed loot store, a chat with file sharing and forensic preservation, webhook notifications, and a dead-man's switch that only the guardian can arm. None of these touch the agent. All of them assume the operator is working as part of a team, even when they are not.
 
-**Two frontends, no web UI.** A terminal REPL as the reference implementation, and a Qt GUI as a presentation layer over the same client. Not a browser tab. Not a second protocol. Not a plugin framework. The console stays close to the operator's hands.
+**Three frontends plus an MCP bridge, no web UI.** A terminal REPL as the reference implementation, a Qt GUI as a presentation layer over the same client, and an AI console that drives the same methods through an agent loop. A standalone MCP server extends the read-only and safe-mutation surface to external MCP clients. Not a browser tab. Not a second protocol. Not a plugin framework. Every frontend and the MCP bridge consume the same `Client` methods, the same capability checks, and the same audit chain. The AI console is the one frontend that lives outside the human — it takes the operator's own LLM provider and key, keeps both on the operator's workstation, and gates every high-signal action behind a per-tool confirmation prompt. The MCP server goes one step further: it exposes only the read-only and safe-mutation tiers, because the approval prompt has nowhere to appear in the MCP protocol and a Tier-3 tool that ran silently would defeat the entire gate.
 
 **An honest README.** Every transport section ends with a threat model that says what the transport protects against and what it does not. Every feature that is not implemented is named as such. The sections on limits are not hedging. They are the record of what a defender looks for and what this framework does not do about it.
 
@@ -390,10 +391,20 @@ The rest of this document describes how it works. This section describes why it 
   cancel, per-operator webhook notifications to Slack / Discord /
   Telegram (an operator manages their own hooks; an admin manages
   every hook), and a multi-line paste mode for the script verbs.
-- **Two operator frontends.** The terminal REPL is the default and
-  the reference implementation. A PySide6 (Qt 6) GUI is opt-in with
-  `--gui` and dispatches every command through the same `Client`
-  methods — a presentation layer, not a second client.
+- **Three operator frontends plus an MCP bridge.** The terminal
+  REPL is the default and the reference implementation. A PySide6
+  (Qt 6) GUI is opt-in with `--gui`. An AI console —
+  `beacon-client.py ai` — drives the same `Client` methods through
+  an agent loop backed by the operator's own LLM provider
+  (Anthropic, OpenAI, OpenRouter, Ollama, or Claude Code), with a
+  34-tool catalogue split across read-only, safe-mutation, and
+  approval-gated tiers. A standalone MCP server
+  (`python -m tornadoc2_mcp`) exposes the read-only and
+  safe-mutation tools over stdio to external MCP clients like
+  Claude Desktop and Cline. All four share the same protocol code;
+  the AI console and MCP server add **no server-side code** — they
+  consume the same `.cfg` the CLI does and speak the same operator
+  API.
 
 **Supported target platforms:** Linux and Windows (primary), amd64
 and arm64. The Windows build additionally supports 32-bit `386`.
@@ -445,8 +456,9 @@ BOF and .NET assembly execution are Windows-only.
 | **SOCKS5 pivot** | Client-side SOCKS5 listener on the operator's `127.0.0.1` · Tunnel carries bytes over the operator API to the team server · Team server bridges to a beacon dial-back on the pivot listener · Beacon opens the target connection from the target's network |
 | **Session graph** | Engagement-wide view of which beacons share a user, domain, or subnet · Four render modes: `tree`, `flat`, `summary`, `path` · Data model drives a future HTML/SVG renderer |
 | **Desktop notifications** | New beacon check-in, kill-deadline proximity, scheduled-task completion · Backends: `notify-send`, `terminal-notifier`, AppleScript, `ntfy.sh` |
+| **AI console and MCP server** | `beacon-client.py ai` opens an agent loop backed by the operator's own provider — `anthropic`, `openai`, `openrouter`, `ollama`, or `claude_code`. Configuration lives at `~/.tornadoc2/ai.json` (0600) on the workstation and never leaves it. Thirty-four tools across three tiers — 15 read-only, 10 safe-mutation, 9 approval-gated. Every Tier-3 call (`kill_beacon`, `killall_beacons`, `run_bof`, `creds_reveal`, `creds_validate`, file transfer, screenshot) prompts for a per-tool confirmation word before dispatch; `kill_beacon` requires the exact beacon ID, `killall_beacons` requires `yes` followed by the match count. The `mcp_allow_verbs` and `mcp_allow_bofs` allowlists bound the AI's mutation scope; a verb not on the list is refused by the dispatcher before the task reaches the queue. `python -m tornadoc2_mcp` exposes the Tier-1 and Tier-2 tools over stdio for external MCP clients — the Tier-3 tools are deliberately absent because the approval prompt has nowhere to appear in the MCP protocol. **No server-side change**: the AI console and MCP server consume the same `.cfg` the CLI does |
 
-**Not supported:** Interactive streaming sessions or plugin execution
+**Not supported:**Interactive streaming sessions or plugin execution
 over a live socket. These are deliberate omissions — the beacon's
 design goal is a self-contained implant that survives network loss
 and reboots, not a replacement for a live interactive C2. SOCKS5
@@ -2887,6 +2899,14 @@ match the token on the child.
   load the Qt platform plugin "xcb"` (or the equivalent `wayland`
   message) when they are absent. A headless host can still import
   PySide6 for a smoke test with `QT_QPA_PLATFORM=offscreen`.
+- **`httpx`** (`pip install httpx`) — required only for the AI
+  console (`beacon-client.py ai`) and the standalone MCP server
+  (`python -m tornadoc2_mcp`). The CLI and GUI do not import it.
+  `install-deps-client.sh` does not currently install it; add the
+  `pip install` line to the client's provisioning, or install it
+  manually per operator.
+- **`mcp`** (`pip install mcp`) — required only for the standalone
+  MCP server. The AI console does not depend on it.
 
 > **Werkzeug is required, not optional.** The operator listener reads
 > the peer certificate from `request.environ['werkzeug.socket']`, which
@@ -2902,8 +2922,9 @@ match the token on the child.
 > Put it behind a redirector if you need TLS termination or rate
 > limiting at the edge.
 
-**Launching the client.** Two frontends ship in the same binary.
-The CLI is the default:
+**Launching the client.** Three frontends ship in the same binary,
+plus a standalone MCP server for external MCP clients. The CLI is
+the default:
 
     python beacon-client.py -c alice.cfg
 
@@ -2911,14 +2932,28 @@ The PySide6 GUI is opt-in with `--gui`:
 
     python beacon-client.py -c alice.cfg --gui
 
-Both frontends share the same `Client` instance and the same
+The AI console is a subcommand:
+
+    python beacon-client.py ai -c alice.cfg
+
+The MCP server is a standalone module, needed only when an
+external MCP client (Claude Desktop, Cline, Continue) should be
+able to call tools:
+
+    python -m tornadoc2_mcp -c alice.cfg
+
+All three frontends share the same `Client` instance and the same
 `_cmd_*` dispatch table. Every operator command — `beacons`,
 `use`, `chat`, `creds`, `loot`, `deadman`, `killall`, the native
 verbs, the whole lot — is routed through the identical code path
-the other frontend uses. The GUI is a presentation layer only:
+the other frontends use. The GUI is a presentation layer only:
 it swaps `sys.stdout`, `input()`, and `getpass.getpass()` for a
-text widget, a modal dialog, and the in-window chat bar. Nothing
-protocol-level lives in either frontend.
+text widget, a modal dialog, and the in-window chat bar. The AI
+console is a new dispatch layer over the same `Client` methods,
+driven by an agent loop; it adds no protocol code. The MCP server
+loads a `Client` from the same `.cfg` and routes tool calls
+through the same REST endpoints, the same capability checks, and
+the same audit chain the CLI uses.
 
 **Optional:**
 
@@ -3189,6 +3224,14 @@ python tornadoc2.py --beacon-port 8881 --operator-port 12341 \
 TORNADO_DEADMAN_HOURS=48 TORNADO_DEADMAN_HALT=shutdown \
 python tornadoc2.py \
     --beacon-port 8881 --operator-port 12341 --operator-host 0.0.0.0
+
+# Run detached (Unix only). Daemonizes, writes logs/tornadoc2.pid,
+# redirects stdout/stderr to logs/console.log, and exits the
+# foreground process. Reattach with `python tornadoc2.py console`.
+# See Deployment Playbook › Running in daemon mode for the full
+# workflow.
+python tornadoc2.py --daemon \
+                    --beacon-port 8881 --operator-port 12341
 ```
 
 If `--operator-port` is set and `--operator-host` is not, the
@@ -3651,6 +3694,134 @@ config's pinned CA. A redirector that terminates TLS with a
 public CA will fail the pin — either install the config's CA on
 the redirector, or terminate TLS at the redirector and use a
 plain-HTTP backhaul to the team server.
+
+### Running in daemon mode
+
+For an engagement that does not warrant a systemd unit — a
+single-box deployment, a lab environment, a throwaway VPS — the
+handler ships its own daemonizer.
+
+```bash
+# Start detached. Exits as soon as the child's console socket
+# is listening and the pidfile is written.
+python3 tornadoc2.py --daemon \
+    --beacon-port 8881 \
+    --operator-port 12341 \
+    --operator-host 0.0.0.0
+
+[daemon] starting pid=48271
+[daemon] logfile /opt/TornadoC2/logs/console.log
+[daemon] console socket /opt/TornadoC2/logs/tornadoc2.sock
+[daemon] attach with: /usr/bin/python3 tornadoc2.py console
+[daemon] stop with:   kill $(cat /opt/TornadoC2/logs/tornadoc2.pid)
+[daemon] ready
+```
+
+The parent exits; the child is a fresh interpreter detached from
+the terminal (its own session via `start_new_session=True`, so a
+terminal close does not deliver SIGHUP, and Ctrl+C never reaches
+it). Stdout and stderr are redirected to `logs/console.log`, which
+is what `tail -f` should follow for startup output:
+
+```bash
+tail -f logs/console.log
+```
+
+**Create the first admin without a console.** No `.cfg` exists yet,
+so a remote client cannot run `operator add`. One-shot bootstrap
+runs the command through the daemon's console socket and exits:
+
+```bash
+python3 tornadoc2.py --bootstrap-admin alice \
+    --bootstrap-out /tmp/alice.cfg
+```
+
+Cert-only is the default (no password), which is the correct
+posture for a first admin anyway. Supply
+`--bootstrap-password '<pw>'` to set a password second factor.
+The password is injected at both the create and confirmation
+prompts; note that it will land in shell history, which is why the
+interactive console path below is the safer form when an operator
+is at a terminal.
+
+**Attach a console to a running daemon.**
+
+```bash
+python3 tornadoc2.py console
+[console] attached to daemon (pid 48271). Detach with Ctrl+D.
+[console] type `help` for commands.
+
+beacon> operator add bob operator
+beacon> update
+beacon> exit
+[console] detaching. The daemon continues running.
+```
+
+The console socket lives at `logs/tornadoc2.sock` by default and
+is created `0600`. Only one console client at a time — a second
+connection while the first is attached gets a "busy" line and is
+closed. Operational work (beacons, `use`, tasks, file transfer,
+chat, loot, creds) continues through `beacon-client.py` unchanged;
+the console is for `update`, admin management, and audit
+inspection.
+
+Ctrl+D (or `exit`) **detaches** the console; it does not stop the
+daemon. This is deliberate — the daemon is a separate process with
+its own session, so a terminal that opens, attaches, and closes has
+no effect on the listeners or the beacon queue. `Ctrl+C` also
+detaches: it is delivered to the console client, which closes the
+socket and prints `[console] detached; daemon continues running`.
+The daemon never sees the signal.
+
+**Stop the daemon.**
+
+Two ways, both clean:
+
+```bash
+# From an attached console:
+beacon> stop
+
+# Or from the shell, without a console:
+kill $(cat logs/tornadoc2.pid)
+```
+
+`stop` (aliases: `shutdown`, `kill`) stops every listener and
+exits the daemon, preserving the tree. It is distinct from `halt`,
+which is the dead-man's switch trigger and wipes the tree, and
+from beacon-scope `kill`, which self-destructs a beacon. It
+prompts for confirmation unless `--force` is given.
+
+SIGTERM triggers the same shutdown path as `stop`: every listener
+stops, the pidfile and console socket are removed, and the process
+exits. SIGINT and SIGHUP are ignored — a terminal close or a
+stray Ctrl+C does not stop the daemon.
+
+**Startup failure is reported, not silent.** `--daemon` waits for
+the child to write its pidfile before returning. A child that dies
+during startup — port in use, missing mTLS material, audit chain
+corrupt — is reported on the parent's stderr, and the daemon
+logfile has the specific cause. The parent never claims success
+for a daemon that did not come up.
+
+**`update` while a console is attached.** `update` calls
+`os.execv` on the daemon process. The attached console sees the
+socket drop, prints `[console] detached; daemon continues
+running`, and exits. Reconnect with `console` — the pidfile has
+the new pid.
+
+**Unix only.** `--daemon` is refused on Windows. The correct
+mechanism there is `nssm install TornadoC2 ...` — the service
+manager is the daemonizer, so the process it launches is the
+process that runs.
+
+**Systemd is still the better answer for anything the engagement
+will touch for more than a day.** `--daemon` exists for the
+single-box case where installing a unit is overkill. For a
+production deployment, use the systemd unit below;
+`journalctl -u tornadoc2 -f` is the log,
+`systemctl restart tornadoc2` is the restart, and
+`Restart=on-failure` handles crashes that a bare daemon would
+leave for the operator to notice.
 
 ### Running under systemd
 
@@ -4712,6 +4883,12 @@ agents, manages operators, and drives the dead-man's switch. It does
 not attach to beacons — interactive work on a beacon runs from the
 remote client (see the next section).
 
+When the handler was started with `--daemon`, the console is
+reached with `python3 tornadoc2.py console` instead of dropping
+into it from the foreground process. Ctrl+D detaches the console
+without stopping the daemon. See [Deployment Playbook › Running
+in daemon mode](#running-in-daemon-mode).
+
 | Command | Description |
 |---------|-------------|
 | `beacons` / `bl` | List active beacons |
@@ -4722,7 +4899,8 @@ remote client (see the next section).
 | `update rollback` | Revert to the previous successfully applied revision |
 | `operator list\|add\|remove\|set-role\|passwd\|export` | Manage team server operators locally |
 | `deadman status\|arm\|arm-until\|reset\|disable\|warn\|halt\|shred` | Inspect or reconfigure the auto-shutdown watchdog |
-| `halt [--force] [shutdown\|reboot]` | Run the shutdown sequence now |
+| `halt [--force] [shutdown\|reboot]` | Run the shutdown sequence now. **Destructive** — wipes the TornadoC2 tree before exiting |
+| `stop` / `shutdown` / `kill` | Stop the handler cleanly. Stops every listener and exits the process. In daemon mode, removes the pidfile and the console socket. The TornadoC2 tree is preserved. Distinct from `halt`, which is the dead-man's switch trigger and wipes the tree, and from beacon-scope `kill`, which self-destructs a beacon. Prompts for confirmation unless `--force` is given |
 | `rotate-cookies` | Regenerate the cookie signing key; every beacon re-checks-in on its next poll |
 | `multiplayer on\|off\|status` | Toggle remote operator access |
 | `audit [...]` | Inspect the audit log |
@@ -4752,6 +4930,7 @@ the shortcuts.
 | `jobs` | List active background transfers; `jobs kill <id>` cancels one |
 | `build [-c <file>]` | Compile an agent on the server |
 | `c2-profiles` / `c2p` | List C2 profiles available for build, or show one profile's full JSON |
+| `ai` | Open the AI console. Uses `~/.tornadoc2/ai.json` for provider and key, and drives the 34-tool catalogue through an agent loop. See [AI Operator Console and MCP Server](#ai-operator-console-and-mcp-server) |
 | `bofs` / `bf` | Manage the server-side BOF registry — `list`, `add`, `remove` |
 | `chat` | Enter team chat |
 | `loot` / `lootstore` | Browse, retrieve, delete, and upload shared loot — `list`, `get`, `upload`, `delete`, `help` |
@@ -5408,6 +5587,217 @@ Three failure modes are worth naming:
 The CLI is unaffected by all three. When the GUI fails to start,
 the error is printed to the original stderr (restored before exit)
 so it is visible even when the stdout bridge is already active.
+
+---
+
+## AI Operator Console and MCP Server
+
+Two ways for an LLM to drive the operator API: the built-in AI
+console (`beacon-client.py ai`) and the standalone MCP server
+(`python -m tornadoc2_mcp`). Both run entirely on the operator's
+workstation, both consume the same `.cfg` the CLI does, and both
+speak the same mTLS + HMAC operator API. The team server never
+learns that an AI is on the other end — from its perspective,
+another operator with the `.cfg`'s role is making requests.
+
+### Why this exists
+
+The CLI is a complete interface. The AI console is not a
+replacement for it and not a faster way to type `ls`. It exists
+for the questions the CLI cannot answer:
+
+- **"What is on this engagement?"** — the model can call
+  `list_beacons`, `list_notes`, and `graph summary` and produce a
+  briefing paragraph that would otherwise take the operator a
+  minute of reading four separate commands.
+- **"What has already been tried?"** — the model can call
+  `audit_tail` with filters and reason about it.
+- **"Where should I go next?"** — the model can look at what the
+  operator has already found and suggest the next three things to
+  check.
+
+What it is **not** is an autonomous agent. Every tier-3 tool
+(LSASS-adjacent actions, credential reveal, kill, killall) pauses
+for a human prompt. Every queued task goes through the same
+`mcp_allow_verbs` allowlist the operator wrote by hand. The
+approval gate exists because "the model thought it would help"
+is a bad reason to run `hashdump` on a production host.
+
+### Per-operator, per-workstation configuration
+
+The AI configuration lives at `~/.tornadoc2/ai.json` on the
+operator's own machine, with `0600` permissions, and never leaves
+it. It is not in the `.cfg`, not in the audit chain, not on the
+team server. The team server has no LLM code and no path that
+reads this file.
+
+```json
+{
+  "provider": "anthropic",
+  "model":    "claude-sonnet-4-5",
+  "api_key":  "sk-ant-...",
+  "mcp_allow_verbs": [
+    "ls", "cat", "ps", "pwd", "whoami",
+    "ifconfig", "netstat", "env"
+  ],
+  "mcp_allow_bofs": []
+}
+```
+
+Two fields are mandatory for safety:
+
+- **`mcp_allow_verbs`** — the verbs the AI is allowed to queue
+  through `queue_task`. Starting with read-only verbs is the
+  recommended default. A verb not on this list is out of scope
+  regardless of what the model tries to send; the dispatcher
+  refuses it before the task reaches the queue.
+- **`mcp_allow_bofs`** — the BOF names the AI may run through
+  `run_bof`. Empty by default.
+
+The `provider` and `api_key` fields select and authenticate the
+LLM. Five providers are supported:
+
+| Provider | Transport | Requires `api_key` | Tool calling |
+|----------|-----------|-------------------|--------------|
+| `anthropic` | HTTPS to `api.anthropic.com` | yes | yes |
+| `openai` | HTTPS to `api.openai.com` | yes | yes |
+| `openrouter` | HTTPS to `openrouter.ai/api` | yes | yes |
+| `ollama` | HTTP to `localhost:11434` | no | yes |
+| `claude_code` | the `claude` CLI on PATH | no | **no** |
+
+`claude_code` is useful for one-shot synthesis — "summarise the
+engagement" — but it does not support structured tool calling the
+way the API providers do. When selected, the AI console runs a
+single prompt with the beacon list and engagement notes
+pre-loaded as context, prints the model's answer, and exits. It
+does not enter the multi-turn agent loop.
+
+### The tool catalogue
+
+Thirty-four tools, in three tiers. Tier 1 is read-only, Tier 2 is
+bounded mutations, Tier 3 is high-signal actions that require a
+per-call approval prompt.
+
+**Tier 1 — situational awareness (15 tools):**
+`list_beacons`, `beacon_info`, `beacon_result`, `beacon_tasks`,
+`list_listeners`, `list_profiles`, `list_bofs`, `list_loot`,
+`list_creds`, `list_notes`, `audit_tail`, `chat_history`,
+`chat_who`, `graph_view`, `get_command_catalogue`.
+
+**Tier 2 — safe mutations (10 tools):**
+`queue_task`, `cancel_task`, `sleep_set`, `workhours_set`,
+`alias_set`, `tag_op`, `note_add`, `chat_send`, `build_agent`,
+`export_beacon`.
+
+**Tier 3 — approval-gated (9 tools):**
+`run_bof`, `creds_add`, `creds_reveal`, `creds_validate`,
+`download_beacon_file`, `upload_beacon_file`, `kill_beacon`,
+`killall_beacons`, `screenshot_beacon`.
+
+Every tool routes through a dispatcher that enforces capability,
+allowlist, and approval in a fixed pipeline. A tool call that
+fails any stage returns a structured error the model reads and
+relays — no exception bubbles to the model, no silent refusal.
+
+### The approval gate
+
+Tier-3 tools require the operator to confirm at the terminal. The
+confirmation word is per-tool:
+
+- **`kill_beacon`** — the operator types the exact beacon ID.
+  Killing the wrong host is the single most expensive mistake
+  the framework permits; typing the ID is the least a
+  confirmation can ask for.
+- **`killall_beacons`** — the operator types `yes` followed by
+  the match count. A typo in the AI's scope argument cannot be
+  confirmed with a single keystroke.
+- **Everything else** — `yes`.
+
+Ctrl+C and EOF decline. There is no bypass flag, and a prompt
+injection inside a chat message cannot auto-confirm — the
+operator sees the exact arguments (not just the tool name) and
+types a specific word to proceed.
+
+### The MCP server
+
+For external MCP clients — Claude Desktop, Cline, Continue, or
+any editor with an MCP integration — the standalone server
+exposes the Tier 1 and Tier 2 tools over stdio:
+
+```
+python -m tornadoc2_mcp -c alice.cfg
+```
+
+Claude Desktop configuration:
+
+```json
+{
+  "mcpServers": {
+    "tornadoc2": {
+      "command": "python",
+      "args": ["-m", "tornadoc2_mcp",
+               "-c", "/home/alice/.tornadoc2/alice.cfg"]
+    }
+  }
+}
+```
+
+Tier 3 tools are **not exposed** to external MCP clients. The
+approval prompt has nowhere to appear in the MCP protocol, and a
+Tier 3 tool that ran without approval would be exactly the
+silent action the gate exists to prevent. The MCP server returns
+`approval_required` with a pointer at `beacon-client.py ai`.
+
+### The AI console
+
+The built-in console runs the full agent loop, including Tier-3
+approval:
+
+```
+$ python beacon-client.py ai -c alice.cfg
+TornadoC2 AI console
+  operator : alice (operator)
+  provider : anthropic / claude-sonnet-4-5
+  verbs    : 8 allowed
+  bofs     : 0 allowed
+
+› what is on the engagement?
+  … model calls list_beacons, list_notes, graph summary …
+  Three beacons: #1001 dc01 (alice@WIN-DEV, windows/amd64,
+  sleep=60), #1002 (bob@WIN-SRV2, same platform, sleep=60),
+  #1003 (root@srv-linux, linux/amd64, sleep=0).
+
+  Engagement notes say the primary objective is dc01 and to
+  avoid the finance subnet. #1001 and #1002 share the
+  192.168.1.0/24 subnet; #1003 is on 10.0.0.0/24. No
+  credentials in the vault yet.
+```
+
+Three in-console meta commands, separate from the model's input:
+`reset` clears the transcript, `tokens` shows the context
+budget, `exit`/`quit` leaves.
+
+### What this does not do
+
+- **It does not touch the team server.** No server-side code, no
+  server-side configuration, no server-side API key. The AI
+  configuration and the API credentials live entirely on the
+  operator's workstation.
+- **It is not autonomous.** Tier-3 pauses for approval, the verb
+  allowlist is a file the operator edits by hand, and the model
+  cannot widen either. `queue_task` refuses any verb that is not
+  in `mcp_allow_verbs` regardless of what the model tries to
+  send; `run_bof` refuses any BOF that is not in
+  `mcp_allow_bofs`.
+- **It does not invent tool output.** A tool that fails returns
+  a structured error, and the model is instructed to relay it
+  verbatim rather than guess what the answer would have been.
+- **It does not guarantee the model will not do something dumb
+  within the allowed set.** A well-prompted model can still
+  queue the wrong verb on the wrong beacon. The allowlist is the
+  boundary; within it, the model has the operator's own
+  authority. Set `mcp_allow_verbs` to the shortest list that
+  covers the questions you actually want to ask.
 
 ---
 
@@ -10892,6 +11282,25 @@ breaks the chain and the handler refuses to boot. Move
 `logs/audit/` aside to start clean — this loses the audit history
 and should only be done when the previous run is known to be
 corrupt.
+
+### The AI console or MCP server fails
+
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| `ModuleNotFoundError: No module named 'httpx'` | The AI console and MCP server need `httpx` | `pip install httpx` |
+| `ModuleNotFoundError: No module named 'mcp'` | The standalone MCP server needs the `mcp` package | `pip install mcp` |
+| `~/.tornadoc2/ai.json not found` | No per-operator config yet | Create the file per [AI Operator Console and MCP Server](#ai-operator-console-and-mcp-server) |
+| `ai.json is readable by other users` | Config permissions are too loose | `chmod 600 ~/.tornadoc2/ai.json` |
+| `provider 'xyz' is not one of ...` | Unknown provider | Use one of `anthropic`, `openai`, `openrouter`, `ollama`, `claude_code` |
+| `api_key is required for provider 'anthropic'` (and the other API providers) | Missing key | Set `api_key` in `ai.json` |
+| `allowlist_denied: verb 'ls' is not in mcp_allow_verbs` | The AI tried to queue a verb the operator did not allow | Add the verb to `mcp_allow_verbs`, or leave it out |
+| `approval_required` returned to an external MCP client | Tier-3 tool called from Claude Desktop / Cline | Tier-3 tools are only available from `beacon-client.py ai`. The MCP server is a read-and-safe-mutate interface by design |
+| `NON-JSON ON STDOUT` when validating the MCP stream | A stray `print()` leaked into the MCP stdio stream | A regression in `tornadoc2_mcp/` — grep the package for `print(` and route it through the logger. The package is designed so stdout is the protocol's alone |
+| Provider HTTP 429 | Provider rate-limited the request | Wait and retry. Provider rate limits are distinct from the team server's own — they apply to the LLM API, not to the operator API |
+| Provider HTTP 401 | Wrong `api_key` | Check the key against the provider's dashboard |
+| Ollama refused the connection | `ollama serve` is not running | Start Ollama, or pick a different provider |
+| `claude_code` selected but the model does not use tools | `claude_code` does not support structured tool calling | Use an API provider (`anthropic`, `openai`, `openrouter`, `ollama`) for the agent loop; `claude_code` is synthesis-only |
+| `tokens` reports a very large number and the loop feels slow | The transcript is large; the context manager is compacting | `reset` clears the transcript. The default `max_context_tokens` is 128 000; raise it in `ai.json` only if the provider's window is larger |
 
 ---
 

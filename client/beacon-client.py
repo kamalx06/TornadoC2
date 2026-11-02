@@ -20,8 +20,17 @@ def _run_gui() -> int:
     return main_gui()
 
 
+def _run_ai(argv) -> int:
+    from tornadoc2_mcp.console import main_ai
+    return main_ai(argv)
+
+
 def main() -> int:
     argv = sys.argv[1:]
+
+    if argv and argv[0] == 'ai':
+        return _run_ai(argv[1:])
+
     runner = _run_gui if '--gui' in argv else _run_cli
     sys.argv = [sys.argv[0]] + [a for a in argv if a != '--gui']
     return runner()

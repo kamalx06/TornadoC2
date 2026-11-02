@@ -15,6 +15,19 @@ set -uo pipefail
 #   * PySide6        — the GUI (`beacon-client.py --gui`). The
 #                      CLI does not import PySide6.
 #
+# And, optionally, the two packages the AI console and the
+# standalone MCP server need. Neither is installed by default:
+#
+#   * httpx          — the HTTP client both the AI console and
+#                      the MCP server use to reach the provider
+#                      API. `--with-ai` installs it.
+#   * mcp            — the Model Context Protocol library the
+#                      standalone server speaks. `--with-mcp`
+#                      installs it and httpx.
+#
+# An operator who never touches the AI feature pays no install
+# cost for either.
+#
 # And, on Linux, the Qt runtime libraries the PySide6 xcb and
 # wayland platform plugins load against. PySide6's wheel bundles
 # Qt itself but not the host's glibc, X11, Wayland, and OpenGL
@@ -42,6 +55,11 @@ set -uo pipefail
 #   * wireguard-tools           (that runs on the server)
 #   * CAP_NET_RAW/CAP_NET_ADMIN (server-side transports only)
 #   * flask, dnslib, aioquic, simple-websocket, pyroute2
+#   * an LLM provider SDK       (the AI console talks to the
+#                               provider's HTTP API directly via
+#                               httpx — no anthropic, openai, or
+#                               google-generativeai package is
+#                               needed, and none is installed)
 #
 # The client is a thin mTLS-speaking Python process. That is all.
 #
@@ -87,10 +105,20 @@ PIP_GUI=(
     "PySide6"
 )
 
+PIP_AI=(
+    "httpx"
+)
+
+PIP_MCP=(
+    "mcp"
+)
+
 # --------------------------------------------------------------------
 # Flags
 
 INSTALL_GUI=1
+INSTALL_AI=0
+INSTALL_MCP=0
 VENV_PATH=""
 
 # Qt runtime library selection. Empty until autodetected or set by
@@ -132,6 +160,17 @@ Options:
                         Homebrew Python is PEP 668 managed.
                         Created if it does not exist.
 
+  --with-ai             Install httpx, needed by the AI console
+                        (`beacon-client.py ai`) and by the
+                        standalone MCP server.
+
+  --with-mcp            Install mcp (the MCP protocol library),
+                        needed only by the standalone server
+                        (`python -m tornadoc2_mcp`). Also
+                        installs httpx.
+
+  --all                 --with-ai --with-mcp
+
   -h, --help            This message.
 EOF
 }
@@ -141,6 +180,20 @@ while [[ $# -gt 0 ]]; do
         --no-gui|--minimal)
             INSTALL_GUI=0
             QT_LIBS="none"
+            shift
+            ;;
+        --with-ai)
+            INSTALL_AI=1
+            shift
+            ;;
+        --with-mcp)
+            INSTALL_AI=1        # mcp depends on httpx
+            INSTALL_MCP=1
+            shift
+            ;;
+        --all)
+            INSTALL_AI=1
+            INSTALL_MCP=1
             shift
             ;;
         --qt-libs)
@@ -283,6 +336,16 @@ if [[ "$INSTALL_GUI" -eq 1 ]]; then
     say "gui:      yes (--no-gui to skip PySide6)"
 else
     say "gui:      no"
+fi
+if [[ "$INSTALL_AI" -eq 1 ]]; then
+    say "ai:       yes (httpx for beacon-client.py ai)"
+else
+    say "ai:       no  (--with-ai to install httpx)"
+fi
+if [[ "$INSTALL_MCP" -eq 1 ]]; then
+    say "mcp:      yes (mcp + httpx for python -m tornadoc2_mcp)"
+else
+    say "mcp:      no  (--with-mcp to install mcp + httpx)"
 fi
 [[ -n "$VENV_PATH" ]] && say "venv:     $VENV_PATH"
 
@@ -733,6 +796,27 @@ say "installing Python packages"
 
 PIP_FAILED=()
 
+if [[ "$INSTALL_MCP" -eq 1 ]]; then
+    if (( PY_MAJOR < 3 )) || (( PY_MAJOR == 3 && PY_MINOR < 10 )); then
+        warn "--with-mcp requires Python 3.10 or later"
+        warn "  this interpreter is Python ${PY_VERSION}."
+        warn "  mcp will not install; the standalone MCP server"
+        warn "  will not run. The AI console still works if"
+        warn "  httpx installs successfully."
+        INSTALL_MCP=0
+    fi
+fi
+
+if [[ "$INSTALL_AI" -eq 1 ]]; then
+    if (( PY_MAJOR < 3 )) || (( PY_MAJOR == 3 && PY_MINOR < 8 )); then
+        warn "--with-ai requires Python 3.8 or later for a"
+        warn "  current httpx. This interpreter is Python"
+        warn "  ${PY_VERSION}; pip may install an older httpx,"
+        warn "  and the AI console may fail at import time."
+        warn "  Consider rerunning with --venv on a newer Python."
+    fi
+fi
+
 for pkg in "${PIP_REQUIRED[@]}"; do
     import_name="${pkg//-/_}"
     if "$PYTHON_BIN" -c "import ${import_name}" 2>/dev/null; then
@@ -763,6 +847,44 @@ if [[ "$INSTALL_GUI" -eq 1 ]]; then
             warn "    ${PIP_CMD[*]} install ${PIP_FLAGS[*]} PySide6"
         fi
     fi
+fi
+
+if [[ "$INSTALL_AI" -eq 1 ]]; then
+    for pkg in "${PIP_AI[@]}"; do
+        import_name="${pkg//-/_}"
+        if "$PYTHON_BIN" -c "import ${import_name}" 2>/dev/null; then
+            ok "python: $pkg importable"
+            continue
+        fi
+        say "python: installing $pkg"
+        if "${PIP_CMD[@]}" install --quiet "${PIP_FLAGS[@]}" "$pkg"; then
+            ok "python: $pkg installed"
+        else
+            PIP_FAILED+=("$pkg")
+            warn "pip install $pkg failed — AI console and"
+            warn "MCP server will not run. Retry with:"
+            warn "    ${PIP_CMD[*]} install ${PIP_FLAGS[*]} $pkg"
+        fi
+    done
+fi
+
+if [[ "$INSTALL_MCP" -eq 1 ]]; then
+    for pkg in "${PIP_MCP[@]}"; do
+        import_name="${pkg//-/_}"
+        if "$PYTHON_BIN" -c "import ${import_name}" 2>/dev/null; then
+            ok "python: $pkg importable"
+            continue
+        fi
+        say "python: installing $pkg"
+        if "${PIP_CMD[@]}" install --quiet "${PIP_FLAGS[@]}" "$pkg"; then
+            ok "python: $pkg installed"
+        else
+            PIP_FAILED+=("$pkg")
+            warn "pip install $pkg failed — the standalone MCP"
+            warn "server will not run. Retry with:"
+            warn "    ${PIP_CMD[*]} install ${PIP_FLAGS[*]} $pkg"
+        fi
+    done
 fi
 
 # --------------------------------------------------------------------
@@ -829,6 +951,25 @@ if [[ "$INSTALL_GUI" -eq 1 ]]; then
     fi
 fi
 
+if [[ "$INSTALL_AI" -eq 1 ]]; then
+    if "$PYTHON_BIN" -c "import httpx" 2>/dev/null; then
+        ver="$("$PYTHON_BIN" -c 'import httpx; print(httpx.__version__)')"
+        ok "httpx $ver  (AI console + MCP server ready)"
+    else
+        warn "httpx not importable — AI console and MCP server"
+        warn "will not run"
+    fi
+fi
+
+if [[ "$INSTALL_MCP" -eq 1 ]]; then
+    if "$PYTHON_BIN" -c "import mcp" 2>/dev/null; then
+        ok "mcp importable  (standalone MCP server ready)"
+    else
+        warn "mcp not importable — the standalone MCP server"
+        warn "will not run"
+    fi
+fi
+
 # --------------------------------------------------------------------
 # Failure summary
 
@@ -885,4 +1026,14 @@ say "run the client with:"
 say "    python3 beacon-client.py -c <your>.cfg"
 if [[ "$INSTALL_GUI" -eq 1 ]]; then
     say "    python3 beacon-client.py -c <your>.cfg --gui"
+fi
+if [[ "$INSTALL_AI" -eq 1 ]]; then
+    say "run the AI console with:"
+    say "    python3 beacon-client.py ai -c <your>.cfg"
+    say "    (create ~/.tornadoc2/ai.json first; see README.md"
+    say "     under AI Operator Console and MCP Server)"
+fi
+if [[ "$INSTALL_MCP" -eq 1 ]]; then
+    say "run the standalone MCP server with:"
+    say "    python3 -m tornadoc2_mcp -c <your>.cfg"
 fi

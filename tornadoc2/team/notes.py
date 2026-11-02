@@ -2,6 +2,9 @@ class NotesStore:
     """Per-beacon notes under <base>/bnotes/<bid>.json, plus a
     single engagement-wide list at <base>/notes.json."""
 
+    MAX_NOTES_PER_BEACON = 10000
+    MAX_NOTES_GLOBAL     = 10000
+
     def __init__(self, base_dir: str):
         self.base_dir = base_dir
         self.per_dir = os.path.join(base_dir, 'bnotes')
@@ -21,6 +24,12 @@ class NotesStore:
                  'text': text}
         with self._lock:
             lst = self._load_list(self._per_path(bid))
+            if len(lst) >= self.MAX_NOTES_PER_BEACON:
+                raise ValueError(
+                    f'beacon #{bid} already has {len(lst)} '
+                    f'notes; the cap is '
+                    f'{self.MAX_NOTES_PER_BEACON}. Clear old '
+                    f'notes first.')
             lst.append(entry)
             self._save_list(self._per_path(bid), lst)
         return entry
@@ -42,6 +51,12 @@ class NotesStore:
                  'text': text, 'tags': list(tags or [])}
         with self._lock:
             lst = self._load_list(self.global_path)
+            if len(lst) >= self.MAX_NOTES_GLOBAL:
+                raise ValueError(
+                    f'engagement notes already has {len(lst)} '
+                    f'entries; the cap is '
+                    f'{self.MAX_NOTES_GLOBAL}. Clear or archive '
+                    f'old notes first.')
             lst.append(entry)
             self._save_list(self.global_path, lst)
         return entry
@@ -62,8 +77,24 @@ class NotesStore:
         try:
             with open(path, 'r', encoding='utf-8') as fh:
                 d = json.load(fh)
-            return d if isinstance(d, list) else []
-        except (OSError, ValueError):
+            if not isinstance(d, list):
+                raise ValueError(
+                    f'expected list, got {type(d).__name__}')
+            return d
+        except FileNotFoundError:
+            return []
+        except (OSError, ValueError) as exc:
+            import sys as _sys
+            print(f"[NOTES] {path} is corrupt: "
+                  f"{type(exc).__name__}: {exc}; renaming to "
+                  f".corrupt and starting fresh",
+                  file=_sys.stderr, flush=True)
+            try:
+                backup = path + '.corrupt'
+                if not os.path.isfile(backup):
+                    os.rename(path, backup)
+            except OSError:
+                pass
             return []
 
     def _save_list(self, path: str, lst: list) -> None:

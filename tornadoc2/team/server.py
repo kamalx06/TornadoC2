@@ -3038,8 +3038,8 @@ class OperatorListener:
             resp.headers['X-Audit-Id'] = audit_id
             return resp
 
-        data = self.loot.read(digest)
-        if data is None:
+        meta = self.loot.stat(digest) or {}
+        if not meta:
             audit_id = self.audit.write(
                 operator=name, role=role, source_ip=ip,
                 action='loot.get', target=digest[:16],
@@ -3052,7 +3052,42 @@ class OperatorListener:
             resp.headers['X-Audit-Id'] = audit_id
             return resp
 
-        meta = self.loot.stat(digest) or {}
+        size_check = int(meta.get('size', 0))
+        if size_check > LootStore.MAX_INLINE_DOWNLOAD_BYTES:
+            audit_id = self.audit.write(
+                operator=name, role=role, source_ip=ip,
+                action='loot.get', target=digest[:16],
+                outcome='error',
+                detail=(f'file too large for inline download '
+                        f'({size_check} > '
+                        f'{LootStore.MAX_INLINE_DOWNLOAD_BYTES})'))
+            resp = jsonify({
+                'error': (f'file is {size_check} bytes; the '
+                          f'inline download path is capped at '
+                          f'{LootStore.MAX_INLINE_DOWNLOAD_BYTES} '
+                          f'bytes. Retrieve it from the beacon '
+                          f'with `download <remote> <local> '
+                          f'--no-loot`, or split the upload into '
+                          f'smaller files.'),
+                'audit_id': audit_id,
+            })
+            resp.status_code = 413
+            resp.headers['X-Audit-Id'] = audit_id
+            return resp
+
+        data = self.loot.read(digest)
+        if data is None:
+            audit_id = self.audit.write(
+                operator=name, role=role, source_ip=ip,
+                action='loot.get', target=digest[:16],
+                outcome='error', detail='read failed')
+            resp = jsonify({
+                'error': 'file not found',
+                'audit_id': audit_id,
+            })
+            resp.status_code = 404
+            resp.headers['X-Audit-Id'] = audit_id
+            return resp
 
         import base64 as _b64
         audit_id = self.audit.write(
@@ -3538,6 +3573,15 @@ class OperatorListener:
         audit_detail = f'sha256={digest}'
         if target == name:
             audit_detail += ' (self)'
+        try:
+            import json as _json_chk
+            _blob_json = _json_chk.loads(blob)
+            if _blob_json.get('config_signature_b64'):
+                audit_detail += ' signed=yes'
+            else:
+                audit_detail += ' signed=no'
+        except Exception:
+            audit_detail += ' signed=unknown'
         audit_id = self.audit.write(
             operator=name, role=role, source_ip=ip,
             action='operator.export', target=target,
@@ -3819,31 +3863,41 @@ class OperatorListener:
                 action='identify', outcome='throttled',
                 detail='general API rate limit')
             return Response(status=429)
-            
-        caps = sorted(
-            c for c in constants.ROLE_CAPABILITIES.get(role, [])
-            if constants.has_capability(role, c, is_local=False))
 
-        handler = getattr(self.engine, 'handler', None)
-        tunnel_port = None
-        quic_port = None
-        beacon_port = None
-        if handler is not None:
-            listener = getattr(handler, '_client_tunnel', None)
-            if listener is not None:
-                tunnel_port = listener.port
+        if not _concurrent_acquire(name):
+            self.audit.write(
+                operator=name, role=role, source_ip=ip,
+                action='identify', outcome='throttled',
+                detail=f'>{MAX_CONCURRENT_PER_OPERATOR} in-flight')
+            return Response(status=429)
+        try:
+            caps = sorted(
+                c for c in constants.ROLE_CAPABILITIES.get(role, [])
+                if constants.has_capability(
+                    role, c, is_local=False))
 
-            quic_port = getattr(handler, 'quic_port', None)
-            beacon_port = getattr(handler, 'beacon_port', None)
-        return jsonify({
-            'name': name,
-            'role': role,
-            'capabilities': caps,
-            'server_version': '1.0.0',
-            'client_tunnel_port': tunnel_port,
-            'quic_port': quic_port,
-            'beacon_port': beacon_port,
-        })
+            handler = getattr(self.engine, 'handler', None)
+            tunnel_port = None
+            quic_port = None
+            beacon_port = None
+            if handler is not None:
+                listener = getattr(handler, '_client_tunnel', None)
+                if listener is not None:
+                    tunnel_port = listener.port
+
+                quic_port = getattr(handler, 'quic_port', None)
+                beacon_port = getattr(handler, 'beacon_port', None)
+            return jsonify({
+                'name': name,
+                'role': role,
+                'capabilities': caps,
+                'server_version': '1.0.0',
+                'client_tunnel_port': tunnel_port,
+                'quic_port': quic_port,
+                'beacon_port': beacon_port,
+            })
+        finally:
+            _concurrent_release(name)
 
     def _beacons_list(self, name, role, ip):
         payload = request.get_json(force=True, silent=True) or {}
@@ -4822,7 +4876,7 @@ class OperatorListener:
             f"{params['output_format']} "
             f"profile={params['profile_name']} "
             f"transport={params.get('transport_mode', 'http')} "
-            f"sha256={result['sha256'][:16]}")
+            f"sha256={result['sha256']}")
         audit_id = self.audit.write(
             operator=name, role=role, source_ip=ip,
             action='beacon.build', detail=summary)
@@ -5222,7 +5276,28 @@ class OperatorListener:
         return True
 
     def stop(self) -> None:
+        """Stop accepting requests, close the listening socket,
+        and shut down the build manager's sweeper.
+
+        werkzeug's serve_forever() blocks until shutdown() is
+        called; a plain flag is invisible to it. Without this,
+        the listener keeps serving during the `halt` / `update` /
+        deadman-shutdown window — including during the wipe,
+        when the audit chain is being deleted.
+        """
         self._running = False
+        srv = getattr(self, '_srv', None)
+        if srv is not None:
+            try:
+                srv.shutdown()
+            except Exception:
+                pass
+        bm = getattr(self, 'build_manager', None)
+        if bm is not None:
+            try:
+                bm.shutdown()
+            except Exception:
+                pass
 
     def _make_tls_context(self) -> Optional[ssl.SSLContext]:
         try:
@@ -5313,6 +5388,13 @@ class OperatorListener:
         }
         if QuietWSGIRequestHandler is not None:
             kwargs['request_handler'] = QuietWSGIRequestHandler
-        srv = make_server(
+        self._srv = make_server(
             self.host, self.port, self._app, **kwargs)
-        srv.serve_forever()
+        try:
+            self._srv.serve_forever()
+        finally:
+            try:
+                self._srv.server_close()
+            except Exception:
+                pass
+            self._srv = None

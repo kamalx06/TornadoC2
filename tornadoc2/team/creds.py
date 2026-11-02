@@ -120,9 +120,21 @@ class CredStore:
             with open(self.path, 'r', encoding='utf-8') as fh:
                 data = json.load(fh)
             if not isinstance(data, dict):
-                return {}
+                raise ValueError(
+                    f'expected dict, got {type(data).__name__}')
             return data
-        except (OSError, ValueError):
+        except (OSError, ValueError) as exc:
+            import sys as _sys
+            print(f"[CREDS] {self.path} is corrupt: "
+                  f"{type(exc).__name__}: {exc}; renaming to "
+                  f".corrupt and starting fresh",
+                  file=_sys.stderr, flush=True)
+            try:
+                backup = self.path + '.corrupt'
+                if not os.path.isfile(backup):
+                    os.rename(self.path, backup)
+            except OSError:
+                pass
             return {}
 
     def _save(self, data: dict) -> None:
@@ -146,6 +158,13 @@ class CredStore:
     # ------------------------------------------------------------------
     # Write
 
+    MAX_VALUE_BYTES   = 64 * 1024
+    MAX_USER_LEN      = 256
+    MAX_DOMAIN_LEN    = 256
+    MAX_PATH_LEN      = 1024
+    MAX_NOTES_LEN     = 4096
+    MAX_USES_PER_CRED = 100
+
     def add(self, *, user, domain, kind, value,
             source_beacon, source_path, found_by,
             notes: str = '') -> dict:
@@ -158,6 +177,20 @@ class CredStore:
             raise ValueError('missing user')
         if value is None:
             value = ''
+        if len(user) > self.MAX_USER_LEN:
+            raise ValueError(
+                f'user too long (>{self.MAX_USER_LEN} chars)')
+        if domain and len(domain) > self.MAX_DOMAIN_LEN:
+            raise ValueError(
+                f'domain too long (>{self.MAX_DOMAIN_LEN} chars)')
+        if len(value) > self.MAX_VALUE_BYTES:
+            raise ValueError(
+                f'value too large (>{self.MAX_VALUE_BYTES} '
+                f'bytes)')
+        if source_path and len(source_path) > self.MAX_PATH_LEN:
+            source_path = source_path[:self.MAX_PATH_LEN]
+        if notes and len(notes) > self.MAX_NOTES_LEN:
+            notes = notes[:self.MAX_NOTES_LEN]
 
         cid = secrets.token_hex(4)
         now = time.time()
@@ -204,6 +237,8 @@ class CredStore:
             used.append({'beacon': int(beacon),
                          'verb': verb,
                          'ts': time.time()})
+            if len(used) > self.MAX_USES_PER_CRED:
+                del used[:-self.MAX_USES_PER_CRED]
             self._save(data)
 
     def validate(self, cid: str, *, status: str, detail: str,
@@ -232,6 +267,16 @@ class CredStore:
             e = data.get(cid)
             if e is None:
                 return None
+            kind = e.get('kind', '')
+            if kind not in self.VALIDATABLE and status in (
+                    'valid', 'invalid', 'locked', 'expired'):
+                raise ValueError(
+                    f'kind {kind!r} has no validation routine; '
+                    f'a "{status}" result cannot be recorded for '
+                    f'it. Validatable kinds: '
+                    f'{", ".join(sorted(self.VALIDATABLE))}. '
+                    f'Record "unsupported" or "error" if the '
+                    f'check did not run.')
             e['validation_status'] = status
             e['validation_detail'] = (detail or '')[:512]
             e['validated_at']      = time.time()

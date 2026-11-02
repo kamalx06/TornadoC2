@@ -339,21 +339,23 @@ class OperatorRegistry:
             with open(self.operators_file, 'r', encoding='utf-8') as fh:
                 data = json.load(fh)
             if not isinstance(data, dict):
-                import sys as _sys
-                print(f"[REGISTRY] {self.operators_file} is not a "
-                      f"JSON object (got {type(data).__name__}); "
-                      f"treating as empty", file=_sys.stderr,
-                      flush=True)
-                return {}
+                raise ValueError(
+                    f'expected dict, got {type(data).__name__}')
             return data
         except FileNotFoundError:
             return {}
         except (OSError, ValueError) as exc:
             import sys as _sys
-            print(f"[REGISTRY] failed to load "
-                  f"{self.operators_file}: "
-                  f"{type(exc).__name__}: {exc}",
+            print(f"[REGISTRY] {self.operators_file} is corrupt: "
+                  f"{type(exc).__name__}: {exc}; renaming to "
+                  f".corrupt and starting fresh",
                   file=_sys.stderr, flush=True)
+            try:
+                backup = self.operators_file + '.corrupt'
+                if not os.path.isfile(backup):
+                    os.rename(self.operators_file, backup)
+            except OSError:
+                pass
             return {}
 
     def _save(self, data: dict) -> None:
