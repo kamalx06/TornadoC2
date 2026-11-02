@@ -106,6 +106,7 @@ class BeaconBuildConfig:
     client_cert_path:   str = ''
     client_key_path:    str = ''
     root_ca_path:       str = ''
+    wasm_extensions: bool = False
 
 
 DEFAULT_C2_PROFILE_DIR = os.path.join(
@@ -401,6 +402,14 @@ class BeaconBuilder:
 
         os.makedirs(self.output_dir, exist_ok=True)
 
+        if getattr(config, 'wasm_extensions', False) and \
+                config.output_format == 'stager':
+            raise RuntimeError(
+                "wasm_extensions=True is not supported on a stager "
+                "build. The stager is a minimal first stage with no "
+                "extension host. Leave wasm_extensions=False for the "
+                "stager, and enable it on the full agent it fetches.")
+
         if getattr(config, 'inject', False):
             if config.target_os == 'windows':
                 if config.output_format not in ('exe', 'shellcode'):
@@ -427,6 +436,13 @@ class BeaconBuilder:
                   "an existing session will be rejected as an "
                   "impersonation attempt. Set agent_keypair_path to a "
                   "stable file to make rebuilds idempotent.")
+        if getattr(config, 'wasm_extensions', False):
+            print("[build] note: wasm_extensions=True — the WASM "
+                  "extension host and the wazero interpreter are "
+                  "compiled into this binary. Expect ~3 MB "
+                  "additional size. Leave wasm_extensions=False "
+                  "(the default) for a build with no runtime-"
+                  "loadable extensions.")
         out = os.path.join(self.output_dir, self._output_name(config))
 
         env = self._build_env(config)
@@ -534,7 +550,13 @@ class BeaconBuilder:
                     "  Linux → Windows:  apt install gcc-mingw-w64-x86-64\n"
                     "  Windows native:   install MinGW-w64 or MSVC Build Tools")
             buildmode = ['-buildmode=c-shared']
-        go = ['go', 'build', '-trimpath'] + buildmode + [
+        tags: List[str] = []
+        if getattr(cfg, 'wasm_extensions', False):
+            tags.append('wasm_host')
+        tag_args: List[str] = []
+        if tags:
+            tag_args = ['-tags', ','.join(tags)]
+        go = ['go', 'build', '-trimpath'] + buildmode + tag_args + [
               '-ldflags', ' '.join(all_flags),
               '-o', out, target]
         if cfg.garble:

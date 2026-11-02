@@ -1653,6 +1653,7 @@ class _BuildDialog(QDialog):
             'mtls': False,
             'inject': False,
             'inject_method': 'default',
+            'wasm_extensions': False,
             'verbose': False,
         }
 
@@ -1887,6 +1888,8 @@ class _BuildDialog(QDialog):
                 tail_parts.append('inject:apc')
             else:
                 tail_parts.append('inject')
+        if v.get('wasm_extensions') and v['fmt'] != 'stager':
+            tail_parts.append('wasm')
         tail = '  ·  '.join(tail_parts)
 
         line = f"  {crumb}"
@@ -2311,6 +2314,9 @@ class _BuildDialog(QDialog):
             tl.addWidget(self._check(
                 'inject', 'In-memory injection (+~13 MB)',
                 on_change=lambda _b: self._rebuild()))
+            tl.addWidget(self._check(
+                'wasm_extensions',
+                'WASM extension host (+~1 MB)'))
         tl.addWidget(self._check(
             'verbose', 'Verbose stderr (debug)'))
         tl.addStretch(1)
@@ -2493,6 +2499,7 @@ class _BuildDialog(QDialog):
         take('stage_key_hex',          'stage_key_hex')
         take('inject',                 'inject', cast=bool)
         take('inject_method',          'inject_method')
+        take('wasm_extensions',        'wasm_extensions', cast=bool)
         take('verbose',                'verbose', cast=bool)
 
         mtls = data.get('mtls')
@@ -2624,6 +2631,8 @@ class _BuildDialog(QDialog):
             method = (v.get('inject_method') or 'default').strip()
             if method:
                 p['inject_method'] = method
+        if v.get('wasm_extensions') and v['fmt'] != 'stager':
+            p['wasm_extensions'] = True
         if v['verbose']:
             p['verbose'] = True
 

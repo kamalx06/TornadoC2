@@ -20,27 +20,6 @@ both legitimate and malicious purposes.
 
 ---
 
-> **Status: the Go agent is frozen.** Development has stopped on
-> the Go agent and is moving to a Rust rewrite. Agent-side
-> contributions — new verbs, new evasions, new transports, new
-> pivot transports — are **paused pending the Rust agent**. Bug
-> fixes and mechanical improvements to the frozen Go agent are
-> accepted on a triage basis; anything larger waits for the Rust
-> port, where the code will not exist in Go. The server side —
-> handler, operator console, pivot infrastructure, audit chain,
-> credential and loot stores, team chat, dead-man's switch, wire
-> protocol — continues to receive contributions unchanged.
->
-> See [README › What comes next](README.md#what-comes-next) for
-> the rationale and the migration plan. The agent-side sections
-> of this document (Agent Verb, Evasion Feature, Transport, Pivot
-> Transport) remain accurate as reference for maintaining the
-> frozen tree; they will be split into a Go-agent maintenance
-> guide and a Rust-agent contribution guide when the Rust agent
-> ships.
-
----
-
 ## Table of Contents
 
 - [Ways to Contribute](#ways-to-contribute)
@@ -71,17 +50,10 @@ contributions, roughly in order of impact:
    [Reporting Bugs](#reporting-bugs).
 2. **Security reports** — do not open a public issue for security
    flaws. See [SECURITY.md](SECURITY.md).
-3. **Agent contributions — maintenance only during the Go freeze.**
-   The Go agent is frozen (see the banner above); new verbs, new
-   evasions, and new platform support on the Go agent are not
-   being accepted. Bug fixes and mechanical improvements to
-   existing Go code are. The active agent work — a Rust rewrite
-   targeting feature parity — will open its own contribution path
-   when it ships.
-4. **Transport contributions — maintenance only during the Go
-   freeze.** Bug fixes and mechanical improvements to the ten
-   in-tree transports and the peer-to-peer pivot model are
-   accepted; new transports are not.
+3. **Agent contributions** — new native verbs, new build-time
+   evasion features, additional platform or architecture support.
+4. **Transport contributions** — new transports, improvements to
+   the nine in-tree ones, or work on the peer-to-peer pivot model.
 5. **WASM extensions** — new capabilities pushed to the agent at
    runtime.
 6. **C2 profiles** — new HTTP fingerprints that mimic a specific
@@ -166,10 +138,6 @@ not fit the project's direction.
   ([TheWover/donut](https://github.com/TheWover/donut/releases)).
 - `rustup` plus the `wasm32-unknown-unknown` target — building
   WASM extensions.
-- **`tornadoc2/shapecheck.py`** — profile validator. Ships in-tree;
-  no install required beyond the Python standard library. Run
-  `python3 tornadoc2/shapecheck.py` before submitting any profile
-  change. See [Testing a change](#testing-a-change) below.
 - `wireguard-tools` — the `wg` command, used once on the team
   server to generate the WireGuard keypair on first launch.
 - **PySide6** (`pip install PySide6`) — required only for the
@@ -246,25 +214,11 @@ Before opening a pull request:
 4. **Exercise the security-relevant paths.** If your change is in
    `crypto.py`, `wire.py`, `TaskSigner`, or a verifier, test both
    the accept and reject paths with valid and invalid signatures.
-5. **For a C2 profile or shaping change, run `shapecheck` and
-   build the agent.** `shapecheck` catches the static classes —
-   path syntax, `\w` divergence, placeholder placement, encoding
-   errors — in one pass:
-
-       python3 tornadoc2/shapecheck.py profiles/c2/your-profile.json
-
-   Then build an agent against it. The agent's
-   `ValidateShapingSpec` runs at build time; a profile whose
-   declared `encoding` or `placement` does not round-trip through
-   the agent's shape walker fails the build. Run the build, not
-   just `shapecheck`.
-6. **For a directory-wide profile change, run `shapecheck` against
-   the whole directory.** Cross-profile checks (`XPR001`,
-   `XPR002`) fire only when the tool scans more than one profile,
-   and a path collision between a new profile and an existing one
-   is a load-time failure for the handler.
-
-       python3 tornadoc2/shapecheck.py profiles/c2/
+5. **For a C2 profile or shaping change, exercise the round-trip
+   validation.** The agent's `ValidateShapingSpec` runs at build
+   time; a profile whose declared `encoding` or `placement` does
+   not round-trip through the agent's shape walker fails the
+   build. Run the build, not just the profile's JSON schema.
 
 The repository has no automated test suite. A contribution that
 touches a security-relevant path should include a note describing
@@ -456,13 +410,6 @@ Some things are deliberately out of scope. A pull request that adds
 one of the following will be declined with an explanation, not
 silently ignored.
 
-**Also declined during the Go freeze:** a new native verb, a new
-evasion primitive, a new transport, or a new pivot transport on
-the Go agent. See the status banner at the top of this document.
-These are not "out of scope" for the project — they are out of
-scope for the *frozen tree*, and the Rust agent is where they
-land.
-
 - **Runtime configuration files.** The agent has no config file,
   no environment variable, no command-line argument. Every
   property is baked in at build time. A feature that reads from
@@ -525,14 +472,6 @@ land.
 ---
 
 ## Contributing an Agent Verb
-
-> **Maintenance-only during the Go freeze.** No new native verbs
-> are being accepted on the Go agent. The pattern below stays
-> accurate for **maintaining** an existing verb — a bug fix, a
-> platform correction, a mechanical improvement — and will be the
-> reference for porting the verb to Rust once the Rust agent
-> ships. A PR that adds a new verb to the Go agent will be
-> declined with a pointer at the Rust roadmap.
 
 A new native verb touches three places. The pattern is mechanical
 once you have seen one.
@@ -696,11 +635,6 @@ verify it also works when the child's transport is SMB or TCP.
 
 ## Contributing an Evasion Feature
 
-> **Maintenance-only during the Go freeze.** No new evasion
-> primitives are being accepted on the Go agent. The pattern below
-> stays accurate for maintaining existing primitives and will be
-> the reference for the Rust port.
-
 Compile-time evasion features are set via linker flags and read at
 startup. Every evasion feature is **compile-time only** — there is
 no runtime toggle, and a feature that reads from disk or the
@@ -714,7 +648,7 @@ different place depending on which one you are adding.
 | Path | What it holds |
 |------|----------------|
 | `agent/evasion/*.go` | Runtime evasion primitives: anti-sandbox heuristics, anti-debug checks, anti-VM probes, AMSI patching, ETW patching, PPID spoofing, sleep-mask implementations, indirect syscall stubs, string deobfuscation. **Most new evasion work happens here first** — a new primitive is a new file or a new function in an existing file under this directory. |
-| `agent/evasion/sleepmask_*.go` | Sleep-mask variants. `sleepmask_aesctr.go`, `sleepmask_rc4.go`, `sleepmask_cronos.go`, and `sleepmask_hwbp.go` are the reference implementations. `cronos` and `hwbp` are Windows-amd64 only; `rc4` and `aes-ctr` are the cross-platform masks. A new mask is a new file here plus a case in the mask dispatcher. |
+| `agent/evasion/sleepmask_*.go` | Sleep-mask variants. `sleepmask_aesctr.go`, `sleepmask_rc4.go`, and `sleepmask_ekko.go` are the reference implementations. A new mask is a new file here plus a case in the mask dispatcher. |
 | `agent/syscalls/syscall_*.go` | Syscall method implementations. `direct` and `indirect` are the shipped methods; a new method is a new file plus a case in the dispatcher. |
 | `agent/core/main.go` | The call sites. A new evasion primitive is wired in from `Main()` or from the sleep loop, not from a new entry point. |
 | `beacon/builder.py` | The build toggle. Every evasion primitive has a matching field in `BeaconBuildConfig` and a matching `-X main.<Name>Raw=` flag. |
@@ -841,13 +775,6 @@ linker flag only when the profile JSON cannot carry the value.
 
 ## Contributing a Transport
 
-> **Maintenance-only during the Go freeze.** No new transports are
-> being accepted on the Go agent. The seven-file pattern below
-> stays accurate as reference for maintaining the ten in-tree
-> transports and will be the template for porting each transport
-> to Rust. A contributor who wants to add a new transport should
-> watch the Rust roadmap rather than open a Go PR.
-
 A new transport is **two classes plus mechanical glue in seven
 files.** The two classes hold the design; the seven files carry a
 fixed template that every existing transport already follows.
@@ -871,7 +798,7 @@ leaked and the review will say so.
      transport this returns a Flask `Response`; for a raw-socket
      transport it returns the bytes.
 
-   The ten in-tree transports fall into four classes:
+   The nine in-tree transports fall into three classes:
 
    | Class | Transports | Wire framing |
    |-------|-----------|--------------|
@@ -1131,15 +1058,8 @@ existing entries:
 
 ## Contributing a Pivot Transport
 
-> **Maintenance-only during the Go freeze.** No new pivot
-> transports are being accepted on the Go agent. The handshake and
-> frame pattern below stays accurate as reference for maintaining
-> the three in-tree pivots (SMB, TCP bind, TCP reverse) and will
-> be the template for the Rust port.
-
-Pivot transports (SMB and TCP bind, plus the TCP reverse variant)
-solve a different problem from direct transports: 
-**the target has no outbound path to the team
+Pivot transports (SMB and TCP bind) solve a different problem from
+direct transports: **the target has no outbound path to the team
 server, but a parent beacon does.** The parent carries the child's
 C2 traffic over the parent's own transport.
 
@@ -1155,7 +1075,7 @@ between the child and the parent:
 3. The parent replies with its own ephemeral — derived from the
    engagement-wide pivot keypair — and a signature of its own.
 4. Both sides derive per-direction AES-256-GCM keys via HKDF-SHA256
-   with the info string `tornadoc2-pivot-v2`.
+   with the info string `tornadoc2-pivot-v1`.
 5. Every subsequent frame is an AEAD frame with a monotonic
    sequence number in the additional data. A gap or repeat is a
    fatal error.
@@ -1190,12 +1110,9 @@ carries the frames:
   or not — travels inside it verbatim.
 
 - **Backward compatibility is not automatic.** The pivot model
-  replaced the old `relay/v1` framing with `pivot/v2`. If your
+  replaced the old `relay/v1` framing with `pivot/v1`. If your
   transport introduces a new framing, bump the version string and
-  refuse the old one. There is no negotiated fallback. A mixed
-  `v1` / `v2` deployment does not work — the child hello is signed
-  over a different payload than a `v1` parent expects, and the ack
-  is signed over a payload a `v1` child cannot reconstruct.
+  refuse the old one. There is no negotiated fallback.
 
 ### Files to touch
 
@@ -2050,17 +1967,9 @@ Before opening a pull request:
       appears in all seven files.** A missing edit in
       `agent/stageless/main.go` or `beacon/build_manager.py` is
       the most common omission.
-- [ ] **If the change touches a C2 profile, `shapecheck` is
-      clean on it.** Run
-      `python3 tools/shapecheck.py profiles/c2/your-profile.json`
-      and confirm zero errors. Warnings are per-profile policy
-      decisions the author should have made; a PR that leaves
-      warnings should say which ones it accepted and why.
 - [ ] **If the change adds a C2 profile, the profile validates
       against the agent's shape walker.** Build an agent that
-      embeds it and confirm the build succeeds. `shapecheck` is
-      a static check; the build is the round-trip against the
-      actual agent binary.
+      embeds it and confirm the build succeeds.
 - [ ] **If the change adds a C2 profile, its paths do not collide
       with an existing profile's paths.** The handler refuses a
       colliding profile at load time; the PR should confirm the

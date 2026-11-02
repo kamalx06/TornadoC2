@@ -616,8 +616,7 @@ class BeaconHandler:
             return sorted(c for c in MAIN_COMMANDS
                           if c.startswith(text.lower()))
 
-        if arg_i == 1 and cmd in (
-                'beacon', 'beacon-rm', 'beacon-forget'):
+        if arg_i == 1 and cmd in ('beacon-rm', 'beacon-forget'):
             return sorted(i for i in self._get_beacon_ids()
                           if i.startswith(text))
 
@@ -3769,17 +3768,6 @@ class BeaconHandler:
                 except Exception as exc:
                     print(f"{c['red']}Error: {exc}{c['end']}")
                 continue
-            if cmd == 'beacon':
-                if len(parts) < 2:
-                    print(f"{c['red']}Usage: beacon <ID>{c['end']}")
-                    continue
-                try:
-                    sid = int(parts[1])
-                except ValueError:
-                    print(f"{c['red']}Invalid ID{c['end']}")
-                    continue
-                self.beacon_console.attach(sid)
-                continue
             if cmd in ('beacon-build', 'bbuild'):
                 self.beacon_build(parts)
                 continue
@@ -4630,7 +4618,6 @@ class BeaconHandler:
         print(f"""
 {c['green']}BEACONS:{c['end']}
   beacons / bl            List active beacons
-  beacon <ID>             Attach to a beacon console
   beacon-build [<os> <arch> [flags]]
                           Compile an agent (wizard if no args)
   beacon-build -c <file>  Compile from a JSON build config
