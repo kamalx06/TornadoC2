@@ -39,7 +39,8 @@ class AiConfig:
 
 
 _VALID_PROVIDERS = (
-    'anthropic', 'claude_code', 'ollama', 'openai', 'openrouter',
+    'anthropic', 'claude_code', 'gemini', 'groq', 'ollama',
+    'openai', 'openrouter',
 )
 
 

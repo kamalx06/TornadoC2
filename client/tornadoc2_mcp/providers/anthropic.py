@@ -12,7 +12,7 @@ class AnthropicProvider(Provider):
     name = 'anthropic'
     supports_tools = True
     DEFAULT_BASE = 'https://api.anthropic.com'
-    API_VERSION = '2023-06-01'
+    API_VERSION = '2026-10-21'
     DEFAULT_MODEL = 'claude-sonnet-4-5'
 
     async def chat(self, messages, tools=None, **kwargs):

@@ -55,8 +55,14 @@ class ClaudeCodeProvider(Provider):
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        out, err = await asyncio.wait_for(
-            proc.communicate(), timeout=300)
+        try:
+            out, err = await asyncio.wait_for(
+                proc.communicate(), timeout=300)
+        except (asyncio.TimeoutError, TimeoutError):
+            proc.kill()
+            await proc.wait()
+            raise ProviderError(
+                'claude timed out after 300s (subprocess killed)')
 
         if proc.returncode != 0:
             raise ProviderError(

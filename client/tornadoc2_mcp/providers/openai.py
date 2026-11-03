@@ -14,7 +14,7 @@ class OpenAIProvider(Provider):
     name = 'openai'
     supports_tools = True
     DEFAULT_BASE = 'https://api.openai.com'
-    DEFAULT_MODEL = 'gpt-4o'
+    DEFAULT_MODEL = 'gpt-5.4-mini'
 
     def _headers(self) -> dict:
         return {

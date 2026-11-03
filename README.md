@@ -396,7 +396,7 @@ The rest of this document describes how it works. This section describes why it 
   (Qt 6) GUI is opt-in with `--gui`. An AI console —
   `beacon-client.py ai` — drives the same `Client` methods through
   an agent loop backed by the operator's own LLM provider
-  (Anthropic, OpenAI, OpenRouter, Ollama, or Claude Code), with a
+  (Anthropic, OpenAI, OpenRouter, Gemini, Groq, Ollama, or Claude Code), with a
   34-tool catalogue split across read-only, safe-mutation, and
   approval-gated tiers. A standalone MCP server
   (`python -m tornadoc2_mcp`) exposes the read-only and
@@ -456,7 +456,7 @@ BOF and .NET assembly execution are Windows-only.
 | **SOCKS5 pivot** | Client-side SOCKS5 listener on the operator's `127.0.0.1` · Tunnel carries bytes over the operator API to the team server · Team server bridges to a beacon dial-back on the pivot listener · Beacon opens the target connection from the target's network |
 | **Session graph** | Engagement-wide view of which beacons share a user, domain, or subnet · Four render modes: `tree`, `flat`, `summary`, `path` · Data model drives a future HTML/SVG renderer |
 | **Desktop notifications** | New beacon check-in, kill-deadline proximity, scheduled-task completion · Backends: `notify-send`, `terminal-notifier`, AppleScript, `ntfy.sh` |
-| **AI console and MCP server** | `beacon-client.py ai` opens an agent loop backed by the operator's own provider — `anthropic`, `openai`, `openrouter`, `ollama`, or `claude_code`. Configuration lives at `~/.tornadoc2/ai.json` (0600) on the workstation and never leaves it. Thirty-four tools across three tiers — 15 read-only, 10 safe-mutation, 9 approval-gated. Every Tier-3 call (`kill_beacon`, `killall_beacons`, `run_bof`, `creds_reveal`, `creds_validate`, file transfer, screenshot) prompts for a per-tool confirmation word before dispatch; `kill_beacon` requires the exact beacon ID, `killall_beacons` requires `yes` followed by the match count. The `mcp_allow_verbs` and `mcp_allow_bofs` allowlists bound the AI's mutation scope; a verb not on the list is refused by the dispatcher before the task reaches the queue. `python -m tornadoc2_mcp` exposes the Tier-1 and Tier-2 tools over stdio for external MCP clients — the Tier-3 tools are deliberately absent because the approval prompt has nowhere to appear in the MCP protocol. **No server-side change**: the AI console and MCP server consume the same `.cfg` the CLI does |
+| **AI console and MCP server** | `beacon-client.py ai` opens an agent loop backed by the operator's own provider — `anthropic`, `openai`, `openrouter`, `gemini`, `groq`, `ollama`, `claude_code`, or `claude_code`'s one-shot synthesis mode. Configuration lives at `~/.tornadoc2/ai.json` (0600) on the workstation and never leaves it. Thirty-four tools across three tiers — 15 read-only, 10 safe-mutation, 9 approval-gated. Every Tier-3 call (`kill_beacon`, `killall_beacons`, `run_bof`, `creds_reveal`, `creds_validate`, file transfer, screenshot) prompts for a per-tool confirmation word before dispatch; `kill_beacon` requires the exact beacon ID, `killall_beacons` requires `yes` followed by the match count. The `mcp_allow_verbs` and `mcp_allow_bofs` allowlists bound the AI's mutation scope; a verb not on the list is refused by the dispatcher before the task reaches the queue. `python -m tornadoc2_mcp` exposes the Tier-1 and Tier-2 tools over stdio for external MCP clients — the Tier-3 tools are deliberately absent because the approval prompt has nowhere to appear in the MCP protocol. **No server-side change**: the AI console and MCP server consume the same `.cfg` the CLI does |
 
 **Not supported:**Interactive streaming sessions or plugin execution
 over a live socket. These are deliberate omissions — the beacon's
@@ -5655,13 +5655,15 @@ Two fields are mandatory for safety:
   `run_bof`. Empty by default.
 
 The `provider` and `api_key` fields select and authenticate the
-LLM. Five providers are supported:
+LLM. Seven providers are supported:
 
 | Provider | Transport | Requires `api_key` | Tool calling |
 |----------|-----------|-------------------|--------------|
 | `anthropic` | HTTPS to `api.anthropic.com` | yes | yes |
 | `openai` | HTTPS to `api.openai.com` | yes | yes |
 | `openrouter` | HTTPS to `openrouter.ai/api` | yes | yes |
+| `gemini` | HTTPS to `generativelanguage.googleapis.com` | yes | yes |
+| `groq` | HTTPS to `api.groq.com/openai` | yes | yes |
 | `ollama` | HTTP to `localhost:11434` | no | yes |
 | `claude_code` | the `claude` CLI on PATH | no | **no** |
 
@@ -11291,7 +11293,7 @@ corrupt.
 | `ModuleNotFoundError: No module named 'mcp'` | The standalone MCP server needs the `mcp` package | `pip install mcp` |
 | `~/.tornadoc2/ai.json not found` | No per-operator config yet | Create the file per [AI Operator Console and MCP Server](#ai-operator-console-and-mcp-server) |
 | `ai.json is readable by other users` | Config permissions are too loose | `chmod 600 ~/.tornadoc2/ai.json` |
-| `provider 'xyz' is not one of ...` | Unknown provider | Use one of `anthropic`, `openai`, `openrouter`, `ollama`, `claude_code` |
+| `provider 'xyz' is not one of ...` | Unknown provider | Use one of `anthropic`, `openai`, `openrouter`, `gemini`, `groq`, `ollama`, `claude_code` |
 | `api_key is required for provider 'anthropic'` (and the other API providers) | Missing key | Set `api_key` in `ai.json` |
 | `allowlist_denied: verb 'ls' is not in mcp_allow_verbs` | The AI tried to queue a verb the operator did not allow | Add the verb to `mcp_allow_verbs`, or leave it out |
 | `approval_required` returned to an external MCP client | Tier-3 tool called from Claude Desktop / Cline | Tier-3 tools are only available from `beacon-client.py ai`. The MCP server is a read-and-safe-mutate interface by design |
@@ -11299,7 +11301,7 @@ corrupt.
 | Provider HTTP 429 | Provider rate-limited the request | Wait and retry. Provider rate limits are distinct from the team server's own — they apply to the LLM API, not to the operator API |
 | Provider HTTP 401 | Wrong `api_key` | Check the key against the provider's dashboard |
 | Ollama refused the connection | `ollama serve` is not running | Start Ollama, or pick a different provider |
-| `claude_code` selected but the model does not use tools | `claude_code` does not support structured tool calling | Use an API provider (`anthropic`, `openai`, `openrouter`, `ollama`) for the agent loop; `claude_code` is synthesis-only |
+| `claude_code` selected but the model does not use tools | `claude_code` does not support structured tool calling | Use an API provider (`anthropic`, `openai`, `openrouter`, `gemini`, `groq`, `ollama`) for the agent loop; `claude_code` is synthesis-only |
 | `tokens` reports a very large number and the loop feels slow | The transcript is large; the context manager is compacting | `reset` clears the transcript. The default `max_context_tokens` is 128 000; raise it in `ai.json` only if the provider's window is larger |
 
 ---

@@ -10,7 +10,7 @@ class OpenRouterProvider(OpenAIProvider):
 
     name = 'openrouter'
     DEFAULT_BASE = 'https://openrouter.ai/api'
-    DEFAULT_MODEL = 'anthropic/claude-sonnet-4'
+    DEFAULT_MODEL = 'nvidia/nemotron-3.5-lightning:free'
 
     def _headers(self) -> dict:
         headers = super()._headers()

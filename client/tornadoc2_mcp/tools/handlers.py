@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import os
 import struct
@@ -466,13 +467,44 @@ async def _chat_send(ctx, args):
 async def _build_agent(ctx, args):
     cfg = args['config_json']
     if isinstance(cfg, str):
-        cfg = json.loads(cfg)
-    # Kick off the build.
-    info = await ctx.client.build(cfg)
+        try:
+            cfg = json.loads(cfg)
+        except json.JSONDecodeError as exc:
+            raise errors.ValidationError(
+                f'config_json is not valid JSON: {exc}',
+                hint=('config_json must be a dict (or a JSON '
+                      'string that decodes to one); see the '
+                      'build_agent tool description for the '
+                      'Layer-1 field list.'))
+    if not isinstance(cfg, dict):
+        raise errors.ValidationError(
+            'config_json must be a JSON object',
+            hint='pass a dict of Layer-1 build fields')
+
+    for field in ('target_os', 'target_arch',
+                  'output_format', 'transport_mode'):
+        if not cfg.get(field):
+            raise errors.ValidationError(
+                f'config_json is missing required field {field!r}',
+                hint=('required: target_os, target_arch, '
+                      'output_format, transport_mode'))
+
+    try:
+        info = await ctx.client.build(cfg)
+    except errors.ServerError as exc:
+        if 'signer is not active' in str(exc):
+            raise errors.ServerError(
+                'team server has no active task signer; '
+                'remote builds cannot proceed',
+                hint=('install `cryptography` on the server '
+                      'and restart the handler — every agent '
+                      'must be able to verify task signatures'),
+                audit_id=getattr(exc, 'audit_id', None))
+        raise
+
     build_id = info['build_id']
     size = int(info['size'])
-
-    # Stream the binary in chunks and save locally.
+    expected_sha = (info.get('sha256') or '').lower()
     out_dir = ctx.cfg.build_output_dir
     os.makedirs(out_dir, exist_ok=True)
     out_path = os.path.join(out_dir, info['filename'])
@@ -480,6 +512,8 @@ async def _build_agent(ctx, args):
     offset = 0
     chunk = 512 * 1024
     part = out_path + '.part'
+    hasher = hashlib.sha256()
+    actual_sha = ''
     try:
         with open(part, 'wb') as fh:
             while offset < size:
@@ -488,13 +522,27 @@ async def _build_agent(ctx, args):
                 if not data:
                     raise errors.ServerError(
                         f'build {build_id} ended after '
-                        f'{offset} of {size} bytes')
+                        f'{offset} of {size} bytes',
+                        hint=('the staging copy may have '
+                              'expired (30-minute TTL in '
+                              'BuildManager._sweep_loop) or the '
+                              'operator .cfg may not match '
+                              'the beacon.build caller'))
+                hasher.update(data)
                 fh.write(data)
                 offset += len(data)
         if offset != size:
             raise errors.ServerError(
                 f'build {build_id} produced {offset} of '
                 f'{size} bytes')
+        actual_sha = hasher.hexdigest()
+        if expected_sha and actual_sha != expected_sha:
+            raise errors.ServerError(
+                f'build {build_id} SHA-256 mismatch — do not '
+                f'deploy (expected {expected_sha[:12]}…, '
+                f'got {actual_sha[:12]}…)',
+                hint=('the pulled bytes do not match the '
+                      'server metadata; retry the build'))
         os.replace(part, out_path)
     except Exception:
         try:
@@ -503,20 +551,24 @@ async def _build_agent(ctx, args):
             pass
         raise
 
-    # Tell the server we are done with the staging copy.
     try:
         await ctx.client.build_finish(build_id)
     except Exception:
-        # The binary is already local and verified; a failed
-        # cleanup must not turn a successful build into an error.
         logging.warn('build.finish_failed', build=str(build_id))
 
-    return ToolResult(data={
-        'path':   out_path,
-        'size':   size,
-        'sha256': info.get('sha256'),
-        'filename': info.get('filename'),
-    })
+    return ToolResult(
+        data={
+            'build_id':          build_id,
+            'path':              out_path,
+            'filename':          info.get('filename'),
+            'size':              size,
+            'sha256':            expected_sha or actual_sha,
+            'pivot_key_sha256':  info.get('pivot_key_sha256', ''),
+            'injector_embedded': bool(
+                info.get('injector_embedded', False)),
+        },
+        audit_id=info.get('audit_id'),
+    )
 
 
 async def _export_beacon(ctx, args):
