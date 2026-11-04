@@ -1,24 +1,16 @@
-//! Agent core: construction, run loop, and dispatch.
-//!
-//! | File | Replaces |
-//! |------|----------|
-//! | `agent.rs` | `Main()`, `Agent`, `newAgent()`, `splitTransportModes()` |
-//! | `run_loop.rs` | `.run()`, `.checkin()`, `.pollAndRun()`, `.sleep()`, `.rngIntn()`, `.shapeForOp()` |
-//! | `dispatch.rs` | `.execute()` and every verb |
-//! | `helpers.rs` | `encodeOutput`, `sanitizedEnv`, `mergeStreams`, `splitScriptArgs`, `truncate`, `mustGetwd` |
-//! | `identity.rs` | `GatherIdentity`, `ParseECDSAPublicKey`, `parseECDSAPrivateKey`, `SignPayload`, `localOutboundAddr` |
-//! | `tls_config.rs` | `BuildTLSConfig`, `BuildDoHTLSConfig`, `defaultProfile` |
-//! | `diag.rs` | `diag`-adjacent helpers: `parse_clock`, `format_work_hours`, `inside_work_hours` |
+// agent/src/core/mod.rs
+//
+// Module manifest. Child modules declared below.
+//
 
 pub mod agent;
-pub mod diag;
-pub mod dispatch;
-pub mod helpers;
-pub mod identity;
-pub mod result;
-pub mod run_loop;
-pub mod transport_ring;
-pub mod tls_config;
-pub mod verify;
-
-pub use agent::{new_agent, run_agent, split_transport_modes, Agent, AgentError, Config};
+pub mod native_extra;
+pub mod cred_validate;
+pub mod extensions;
+pub mod inject;
+pub mod migrate;
+pub mod pivot;
+pub mod smb_relay;
+pub mod tcp_relay;
+pub mod tcp_reverse;
+pub mod token_ops;
