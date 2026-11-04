@@ -168,6 +168,16 @@ COMMANDS = [
         'client_op': 'recipes',
     },
     {
+        'name': 'ai', 'aliases': ['/ai'],
+        'args': '[<question>]',
+        'description': 'open the AI console, or ask a one-shot '
+                       'question. Configured at '
+                       '~/.tornadoc2/ai.json',
+        'capability': 'beacon.list',
+        'category': None, 'scope': 'main', 'native': False,
+        'client_op': 'ai',
+    },
+    {
         'name': 'exit', 'aliases': ['quit', 'q'],
         'args': '',
         'description': 'disconnect',

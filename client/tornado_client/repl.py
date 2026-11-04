@@ -1764,7 +1764,7 @@ class Client:
     # ------------------------------------------------------------------
     # Banner
 
-    def banner(self):
+    def banner(self, *, quiet: bool = False):
         r = self.tp.post('/api/v1/identify', {})
         self.name = r['name']
         self.role = r['role']
@@ -1774,6 +1774,9 @@ class Client:
         self.beacon_port = r.get('beacon_port')
         self.server_version = r.get('server_version', '?')
         self._load_commands()
+
+        if quiet:
+            return
 
         c = CLR
         host = f"{self.cfg['server_host']}:{self.cfg['server_port']}"
@@ -1871,6 +1874,10 @@ class Client:
                     self._cmd_build(parts)
                 elif cmd == 'recipes':
                     self._cmd_recipes(parts)
+                elif cmd in ('ai', '/ai'):
+                    self._cmd_ai(
+                        parts if cmd == 'ai'
+                        else ['ai'] + parts[1:])
                 elif cmd in ('c2-profiles', 'c2p'):
                     self._cmd_c2_profiles(parts)
                 elif cmd == 'bofs':
@@ -3821,6 +3828,68 @@ class Client:
               f"`sh` line is one task.{c['reset']}")
         print()
 
+    def _cmd_ai(self, parts):
+        """ai [<question>]
+
+        No argument — open the AI console inline, sharing this
+        session's authenticated Client. When the console exits,
+        control returns to this REPL.
+
+        With a question — run a single turn, print the answer,
+        return to the prompt. Cheaper than opening the full
+        console for a one-line question.
+        """
+        c = CLR
+        try:
+            from tornadoc2_mcp.adapter import ClientAdapter
+            from tornadoc2_mcp.config import (
+                load_ai_config, DEFAULT_AI_PATH,
+            )
+            from tornadoc2_mcp.console.loop import (
+                run_console, run_one_shot,
+            )
+        except ImportError as exc:
+            msg = str(exc)
+            print(f"{c['red']}ai: {exc}{c['reset']}")
+            if 'httpx' in msg:
+                print(f"{c['dim']}install with: "
+                      f"pip install httpx{c['reset']}")
+            elif 'tornadoc2_mcp' in msg:
+                print(f"{c['dim']}tornadoc2_mcp is not importable. "
+                      f"run beacon-client.py from the repository "
+                      f"root, or add the repo root to PYTHONPATH."
+                      f"{c['reset']}")
+            else:
+                print(f"{c['dim']}check that the tornadoc2_mcp "
+                      f"package is present and the required "
+                      f"dependencies are installed.{c['reset']}")
+            return
+
+        try:
+            ai_cfg = load_ai_config(DEFAULT_AI_PATH)
+        except Exception as exc:
+            print(f"{c['red']}ai: {exc}{c['reset']}")
+            hint = getattr(exc, 'hint', '') or ''
+            if hint:
+                for line in hint.splitlines():
+                    print(f"{c['dim']}{line}{c['reset']}")
+            return
+
+        adapter = ClientAdapter(self)
+
+        import asyncio
+        try:
+            if len(parts) > 1:
+                question = ' '.join(parts[1:])
+                asyncio.run(run_one_shot(
+                    ai_cfg, adapter, question))
+            else:
+                asyncio.run(run_console(ai_cfg, adapter))
+        except KeyboardInterrupt:
+            print()
+        except Exception as exc:
+            print(f"{c['red']}ai error: {exc}{c['reset']}")
+
     # ------------------------------------------------------------------
     # Remote build
 
@@ -3894,7 +3963,7 @@ class Client:
                   f"{CLR['reset']}{CLR['dim']} in the JSON, or run "
                   f"the wizard and let it prompt.{CLR['reset']}")
             print(f"  {CLR['dim']}To compile the WASM extension "
-                  f"host into the agent (+~1 MB), set "
+                  f"host into the agent, set "
                   f"{CLR['reset']}{CLR['cyan']}\"wasm_extensions\": "
                   f"true{CLR['reset']}{CLR['dim']} in the JSON "
                   f"config, or select yes in the wizard's "
@@ -10174,6 +10243,46 @@ code {{ background: var(--code-bg); border-radius: 3px;
         print(f"{CLR['red']}usage: operators "
               f"<list|add|remove|set-role|passwd|export>"
               f"{CLR['reset']}")
+
+
+# ---------------------------------------------------------------------
+# Headless client loader (MCP server / AI console)
+
+def load_client_from_config(cfg_path):
+    """Load and connect a Client without entering the run loop.
+
+    Used by `tornadoc2_mcp` (the standalone MCP stdio server) and
+    by the AI console. Two differences from `main()`:
+
+      1. `banner(quiet=True)` — the capability fetch runs but
+         none of the banner printing does. The MCP protocol
+         owns stdout; any stray print corrupts the JSON-RPC
+         stream.
+
+      2. Belt-and-braces stdout silencing during __init__.
+         If a future change to Client.__init__ or Transport
+         adds a diagnostic print, this redirects it to stderr
+         rather than letting it break MCP. The redirect is
+         restored before return, so the caller can print
+         normally.
+
+    Raises RuntimeError on connection failure. The caller
+    (`tornadoc2_mcp.config.load_client_for_mcp`) maps that to
+    the MCP error taxonomy.
+    """
+    import sys as _sys
+
+    cfg = cfg_mod.load(cfg_path)
+    tp = Transport(cfg)
+
+    saved = _sys.stdout
+    _sys.stdout = _sys.stderr
+    try:
+        client = Client(cfg, tp, config_path=cfg_path)
+        client.banner(quiet=True)
+        return client
+    finally:
+        _sys.stdout = saved
 
 
 # ---------------------------------------------------------------------

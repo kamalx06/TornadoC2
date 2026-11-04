@@ -250,7 +250,30 @@ def _format_dirty_tree_message(status_lines):
     return '\n'.join(lines)
 
 
-def _restart_process():
+def _restart_process(handler=None):
+    """Replace the current process image with a fresh interpreter.
+
+    ``os.execv`` preserves the PID and every FD not marked
+    ``FD_CLOEXEC``. In daemon mode this means the pidfile stays
+    valid and the console socket file on disk is the only thing
+    the new process has to clean up (``_serve_console_socket``
+    unlinks it before rebinding).
+
+    If a console is attached, send it a one-line notice before
+    execv closes the socket. Without this the client sees only EOF
+    and prints a generic "daemon continues running" message that
+    is wrong on the update path — the daemon is restarting.
+    """
+    if handler is not None and getattr(handler, '_daemon_mode', False):
+        conn = getattr(handler, '_console_conn', None)
+        if conn is not None:
+            try:
+                conn.sendall(
+                    b'\n[daemon] restarting after update; '
+                    b'reconnect with `console` in a few seconds.\n')
+            except OSError:
+                pass
+
     argv = [sys.executable, *sys.argv]
     sys.stdout.flush()
     sys.stderr.flush()
@@ -713,7 +736,7 @@ class Updater:
                 lock.release()
                 try:
                     self.h.shutdown_for_restart()
-                    _restart_process()
+                    _restart_process(self.h)
                 except Exception as exc:
                     self._print_error(
                         f'Failed to restart TornadoC2: {exc}')
@@ -938,7 +961,7 @@ class Updater:
                 lock.release()
                 try:
                     self.h.shutdown_for_restart()
-                    _restart_process()
+                    _restart_process(self.h)
                 except Exception as exc:
                     self._print_error(
                         f'Failed to restart TornadoC2: {exc}')

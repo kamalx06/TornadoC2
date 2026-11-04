@@ -90,6 +90,7 @@ class LootStore:
     MAX_FILES = 8192 * 4                               # 32768
     UPLOAD_CHUNK_SIZE = 4 * 1024 * 1024
     UPLOAD_TTL        = 4 * 3600        # 4 hours
+    MAX_INLINE_DOWNLOAD_BYTES = 512 * 1024 * 1024
 
     def __init__(self, base_dir: str):
         self.base_dir = base_dir
@@ -111,6 +112,27 @@ class LootStore:
         self._upload_locks: dict = {}
         self._clean_incoming_on_start()
         self._rescan()
+
+        self._sweeper_stop = threading.Event()
+        self._sweeper = threading.Thread(
+            target=self._sweep_loop, daemon=True,
+            name='loot-sweeper')
+        self._sweeper.start()
+
+    def _sweep_loop(self) -> None:
+        while not self._sweeper_stop.wait(15 * 60):
+            try:
+                self.sweep_stale_uploads()
+            except Exception:
+                pass
+
+    def shutdown(self) -> None:
+        """Stop the sweeper thread. Idempotent."""
+        try:
+            self._sweeper_stop.set()
+            self._sweeper.join(timeout=5.0)
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # Validation

