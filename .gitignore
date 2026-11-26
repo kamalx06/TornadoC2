@@ -13,6 +13,10 @@ team_ca/
 # ---------------------------------------------------------------------------
 
 logs/
+tornadoc2/agent/native/Bootstrap.dll
+listeners.json*
+client/.tornadoc2/
+client/*.cfg
 bofs/
 beacon_output/
 payloads/
@@ -139,3 +143,4 @@ docker-compose.override.yml
 !.env.example
 .gitconfig.local
 notebooks/*.ipynb_checkpoints/
+tornadoc2/agent/*.exe

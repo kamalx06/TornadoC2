@@ -190,20 +190,17 @@ class Transport:
                 f'Refusing to load it.')
 
         fp = _hashlib.sha256(pub_pem.encode('utf-8')).hexdigest()
-        pin_dir = os.path.expanduser('~/.tornadoc2')
-        os.makedirs(pin_dir, exist_ok=True)
-        try:
-            os.chmod(pin_dir, 0o700)
-        except OSError:
-            pass
+        from tornadoc2_mcp.paths import PINS_DIR, ensure_state_dir
+        ensure_state_dir()
+        pin_dir = str(PINS_DIR)
         op_name = cfg.get('name') or 'default'
         server = cfg.get('server_host') or '?'
         server_tag = _hashlib.sha256(
             server.encode('utf-8')).hexdigest()[:8]
         new_pin_path = os.path.join(
             pin_dir, f'{op_name}.{server_tag}.signer-pin')
-        legacy_pin_path = os.path.join(
-            pin_dir, f'{op_name}.signer-pin')
+        legacy_pin_path = os.path.expanduser(
+            f'~/.tornadoc2/{op_name}.signer-pin')
 
         if (not os.path.isfile(new_pin_path)
                 and os.path.isfile(legacy_pin_path)):

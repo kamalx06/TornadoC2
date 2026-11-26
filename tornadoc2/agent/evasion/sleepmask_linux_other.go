@@ -3,9 +3,9 @@
 package evasion
 
 import (
-    "fmt"
-    "sync"
-    "time"
+	"fmt"
+	"sync"
+	"time"
 )
 
 var linuxArchWarnOnce sync.Once
@@ -16,11 +16,11 @@ var linuxArchWarnOnce sync.Once
 // single implementation is not possible without per-arch
 // assembly.
 func maskedSleepBasicLinux(maskType string, ms uint32) error {
-    linuxArchWarnOnce.Do(func() {
-        fmt.Printf("[evasion] sleep mask %q is only implemented on "+
-            "linux/amd64; falling back to plain sleep on this "+
-            "architecture.\n", maskType)
-    })
-    time.Sleep(time.Duration(ms) * time.Millisecond)
-    return nil
+	linuxArchWarnOnce.Do(func() {
+		fmt.Printf("[evasion] sleep mask %q is only implemented on "+
+			"linux/amd64; falling back to plain sleep on this "+
+			"architecture.\n", maskType)
+	})
+	time.Sleep(time.Duration(ms) * time.Millisecond)
+	return nil
 }

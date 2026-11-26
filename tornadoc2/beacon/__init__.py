@@ -1,8 +1,9 @@
 """Beacon subsystem — pull-based implant handler.
 
 Runs alongside the existing shell handler with no shared state and no
-shared code paths. When the handler is started without --beacon-port
-this package is never imported and the tool behaves exactly as before.
+shared code paths. Beacon-facing listeners are created at runtime and
+persisted to listeners.json; nothing binds until the manager starts an
+enabled listener.
 
 Public API:
 

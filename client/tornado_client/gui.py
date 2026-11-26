@@ -57,6 +57,7 @@ import hashlib
 import io
 import json
 import os
+import asyncio
 import queue
 import re
 import secrets as _secrets
@@ -79,13 +80,17 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import (
     QAction, QBrush, QColor, QFont, QFontDatabase, QIcon,
+    QIntValidator, QPainterPath, QPen,
     QKeySequence, QPainter, QShortcut, QTextCharFormat,
     QTextCursor,
 )
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
-    QFormLayout, QFrame, QGridLayout, QGroupBox, QHBoxLayout,
-    QHeaderView, QLabel, QLineEdit, QMainWindow, QMenu, QMenuBar,
+    QFormLayout, QFrame, QGraphicsEllipseItem, QGraphicsLineItem,
+    QGraphicsPathItem, QGraphicsRectItem, QGraphicsScene, QGraphicsTextItem,
+    QGraphicsView, QGroupBox, QHBoxLayout,
+    QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem,
+    QMainWindow, QMenu, QMenuBar,
     QMessageBox, QPlainTextEdit, QPushButton, QScrollArea,
     QSizePolicy, QSplitter, QStackedWidget, QStatusBar, QTabWidget,
     QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
@@ -179,6 +184,8 @@ class Palette:
     OK            = '#3fb950';  OK_BG     = '#0f2417';  OK_BORDER     = '#1a7f37'
     WARN          = '#d29922';  WARN_BG   = '#2d2212';  WARN_BORDER   = '#9a6700'
     ERR           = '#f85149';  ERR_BG    = '#2d0e0e';  ERR_BORDER    = '#cf222e'
+    PRIV_ROOT     = '#ffd166'
+    PRIV_ADMIN    = '#ff8c42'
     PURPLE        = '#bc8cff';  PURPLE_BG = '#1c1530'
     CYAN          = '#58a6ff'
     MAGENTA       = '#db61a2'
@@ -252,7 +259,21 @@ STYLESHEET = f"""
 QMainWindow, QDialog {{ background: {Palette.BG}; }}
 
 /* ── Header ───────────────────────────────────────────── */
-QWidget#headerBar {{ background: {Palette.HEADER_BG}; }}
+QWidget#headerBar {{
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+        stop:0 {Palette.HEADER_BG}, stop:1 {Palette.BG_SOFT});
+    border-bottom: 1px solid {Palette.BORDER};
+}}
+QFrame#connChip {{
+    background: {Palette.BG_APP};
+    border: 1px solid {Palette.BORDER_SOFT};
+    border-radius: 11px;
+}}
+QGraphicsView#graphView {{
+    background: {Palette.BG_APP};
+    border: 1px solid {Palette.BORDER_SOFT};
+    border-radius: 8px;
+}}
 QWidget#headerDivider {{ background: {Palette.HEADER_DIVIDER}; }}
 QLabel#brandWord  {{
     color: {Palette.HEADER_FG};
@@ -268,7 +289,7 @@ QLabel#brandSub {{
 QLabel#brandGlyph {{
     color: {Palette.ACCENT};
     font-weight: 700;
-    font-size: 14pt;
+    font-size: 15pt;
 }}
 QLabel#connInfo {{
     color: {Palette.HEADER_MUTED};
@@ -374,6 +395,45 @@ QPushButton#ghost:hover {{
     color: {Palette.TEXT};
     border-radius: 4px;
 }}
+QPushButton#danger {{
+    color: {Palette.ERR};
+    border-color: {Palette.ERR_BORDER};
+    background: {Palette.ERR_BG};
+}}
+QPushButton#danger:hover {{ background: {Palette.ERR_BORDER}; }}
+QFrame#detailCard {{
+    background: {Palette.BG_PANEL};
+    border: 1px solid {Palette.BORDER_SOFT};
+    border-radius: 8px;
+}}
+QLabel#toolbarTitle {{ font-weight: 700; font-size: 12pt; }}
+QLabel#countBadge {{
+    color: {Palette.TEXT_MUTED};
+    background: {Palette.BG_SOFT};
+    border: 1px solid {Palette.BORDER_SOFT};
+    border-radius: 9px;
+    padding: 1px 8px;
+    font-size: 8.5pt;
+}}
+QLabel#statusPill {{
+    border-radius: 9px;
+    padding: 2px 9px;
+    font-size: 8.5pt;
+    font-weight: 700;
+    background: {Palette.BG_SOFT};
+    color: {Palette.TEXT_MUTED};
+}}
+QLabel#statusPill[state="running"] {{
+    color: {Palette.OK}; background: {Palette.OK_BG};
+    border: 1px solid {Palette.OK_BORDER};
+}}
+QLabel#statusPill[state="error"] {{
+    color: {Palette.ERR}; background: {Palette.ERR_BG};
+    border: 1px solid {Palette.ERR_BORDER};
+}}
+QLabel#statusPill[state="stopped"] {{
+    color: {Palette.TEXT_MUTED}; border: 1px solid {Palette.BORDER};
+}}
 
 /* ── Tree (beacon list) ───────────────────────────────── */
 QTreeWidget {{
@@ -391,8 +451,9 @@ QTreeWidget::item {{
     color: {Palette.TEXT};
 }}
 QTreeWidget::item:selected {{
-    background: {Palette.BG_SELECT};
+    background: {Palette.ACCENT_SOFT};
     color: {Palette.TEXT};
+    border-left: 2px solid {Palette.ACCENT};
 }}
 QTreeWidget::item:hover {{
     background: {Palette.BG_HOVER};
@@ -416,6 +477,7 @@ QHeaderView::section:hover {{ color: {Palette.TEXT}; }}
 /* ── Tabs ─────────────────────────────────────────────── */
 QTabWidget::pane {{
     border: none;
+    border-top: 1px solid {Palette.BORDER_SOFT};
     background: {Palette.BG_PANEL};
     top: -1px;
 }}
@@ -424,7 +486,7 @@ QTabBar {{ qproperty-drawBase: 0; }}
 QTabBar::tab {{
     background: transparent;
     color: {Palette.TEXT_MUTED};
-    padding: 10px 20px;
+    padding: 10px 18px;
     font-weight: 600;
     font-size: 10pt;
     border: none;
@@ -519,6 +581,13 @@ QStatusBar {{
     font-size: 9pt;
 }}
 QStatusBar::item {{ border: none; }}
+QLabel#statusMeta {{
+    color: {Palette.TEXT_FAINT};
+    font-family: "__MONO_FONT__";
+    font-size: 8.5pt;
+    padding: 0 10px;
+    border-left: 1px solid {Palette.BORDER_SOFT};
+}}
 
 /* ── Splitter handle ──────────────────────────────────── */
 QSplitter::handle {{
@@ -627,6 +696,56 @@ QLabel#dlgHeader {{
 QLabel#dlgSub {{
     color: {Palette.TEXT_MUTED};
     font-size: 9pt;
+}}
+QFrame#dlgHeader {{
+    background: {Palette.BG_APP};
+    border-bottom: 1px solid {Palette.BORDER};
+}}
+QFrame#dlgFooter {{
+    background: {Palette.BG_APP};
+    border-top: 1px solid {Palette.BORDER};
+}}
+QLabel#typeBadge {{
+    color: {Palette.ACCENT_HI};
+    background: {Palette.ACCENT_SOFT};
+    border: 1px solid {Palette.ACCENT_FAINT};
+    border-radius: 9px;
+    padding: 2px 9px;
+    font-size: 8.5pt;
+    font-weight: 700;
+}}
+QLabel#callout {{
+    color: {Palette.WARN};
+    background: {Palette.WARN_BG};
+    border: 1px solid {Palette.WARN_BORDER};
+    border-radius: 6px;
+    padding: 7px 10px;
+    font-size: 9pt;
+}}
+QLabel#errorText {{
+    color: {Palette.ERR};
+    background: {Palette.ERR_BG};
+    border: 1px solid {Palette.ERR_BORDER};
+    border-radius: 6px;
+    padding: 7px 10px;
+    font-size: 9pt;
+}}
+QGroupBox {{
+    background: {Palette.BG_PANEL};
+    border: 1px solid {Palette.BORDER_SOFT};
+    border-radius: 8px;
+    margin-top: 16px;
+    padding: 16px 12px 12px;
+}}
+QGroupBox::title {{
+    subcontrol-origin: margin;
+    left: 12px;
+    padding: 0 6px;
+    color: {Palette.TEXT_MUTED};
+    font-weight: 700;
+    font-size: 8.5pt;
+    text-transform: uppercase;
+    letter-spacing: 0.7px;
 }}
 """
 
@@ -2643,6 +2762,804 @@ class _BuildDialog(QDialog):
 # ---------------------------------------------------------------------
 # Main application
 
+class _CommandPalette(QDialog):
+    """Fuzzy command / target picker (Ctrl+K)."""
+
+    def __init__(self, parent, entries) -> None:
+        super().__init__(parent)
+        self.setWindowTitle('Command palette')
+        self.setMinimumSize(560, 420)
+        self.line = ''
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(16, 14, 16, 14)
+        lay.setSpacing(8)
+        self.search = QLineEdit()
+        self.search.setPlaceholderText(
+            'type a command or target…  (Enter runs)')
+        self.search.textChanged.connect(self._filter)
+        lay.addWidget(self.search)
+        self.list = QListWidget()
+        self.list.itemDoubleClicked.connect(self._accept)
+        lay.addWidget(self.list, 1)
+        self.search.returnPressed.connect(self._accept)
+        self._entries = entries
+        self._filter('')
+        self.search.setFocus()
+
+    def _filter(self, text) -> None:
+        low = text.strip().lower()
+        self.list.clear()
+        for line, label in self._entries:
+            hay = (line + ' ' + label).lower()
+            if low and low not in hay:
+                continue
+            it = QListWidgetItem(label)
+            it.setData(Qt.ItemDataRole.UserRole, line)
+            self.list.addItem(it)
+        if self.list.count():
+            self.list.setCurrentRow(0)
+
+    def _accept(self) -> None:
+        it = self.list.currentItem()
+        if it is None:
+            return
+        self.line = it.data(Qt.ItemDataRole.UserRole)
+        self.accept()
+
+
+class _AiPanel(QWidget):
+    """Resident AI console tab.
+
+    Owns a private asyncio loop thread so a turn never occupies
+    the beacon command worker. Prompts and T3 approvals use the
+    GUI's modal input interception.
+    """
+
+    sig_text = Signal(str)
+    sig_done = Signal(object)
+
+    def __init__(self, app) -> None:
+        super().__init__()
+        self.app = app
+        self.client = app.client
+        self._transcript: list = []
+        self._busy = False
+        self._future = None
+        from concurrent.futures.thread import (
+            ThreadPoolExecutor as _TPE,
+        )
+        # Python 3.15 lazy imports can leave asyncio's module-level
+        # ``concurrent.futures.ThreadPoolExecutor`` as a non-type
+        # proxy under Qt. Pin the real class before the loop runs.
+        import asyncio.base_events as _be
+        _be.concurrent.futures.ThreadPoolExecutor = _TPE
+        self._loop = asyncio.new_event_loop()
+        self._setting_executor = _TPE(
+            max_workers=4, thread_name_prefix='ai-http')
+        self._loop.set_default_executor(self._setting_executor)
+        self._thread = threading.Thread(
+            target=self._loop.run_forever,
+            name='gui-ai-loop', daemon=True)
+        self._thread.start()
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(Sp.M, Sp.M, Sp.M, Sp.M)
+        lay.setSpacing(Sp.S)
+
+        top = QHBoxLayout()
+        title = QLabel('AI console')
+        title.setObjectName('toolbarTitle')
+        top.addWidget(title)
+        self.provider_lbl = QLabel('not configured')
+        self.provider_lbl.setObjectName('dlgSub')
+        top.addWidget(self.provider_lbl)
+        top.addStretch(1)
+        self.settings_btn = QPushButton('Settings')
+        self.settings_btn.setObjectName('ghost')
+        self.settings_btn.clicked.connect(app._open_ai_settings)
+        top.addWidget(self.settings_btn)
+        self.reset_btn = QPushButton('Reset')
+        self.reset_btn.setObjectName('ghost')
+        self.reset_btn.clicked.connect(self._reset)
+        top.addWidget(self.reset_btn)
+        self.stop_btn = QPushButton('Stop')
+        self.stop_btn.setObjectName('danger')
+        self.stop_btn.setEnabled(False)
+        self.stop_btn.clicked.connect(self._stop)
+        top.addWidget(self.stop_btn)
+        lay.addLayout(top)
+
+        self.view = QPlainTextEdit()
+        self.view.setObjectName('logView')
+        self.view.setReadOnly(True)
+        self.view.setFont(_f_mono(10))
+        self.view.setMaximumBlockCount(20000)
+        lay.addWidget(self.view, 1)
+
+        self.status = QLabel(
+            'Ask a question. T3 tools still ask for approval.')
+        self.status.setObjectName('dlgSub')
+        lay.addWidget(self.status)
+
+        row = QHBoxLayout()
+        self.entry = QLineEdit()
+        self.entry.setPlaceholderText(
+            'Ask the model…  (Enter sends, /settings, /reset)')
+        self.entry.returnPressed.connect(self._send)
+        row.addWidget(self.entry, 1)
+        self.send_btn = QPushButton('Send')
+        self.send_btn.setObjectName('primary')
+        self.send_btn.clicked.connect(self._send)
+        row.addWidget(self.send_btn)
+        lay.addLayout(row)
+
+        self.sig_text.connect(self._append)
+        self.sig_done.connect(self._done)
+
+    def _append(self, text: str) -> None:
+        if text == '':
+            self.view.appendPlainText('')
+        else:
+            self.view.appendPlainText(text)
+
+    def _load_cfg(self):
+        from tornadoc2_mcp.config import (
+            DEFAULT_AI_PATH, load_ai_config,
+        )
+        return load_ai_config(DEFAULT_AI_PATH,
+                              require_provider=True)
+
+    def _reset(self) -> None:
+        if self._busy:
+            return
+        self._transcript = []
+        self.view.clear()
+        self._append('[ai] transcript cleared')
+
+    def _stop(self) -> None:
+        if self._future is not None:
+            self._future.cancel()
+            self.status.setText('cancelling…')
+
+    def _send(self) -> None:
+        if self._busy:
+            return
+        text = self.entry.text().strip()
+        if not text:
+            return
+        if text in ('/reset', 'reset'):
+            self.entry.clear()
+            return self._reset()
+        if text in ('/settings', 'settings'):
+            self.entry.clear()
+            return self.app._open_ai_settings()
+        try:
+            cfg = self._load_cfg()
+        except Exception as exc:
+            self._append(f'[ai] {exc}')
+            hint = getattr(exc, 'hint', '') or ''
+            if hint:
+                self._append(f'     {hint}')
+            self.app._open_ai_settings()
+            return
+        self.provider_lbl.setText(f'{cfg.provider} / {cfg.model}')
+        self.entry.clear()
+        self._append(f'› {text}')
+        self._busy = True
+        self.send_btn.setEnabled(False)
+        self.stop_btn.setEnabled(True)
+        self.status.setText('thinking…')
+        from tornadoc2_mcp.adapter import ClientAdapter
+        from tornadoc2_mcp.console.loop import run_ai_turn
+        adapter = ClientAdapter(self.client)
+        self._future = asyncio.run_coroutine_threadsafe(
+            run_ai_turn(cfg, adapter, self._transcript, text,
+                        self.sig_text.emit),
+            self._loop)
+        self._future.add_done_callback(self.sig_done.emit)
+
+    def _done(self, fut) -> None:
+        self._busy = False
+        self._future = None
+        self.send_btn.setEnabled(True)
+        self.stop_btn.setEnabled(False)
+        try:
+            err = fut.result()
+        except asyncio.CancelledError:
+            err = 'cancelled'
+        except Exception as exc:
+            err = f'{type(exc).__name__}: {exc}'
+        if err:
+            self._append(f'[ai] {err}')
+            self.status.setText(err)
+        else:
+            self.status.setText('done')
+
+
+class _ListenerDialog(QDialog):
+    """Protocol-aware create/edit dialog for one listener."""
+
+    TYPES = ('http', 'quic', 'websocket', 'dns', 'icmp',
+             'wireguard')
+
+    def __init__(self, parent, certs: dict, profiles: list,
+                 listener=None) -> None:
+        super().__init__(parent)
+        self._certs = certs or {}
+        self._profiles = list(profiles or [])
+        self._listener = listener
+        self._last_type = (listener or {}).get('type', 'http')
+        self._running = bool(
+            listener and listener.get('status') == 'running')
+        self.setWindowTitle(
+            'Edit listener' if listener else 'Create listener')
+        self.setMinimumWidth(520)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        header = QFrame()
+        header.setObjectName('dlgHeader')
+        hl = QVBoxLayout(header)
+        hl.setContentsMargins(22, 16, 22, 14)
+        hl.setSpacing(4)
+        title_row = QHBoxLayout()
+        self.title = QLabel(
+            'Edit listener' if listener else 'Create listener')
+        self.title.setObjectName('dlgHeader')
+        title_row.addWidget(self.title)
+        self.badge = QLabel(
+            (listener or {}).get('type', 'http').upper())
+        self.badge.setObjectName('typeBadge')
+        title_row.addWidget(self.badge)
+        title_row.addStretch(1)
+        hl.addLayout(title_row)
+        self.subtitle = QLabel(
+            'Configure the bind, TLS material and profile scope. '
+            'The listener is persisted and survives restart.')
+        self.subtitle.setObjectName('dlgSub')
+        self.subtitle.setWordWrap(True)
+        hl.addWidget(self.subtitle)
+        outer.addWidget(header)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        body = QWidget()
+        bl = QVBoxLayout(body)
+        bl.setContentsMargins(20, 14, 20, 14)
+        bl.setSpacing(10)
+        scroll.setWidget(body)
+        outer.addWidget(scroll, 1)
+
+        def _lab(text):
+            lbl = QLabel(text)
+            lbl.setStyleSheet(f'color: {Palette.TEXT_MUTED};')
+            return lbl
+
+        basics = QGroupBox('Basics')
+        bg = QGridLayout(basics)
+        bg.setHorizontalSpacing(12)
+        bg.setVerticalSpacing(8)
+        bg.setColumnStretch(1, 3)
+        bg.setColumnStretch(3, 1)
+        self.name_edit = QLineEdit((listener or {}).get('name', ''))
+        self.name_edit.setPlaceholderText('primary')
+        self.type_combo = QComboBox()
+        self.type_combo.addItems(self.TYPES)
+        if listener:
+            self.type_combo.setCurrentText(listener.get('type', 'http'))
+            self.type_combo.setEnabled(False)
+        bg.addWidget(_lab('Name'), 0, 0)
+        bg.addWidget(self.name_edit, 0, 1)
+        bg.addWidget(_lab('Type'), 0, 2)
+        bg.addWidget(self.type_combo, 0, 3)
+        self.host_edit = QLineEdit(
+            (listener or {}).get('host', '0.0.0.0'))
+        self.host_edit.setPlaceholderText('0.0.0.0')
+        self.port_edit = QLineEdit(
+            str((listener or {}).get('port', 8881)))
+        self.port_edit.setValidator(QIntValidator(0, 65535, self))
+        self.port_edit.setMaximumWidth(110)
+        self.port_label = _lab('Port')
+        bg.addWidget(_lab('Bind host'), 1, 0)
+        bg.addWidget(self.host_edit, 1, 1)
+        bg.addWidget(self.port_label, 1, 2)
+        bg.addWidget(self.port_edit, 1, 3)
+        if self._running:
+            self.host_edit.setEnabled(False)
+            self.port_edit.setEnabled(False)
+        bl.addWidget(basics)
+
+        # ---- TLS (http / quic / websocket) ----
+        self.tls_group = QGroupBox('TLS')
+        tf = QGridLayout(self.tls_group)
+        tf.setHorizontalSpacing(12)
+        tf.setVerticalSpacing(8)
+        tf.setColumnStretch(1, 1)
+        tf.setColumnStretch(3, 1)
+        self.tls_mode = QComboBox()
+        mode = ((listener or {}).get('tls') or {}).get(
+            'mode', 'server')
+        if listener and listener.get('type') == 'websocket':
+            self.tls_mode.addItems(['none', 'server'])
+        else:
+            self.tls_mode.addItems(['server', 'mtls'])
+        self.tls_mode.setCurrentText(mode)
+        tf.addWidget(_lab('Mode'), 0, 0)
+        tf.addWidget(self.tls_mode, 0, 1, 1, 3)
+        self.cert_combo = self._path_combo('certs')
+        self.key_combo = self._path_combo('keys')
+        self.ca_combo = self._path_combo('cas')
+        self.cert_row = _lab('Cert path')
+        self.key_row = _lab('Key path')
+        self.ca_row = _lab('CA path')
+        tf.addWidget(self.cert_row, 1, 0)
+        tf.addWidget(self.cert_combo, 1, 1)
+        tf.addWidget(self.key_row, 1, 2)
+        tf.addWidget(self.key_combo, 1, 3)
+        tf.addWidget(self.ca_row, 2, 0)
+        tf.addWidget(self.ca_combo, 2, 1, 1, 3)
+        tls = (listener or {}).get('tls') or {}
+        if tls.get('cert_path'):
+            self.cert_combo.setCurrentText(tls['cert_path'])
+        if tls.get('key_path'):
+            self.key_combo.setCurrentText(tls['key_path'])
+        if tls.get('ca_path'):
+            self.ca_combo.setCurrentText(tls['ca_path'])
+        self.tls_mode.currentTextChanged.connect(
+            self._on_tls_mode)
+        bl.addWidget(self.tls_group)
+
+        # ---- Profiles (multi) ----
+        self.profiles_group = QGroupBox('Profiles')
+        pf = QVBoxLayout(self.profiles_group)
+        self.profile_list = QListWidget()
+        self.profile_list.setSelectionMode(
+            QListWidget.SelectionMode.ExtendedSelection)
+        self.profile_list.setMinimumHeight(110)
+        for p in self._profiles:
+            name = p.get('name') if isinstance(p, dict) else p
+            if name:
+                QListWidgetItem(name, self.profile_list)
+        wanted = set((listener or {}).get('profiles') or [])
+        for i in range(self.profile_list.count()):
+            it = self.profile_list.item(i)
+            if it.text() in wanted:
+                it.setSelected(True)
+        hint = QLabel('Blank selection serves every profile.')
+        hint.setObjectName('formHint')
+        pf.addWidget(hint)
+        pf.addWidget(self.profile_list)
+        bl.addWidget(self.profiles_group)
+
+        # ---- DNS ----
+        self.dns_group = QGroupBox('Zone')
+        df = QGridLayout(self.dns_group)
+        df.setColumnStretch(1, 1)
+        self.domain_edit = QLineEdit(
+            (listener or {}).get('domain', ''))
+        self.domain_edit.setPlaceholderText('c2.example.com')
+        self.dns_profile = QComboBox()
+        self.dns_profile.setEditable(True)
+        self._fill_profile_combo(self.dns_profile, wanted, dns_only=True)
+        df.addWidget(_lab('Zone'), 0, 0)
+        df.addWidget(self.domain_edit, 0, 1)
+        df.addWidget(_lab('Profile'), 1, 0)
+        df.addWidget(self.dns_profile, 1, 1)
+        bl.addWidget(self.dns_group)
+
+        # ---- ICMP ----
+        self.icmp_group = QGroupBox('ICMP')
+        inf = QGridLayout(self.icmp_group)
+        inf.setColumnStretch(1, 1)
+        self.public_edit = QLineEdit(
+            (listener or {}).get('public_host', ''))
+        self.public_edit.setPlaceholderText('203.0.113.5')
+        self.icmp_profile = QComboBox()
+        self.icmp_profile.setEditable(True)
+        self._fill_profile_combo(self.icmp_profile, wanted, dns_only=True)
+        inf.addWidget(_lab('Public IPv4'), 0, 0)
+        inf.addWidget(self.public_edit, 0, 1)
+        inf.addWidget(_lab('Profile'), 1, 0)
+        inf.addWidget(self.icmp_profile, 1, 1)
+        warn = QLabel('Raw-socket listener: requires CAP_NET_RAW '
+                      'on the team-server host.')
+        warn.setObjectName('callout')
+        warn.setWordWrap(True)
+        inf.addWidget(warn, 2, 0, 1, 2)
+        bl.addWidget(self.icmp_group)
+
+        # ---- WireGuard ----
+        self.wg_group = QGroupBox('WireGuard')
+        wf = QGridLayout(self.wg_group)
+        wf.setHorizontalSpacing(12)
+        wf.setColumnStretch(1, 1)
+        wf.setColumnStretch(3, 1)
+        self.subnet_edit = QLineEdit(
+            (listener or {}).get('subnet', '10.99.0.0/24'))
+        self.server_ip_edit = QLineEdit(
+            (listener or {}).get('server_tunnel_ip', '10.99.0.1'))
+        self.iface_edit = QLineEdit(
+            (listener or {}).get('interface', ''))
+        self.iface_edit.setPlaceholderText('auto')
+        wf.addWidget(_lab('Subnet'), 0, 0)
+        wf.addWidget(self.subnet_edit, 0, 1)
+        wf.addWidget(_lab('Server tunnel IP'), 0, 2)
+        wf.addWidget(self.server_ip_edit, 0, 3)
+        wf.addWidget(_lab('Interface'), 1, 0)
+        wf.addWidget(self.iface_edit, 1, 1, 1, 3)
+        wwarn = QLabel(
+            'Kernel WireGuard: requires CAP_NET_ADMIN and the '
+            'wireguard module. A stale interface is swept on start.')
+        wwarn.setObjectName('callout')
+        wwarn.setWordWrap(True)
+        wf.addWidget(wwarn, 2, 0, 1, 4)
+        bl.addWidget(self.wg_group)
+
+        self.enabled_box = QCheckBox('Enabled on next boot')
+        self.enabled_box.setChecked(
+            bool((listener or {}).get('enabled', True)))
+        bl.addWidget(self.enabled_box)
+
+        self.summary = QLabel('')
+        self.summary.setObjectName('summaryStrip')
+        bl.addWidget(self.summary)
+
+        self.error = QLabel('')
+        self.error.setObjectName('errorText')
+        self.error.setWordWrap(True)
+        self.error.setVisible(False)
+        bl.addWidget(self.error)
+
+        footer = QFrame()
+        footer.setObjectName('dlgFooter')
+        fl = QHBoxLayout(footer)
+        fl.setContentsMargins(20, 12, 20, 12)
+        fl.addStretch(1)
+        cancel = QPushButton('Cancel')
+        cancel.setObjectName('ghost')
+        cancel.clicked.connect(self.reject)
+        fl.addWidget(cancel)
+        self.save_btn = QPushButton(
+            'Save changes' if listener else 'Create listener')
+        self.save_btn.setObjectName('primary')
+        self.save_btn.clicked.connect(self._ok)
+        fl.addWidget(self.save_btn)
+        outer.addWidget(footer)
+
+        self.type_combo.currentTextChanged.connect(self._on_type)
+        self.tls_mode.currentTextChanged.connect(
+            self._on_tls_mode)
+        for w in (self.host_edit, self.port_edit, self.public_edit):
+            w.textChanged.connect(self._update_summary)
+        self._on_type(self.type_combo.currentText())
+        self._on_tls_mode(self.tls_mode.currentText())
+
+    def _path_combo(self, bucket):
+        combo = QComboBox()
+        combo.setEditable(True)
+        for path in self._certs.get(bucket) or []:
+            combo.addItem(path)
+        if combo.count() == 0:
+            combo.setCurrentText({
+                'certs': 'tls_certs/server.pem',
+                'keys': 'tls_certs/server.key',
+                'cas': 'mtls_certs/ca.pem',
+            }.get(bucket, ''))
+        return combo
+
+    def _fill_profile_combo(self, combo, wanted, dns_only=False):
+        for p in self._profiles:
+            if dns_only and isinstance(p, dict) \
+                    and not p.get('has_dns_label'):
+                continue
+            name = p.get('name') if isinstance(p, dict) else p
+            if name:
+                combo.addItem(name)
+        for w in wanted:
+            combo.setCurrentText(w)
+
+    def _on_type(self, ltype) -> None:
+        defaults = {
+            'http': '8881', 'quic': '8883',
+            'websocket': '8884', 'dns': '53', 'wireguard': '51820',
+        }
+        current = self.port_edit.text().strip()
+        old_default = defaults.get(self._last_type)
+        if not current or current == old_default:
+            if ltype in defaults:
+                self.port_edit.setText(defaults[ltype])
+        self._last_type = ltype
+        self.save_btn.setText(
+            'Save changes' if self._listener else
+            f'Create {ltype} listener')
+        self.tls_group.setVisible(
+            ltype in ('http', 'quic', 'websocket'))
+        self.profiles_group.setVisible(
+            ltype in ('http', 'quic', 'websocket'))
+        self.dns_group.setVisible(ltype == 'dns')
+        self.icmp_group.setVisible(ltype == 'icmp')
+        self.wg_group.setVisible(ltype == 'wireguard')
+        icmp = ltype == 'icmp'
+        self.port_edit.setVisible(not icmp)
+        self.port_label.setVisible(not icmp)
+        self.badge.setText(ltype.upper())
+        subtitles = {
+            'http': 'HTTPS/JSON listener. TLS material is required '
+                    'unless mode is none.',
+            'quic': 'HTTP/3 over UDP. Same JSON protocol as HTTP; '
+                    'reaches networks that permit UDP.',
+            'websocket': 'wss:// listener. Cert and key required; '
+                         'client-cert attribution is not available.',
+            'dns': 'UDP+TXT and TCP listener. The zone must be '
+                   'delegated to this host.',
+            'icmp': 'Raw ICMP echo listener. Linux, CAP_NET_RAW.',
+            'wireguard': 'Kernel WireGuard UDP listener. Needs '
+                         'CAP_NET_ADMIN and the kernel module.',
+        }
+        self.subtitle.setText(subtitles.get(ltype, ''))
+        self._update_summary()
+        if ltype == 'websocket' and self.tls_mode.count() == 2 \
+                and self.tls_mode.itemText(0) == 'server':
+            self.tls_mode.clear()
+            self.tls_mode.addItems(['server', 'none'])
+        elif ltype in ('http', 'quic') \
+                and self.tls_mode.count() == 2 \
+                and self.tls_mode.itemText(0) == 'none':
+            self.tls_mode.clear()
+            self.tls_mode.addItems(['server', 'mtls'])
+        self._on_tls_mode(self.tls_mode.currentText())
+
+    def _on_tls_mode(self, mode) -> None:
+        on = mode != 'none'
+        self.cert_combo.setVisible(on)
+        self.cert_row.setVisible(on)
+        self.key_combo.setVisible(on)
+        self.key_row.setVisible(on)
+        ca = on and mode == 'mtls'
+        self.ca_combo.setVisible(ca)
+        self.ca_row.setVisible(ca)
+
+    def _fail(self, text) -> None:
+        self.error.setText(text)
+        self.error.setVisible(True)
+
+    def _update_summary(self) -> None:
+        host = self.host_edit.text().strip() or '0.0.0.0'
+        ltype = self.type_combo.currentText()
+        if ltype == 'icmp':
+            target = self.public_edit.text().strip() or 'no IPv4 yet'
+            self.summary.setText(f'icmp  ·  {target}')
+        else:
+            self.summary.setText(
+                f'{ltype}  ·  {host}:{self.port_edit.text().strip()}')
+
+    def _ok(self) -> None:
+        self.error.setVisible(False)
+        if not self.name_edit.text().strip():
+            self._fail('A name is required.')
+            return
+        if self.spec() is None:
+            return
+        self.accept()
+
+    def spec(self):
+        ltype = self.type_combo.currentText()
+        spec = {
+            'type': ltype,
+            'name': self.name_edit.text().strip(),
+            'host': self.host_edit.text().strip() or '0.0.0.0',
+            'enabled': self.enabled_box.isChecked(),
+        }
+        if ltype == 'icmp':
+            spec['port'] = 0
+            pub = self.public_edit.text().strip()
+            if not pub:
+                self._fail('A public IPv4 is required for ICMP.')
+                return None
+            spec['public_host'] = pub
+            prof = self.icmp_profile.currentText().strip()
+            if prof:
+                spec['profiles'] = [prof]
+        else:
+            try:
+                spec['port'] = int(self.port_edit.text().strip())
+            except ValueError:
+                self._fail('Port must be a number.')
+                return None
+        if ltype in ('http', 'quic', 'websocket'):
+            mode = self.tls_mode.currentText()
+            tls = {'mode': mode}
+            if mode != 'none':
+                cert = self.cert_combo.currentText().strip()
+                key = self.key_combo.currentText().strip()
+                if not cert or not key:
+                    self._fail('Cert and key are required for TLS.')
+                    return None
+                tls['cert_path'] = cert
+                tls['key_path'] = key
+                if mode == 'mtls':
+                    ca = self.ca_combo.currentText().strip()
+                    if not ca:
+                        self._fail('A CA is required for mTLS.')
+                        return None
+                    tls['ca_path'] = ca
+            spec['tls'] = tls
+            chosen = [it.text()
+                      for it in self.profile_list.selectedItems()]
+            if chosen:
+                spec['profiles'] = chosen
+        elif ltype == 'dns':
+            zone = self.domain_edit.text().strip()
+            if not zone:
+                self._fail('A DNS zone is required.')
+                return None
+            spec['domain'] = zone
+            prof = self.dns_profile.currentText().strip()
+            if prof:
+                spec['profiles'] = [prof]
+        elif ltype == 'wireguard':
+            spec['subnet'] = self.subnet_edit.text().strip()
+            spec['server_tunnel_ip'] = (
+                self.server_ip_edit.text().strip() or '10.99.0.1')
+            if self.iface_edit.text().strip():
+                spec['interface'] = self.iface_edit.text().strip()
+        return spec
+
+
+class _AiSettingsDialog(QDialog):
+    """GUI editor for client/.tornadoc2/ai.json.
+
+    No JSON typing. Provider/model/key, tuning, allowlists as
+    checkboxes, listener gates as checkboxes. The API key is
+    masked until revealed.
+    """
+
+    def __init__(self, parent, cfg, verbs, bofs) -> None:
+        super().__init__(parent)
+        from tornadoc2_mcp.config import KEYLESS_PROVIDERS, _VALID_PROVIDERS
+        from tornadoc2_mcp.provider_defaults import default_base_url
+        self._cfg = cfg
+        self._default_base = default_base_url
+        self._last_provider = cfg.provider
+        self._KEYLESS = KEYLESS_PROVIDERS
+        self.setWindowTitle('AI settings')
+        self.setMinimumWidth(560)
+
+        outer = QVBoxLayout(self)
+        form = QFormLayout()
+        outer.addLayout(form)
+
+        self.provider = QComboBox()
+        self.provider.addItems(list(_VALID_PROVIDERS))
+        if cfg.provider:
+            self.provider.setCurrentText(cfg.provider)
+        form.addRow('Provider', self.provider)
+
+        self.model = QLineEdit(cfg.model)
+        form.addRow('Model', self.model)
+
+        key_row = QHBoxLayout()
+        self.api_key = QLineEdit(cfg.api_key)
+        self.api_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self.reveal = QCheckBox('show')
+        self.reveal.toggled.connect(
+            lambda on: self.api_key.setEchoMode(
+                QLineEdit.EchoMode.Normal if on
+                else QLineEdit.EchoMode.Password))
+        key_row.addWidget(self.api_key, 1)
+        key_row.addWidget(self.reveal)
+        kw = QWidget()
+        kw.setLayout(key_row)
+        form.addRow('API key', kw)
+
+        self.base_url = QLineEdit(
+            cfg.base_url or default_base_url(cfg.provider))
+        self.base_url.setPlaceholderText('https://…')
+        form.addRow('Base URL', self.base_url)
+        self.temperature = QLineEdit(str(cfg.temperature))
+        form.addRow('Temperature (0-2)', self.temperature)
+        self.max_tokens = QLineEdit(str(cfg.max_tokens))
+        form.addRow('Max tokens', self.max_tokens)
+        self.max_context = QLineEdit(str(cfg.max_context_tokens))
+        form.addRow('Max context tokens', self.max_context)
+        self.max_turns = QLineEdit(str(cfg.max_turns))
+        form.addRow('Max turns', self.max_turns)
+        self.build_dir = QLineEdit(str(cfg.build_output_dir))
+        form.addRow('Build output dir', self.build_dir)
+
+        self.verbs = QListWidget()
+        self._fill_checks(self.verbs, verbs, cfg.mcp_allow_verbs)
+        form.addRow('Allow verbs', self.verbs)
+        self.bofs = QListWidget()
+        self._fill_checks(self.bofs, bofs, cfg.mcp_allow_bofs)
+        form.addRow('Allow BOFs', self.bofs)
+
+        self.allow_create = QCheckBox(
+            'Allow MCP create_listener')
+        self.allow_create.setChecked(cfg.mcp_allow_listener_create)
+        self.allow_delete = QCheckBox(
+            'Allow MCP delete_listener')
+        self.allow_delete.setChecked(cfg.mcp_allow_listener_delete)
+        form.addRow('MCP listeners', self.allow_create)
+        form.addRow('', self.allow_delete)
+
+        self.error = QLabel('')
+        self.error.setWordWrap(True)
+        self.error.setStyleSheet(f'color: {Palette.ERR};')
+        outer.addWidget(self.error)
+
+        bb = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save
+            | QDialogButtonBox.StandardButton.Cancel)
+        bb.accepted.connect(self._save)
+        bb.rejected.connect(self.reject)
+        outer.addWidget(bb)
+
+        self.provider.currentTextChanged.connect(self._on_provider)
+        self._on_provider(self.provider.currentText())
+
+    @staticmethod
+    def _fill_checks(widget, available, selected):
+        chosen = set(selected or [])
+        for name in list(dict.fromkeys(
+                list(available) + list(chosen))):
+            item = QListWidgetItem(name, widget)
+            item.setFlags(item.flags()
+                          | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(
+                Qt.CheckState.Checked if name in chosen
+                else Qt.CheckState.Unchecked)
+
+    @staticmethod
+    def _checked(widget):
+        return [widget.item(i).text()
+                for i in range(widget.count())
+                if widget.item(i).checkState()
+                == Qt.CheckState.Checked]
+
+    def _on_provider(self, provider) -> None:
+        keyless = provider in self._KEYLESS
+        self.api_key.setEnabled(not keyless)
+        if keyless and not self.api_key.text():
+            self.api_key.setPlaceholderText('not required')
+        current = self.base_url.text().strip()
+        previous_default = self._default_base(self._last_provider)
+        if not current or current == previous_default:
+            self.base_url.setText(self._default_base(provider))
+        self._last_provider = provider
+
+    def _save(self) -> None:
+        from tornadoc2_mcp.config import save_ai_config, DEFAULT_AI_PATH
+        try:
+            patch = {
+                'provider': self.provider.currentText(),
+                'model': self.model.text().strip(),
+                'api_key': self.api_key.text().strip(),
+                'base_url': self.base_url.text().strip(),
+                'temperature': float(self.temperature.text()),
+                'max_tokens': int(self.max_tokens.text()),
+                'max_context_tokens': int(self.max_context.text()),
+                'max_turns': int(self.max_turns.text()),
+                'build_output_dir': self.build_dir.text().strip(),
+                'mcp_allow_verbs': self._checked(self.verbs),
+                'mcp_allow_bofs': self._checked(self.bofs),
+                'mcp_allow_listener_create':
+                    self.allow_create.isChecked(),
+                'mcp_allow_listener_delete':
+                    self.allow_delete.isChecked(),
+            }
+            save_ai_config(DEFAULT_AI_PATH, patch,
+                           require_provider=True)
+        except Exception as exc:
+            hint = getattr(exc, 'hint', '') or ''
+            self.error.setText(f'{exc}' + (f'\n{hint}' if hint else ''))
+            return
+        self.accept()
+
+
 class GuiApp(QMainWindow):
     """Main GUI application. Same Client, same dispatch table."""
 
@@ -2661,6 +3578,10 @@ class GuiApp(QMainWindow):
     sig_quit            = Signal()
     sig_force_quit      = Signal()
     sig_post            = Signal(object)     # generic main-thread dispatch
+    sig_listeners       = Signal(object)
+    sig_listener_certs  = Signal(object)
+    sig_listener_profiles = Signal(object)
+    sig_graph = Signal(object)
 
     # ------------------------------------------------------------------
 
@@ -2711,6 +3632,10 @@ class GuiApp(QMainWindow):
         self._sort_reverse = False
         self._beacon_rows: list = []
         self._filter_text = ''
+        self._listener_rows: list = []
+        self._listener_certs: Optional[dict] = None
+        self._listener_profiles: Optional[list] = None
+        self._listener_selected: Optional[str] = None
 
         # Cross-thread cache of the active-tab state. The chat
         # poller runs on a plain `threading.Thread` and must not
@@ -2753,6 +3678,12 @@ class GuiApp(QMainWindow):
         self.sig_quit.connect(lambda: self._quit(prompt=False))
         self.sig_force_quit.connect(self._forced_quit)
         self.sig_post.connect(self._run_on_main)
+        self.sig_listeners.connect(self._apply_listener_rows)
+        self.sig_listener_certs.connect(
+            lambda c: setattr(self, '_listener_certs', c))
+        self.sig_listener_profiles.connect(
+            lambda p: setattr(self, '_listener_profiles', p))
+        self.sig_graph.connect(self._apply_graph)
 
         # 7. Build UI
         self._build_menu()
@@ -2791,6 +3722,11 @@ class GuiApp(QMainWindow):
         self._auto_timer = QTimer(self)
         self._auto_timer.timeout.connect(self._auto_refresh)
         self._auto_timer.start(self.REFRESH_MS)
+
+        self._listener_timer = QTimer(self)
+        self._listener_timer.timeout.connect(
+            self._refresh_listeners_async)
+        self._listener_timer.start(5000)
 
     # ==================================================================
     # Main-thread dispatcher (worker → GUI)
@@ -2849,6 +3785,12 @@ class GuiApp(QMainWindow):
         m_sess.addAction('Killall --stale…',
                          lambda: self._submit('killall --stale'))
 
+        m_edit = mb.addMenu('&Edit')
+        act = QAction('AI settings…', self)
+        act.setShortcut(QKeySequence('Ctrl+,'))
+        act.triggered.connect(self._open_ai_settings)
+        m_edit.addAction(act)
+
         m_view = mb.addMenu('&View')
         act = QAction('Log tab', self)
         act.setShortcut(QKeySequence('Ctrl+1'))
@@ -2858,6 +3800,18 @@ class GuiApp(QMainWindow):
         act.setShortcut(QKeySequence('Ctrl+2'))
         act.triggered.connect(lambda: self._select_tab(1))
         m_view.addAction(act)
+        act = QAction('Graph tab', self)
+        act.setShortcut(QKeySequence('Ctrl+3'))
+        act.triggered.connect(lambda: self._select_tab(3))
+        m_view.addAction(act)
+        act = QAction('Listeners tab', self)
+        act.setShortcut(QKeySequence('Ctrl+4'))
+        act.triggered.connect(lambda: self._select_tab(2))
+        m_view.addAction(act)
+        act = QAction('AI tab', self)
+        act.setShortcut(QKeySequence('Ctrl+5'))
+        act.triggered.connect(lambda: self._select_tab(4))
+        m_view.addAction(act)
         m_view.addSeparator()
         act = QAction('Clear log', self)
         act.setShortcut(QKeySequence('Ctrl+L'))
@@ -2866,12 +3820,18 @@ class GuiApp(QMainWindow):
         m_view.addAction('Clear chat', self._clear_chat)
 
         m_tools = mb.addMenu('&Tools')
+        act = QAction('Command palette…', self)
+        act.setShortcut(QKeySequence('Ctrl+K'))
+        act.triggered.connect(self._open_palette)
+        m_tools.addAction(act)
         m_tools.addAction('Command index',
                           lambda: self._submit('help'))
         m_tools.addAction('List beacons',
                           lambda: self._submit('beacons'))
         m_tools.addAction('Audit log',
                           lambda: self._submit('audit 50'))
+        m_tools.addAction('Engagement graph',
+                          lambda: self._select_tab(3))
         m_tools.addSeparator()
         m_tools.addAction('Credential vault',
                           lambda: self._submit('creds list'))
@@ -2879,6 +3839,12 @@ class GuiApp(QMainWindow):
                           lambda: self._submit('loot list'))
         m_tools.addAction('C2 profiles',
                           lambda: self._submit('c2-profiles'))
+        act = QAction('AI console', self)
+        act.setShortcut(QKeySequence('Ctrl+Shift+A'))
+        act.triggered.connect(lambda: self._select_tab(4))
+        m_tools.addAction(act)
+        m_tools.addAction('AI settings…',
+                          self._open_ai_settings)
         m_tools.addSeparator()
         m_tools.addAction('Set spawnto for attached beacon…',
                           lambda: self._prompt_spawnto(
@@ -2891,6 +3857,62 @@ class GuiApp(QMainWindow):
 
         m_help = mb.addMenu('&Help')
         m_help.addAction('About', self._about)
+
+    # ------------------------------------------------------------------
+    # AI settings
+
+    def _open_ai_settings(self) -> None:
+        from tornadoc2_mcp.config import (
+            DEFAULT_AI_PATH, ensure_ai_config, load_ai_config,
+        )
+        try:
+            ensure_ai_config(DEFAULT_AI_PATH)
+            cfg = load_ai_config(DEFAULT_AI_PATH)
+        except Exception as exc:
+            QMessageBox.warning(self, 'AI settings', str(exc))
+            return
+        verbs = []
+        cat = self.client.commands or {}
+        for row in (cat.get('main') or []) + (cat.get('beacon') or []):
+            if isinstance(row, dict) and row.get('name'):
+                verbs.append(row['name'])
+
+        def work():
+            bofs = []
+            try:
+                rows = self.client.tp.post('/api/v1/bofs', {}) or []
+                bofs = [r.get('name') for r in rows if r.get('name')]
+            except Exception:
+                pass
+            self.sig_post.emit(
+                lambda: self._show_ai_settings(cfg, verbs, bofs))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _open_palette(self) -> None:
+        entries = []
+        cat = self.client.commands or {}
+        for row in (cat.get('main') or []):
+            if not isinstance(row, dict) or not row.get('name'):
+                continue
+            name = row['name']
+            entries.append((name,
+                            f"{name}  —  {row.get('description','')}"))
+        for b in self._beacon_rows[:200]:
+            entries.append((f"use {b['id']}",
+                            f"use #{b['id']}  {b.get('display_name','')}"))
+        for n in ('beacons', 'listeners', 'graph', 'audit', 'chat',
+                  'help', 'clear', 'ai'):
+            if not any(e[0] == n for e in entries):
+                entries.append((n, n))
+        dlg = _CommandPalette(self, entries)
+        if dlg.exec() == QDialog.DialogCode.Accepted and dlg.line:
+            self._submit(dlg.line)
+
+    def _show_ai_settings(self, cfg, verbs, bofs) -> None:
+        dlg = _AiSettingsDialog(self, cfg, verbs, bofs)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self._status('AI settings saved')
 
     # ==================================================================
     # Central widget
@@ -2926,14 +3948,14 @@ class GuiApp(QMainWindow):
     def _build_header(self) -> QWidget:
         bar = QWidget()
         bar.setObjectName('headerBar')
-        bar.setFixedHeight(52)
+        bar.setFixedHeight(58)
 
         lay = QHBoxLayout(bar)
         lay.setContentsMargins(Sp.L, Sp.S, Sp.L, Sp.S)
         lay.setSpacing(0)
 
         # Brand
-        glyph = QLabel('\u25c6')
+        glyph = QLabel('\u2b22')
         glyph.setObjectName('brandGlyph')
         lay.addWidget(glyph)
         lay.addSpacing(Sp.S)
@@ -2943,27 +3965,28 @@ class GuiApp(QMainWindow):
         lay.addWidget(brand)
         lay.addSpacing(Sp.S)
 
-        sub = QLabel('CONSOLE')
+        sub = QLabel('RED TEAM OPERATIONS')
         sub.setObjectName('brandSub')
         lay.addWidget(sub)
         lay.addSpacing(Sp.XL)
 
-        # Connection info
+        chip = QFrame()
+        chip.setObjectName('connChip')
+        cl = QHBoxLayout(chip)
+        cl.setContentsMargins(10, 3, 10, 3)
+        cl.setSpacing(6)
+        self.status_dot = StatusDot()
+        cl.addWidget(self.status_dot)
         self.header_conn = QLabel('connecting…')
         self.header_conn.setObjectName('connInfo')
-        lay.addWidget(self.header_conn)
-        lay.addStretch(1)
-
-        # Right side: status dot, status pill, role badge
-        self.status_dot = StatusDot()
-        lay.addWidget(self.status_dot)
-        lay.addSpacing(Sp.XS)
-
-        self.status_pill = QLabel('connecting')
+        cl.addWidget(self.header_conn)
+        cl.addSpacing(4)
+        self.status_pill = QLabel('OFFLINE')
         self.status_pill.setObjectName('statusPill')
         self.status_pill.setProperty('state', 'connecting')
-        lay.addWidget(self.status_pill)
-        lay.addSpacing(Sp.M)
+        cl.addWidget(self.status_pill)
+        lay.addWidget(chip)
+        lay.addStretch(1)
 
         self.role_badge = QLabel('—')
         self.role_badge.setObjectName('roleBadge')
@@ -2974,16 +3997,22 @@ class GuiApp(QMainWindow):
     def _set_connection(self, host: str, role: str) -> None:
         self.header_conn.setText(host)
         self.role_badge.setText(role.upper())
-        self.status_pill.setText('online')
+        self.status_pill.setText('ONLINE')
         self.status_pill.setProperty('state', 'online')
         self._repolish(self.status_pill)
         self.status_dot.set_color(Palette.OK)
+        if hasattr(self, 'operator_lbl'):
+            self.operator_lbl.setText(f"operator  {self.client.name or '?'}")
+            self.role_lbl.setText(f"role  {role.upper()}")
 
     def _set_disconnected(self) -> None:
-        self.status_pill.setText('offline')
+        self.status_pill.setText('OFFLINE')
         self.status_pill.setProperty('state', 'offline')
         self._repolish(self.status_pill)
         self.status_dot.set_color(Palette.ERR)
+        for name in ('operator_lbl', 'role_lbl'):
+            if hasattr(self, name):
+                getattr(self, name).setText('')
 
     @staticmethod
     def _repolish(w: QWidget) -> None:
@@ -3016,18 +4045,18 @@ class GuiApp(QMainWindow):
             f'background: transparent;')
         head.addWidget(dot)
 
-        lbl = QLabel('BEACONS')
+        lbl = QLabel('TARGETS')
         lbl.setObjectName('sectionLabel')
         head.addWidget(lbl)
 
         self.beacon_count_lbl = QLabel('0')
-        self.beacon_count_lbl.setObjectName('sectionCount')
+        self.beacon_count_lbl.setObjectName('countBadge')
         head.addWidget(self.beacon_count_lbl)
 
         head.addSpacing(Sp.M)
 
         self.search_entry = QLineEdit()
-        self.search_entry.setPlaceholderText('filter beacons…')
+        self.search_entry.setPlaceholderText('search targets…')
         self.search_entry.textChanged.connect(
             lambda _t: self._on_search_change())
 
@@ -3048,15 +4077,18 @@ class GuiApp(QMainWindow):
 
         attach = QPushButton('Attach')
         attach.setObjectName('primary')
+        attach.setToolTip('Attach to the selected target  (Enter)')
         attach.clicked.connect(self._attach_selected)
         head.addWidget(attach)
 
         detach = QPushButton('Detach')
+        detach.setToolTip('Release the current target')
         detach.clicked.connect(lambda: self._submit('detach'))
         head.addWidget(detach)
 
-        refresh = QPushButton('Refresh')
+        refresh = QPushButton('↻')
         refresh.setObjectName('ghost')
+        refresh.setToolTip('Refresh the target list  (F5)')
         refresh.clicked.connect(self._refresh_beacons_async)
         head.addWidget(refresh)
 
@@ -3067,9 +4099,9 @@ class GuiApp(QMainWindow):
         self.tree.set_empty_text(
             'waiting for beacons\n'
             'the list updates every few seconds')
-        self.tree.setColumnCount(5)
-        self.tree.setHeaderLabels(['BEACON', 'USER@HOST', 'OS',
-                                   'LAST', 'VIEW'])
+        self.tree.setColumnCount(6)
+        self.tree.setHeaderLabels(['BEACON', 'USER@HOST', 'PRIV',
+                                   'OS', 'LAST', 'VIEW'])
         self.tree.setRootIsDecorated(False)
         self.tree.setUniformRowHeights(True)
         self.tree.setSelectionMode(
@@ -3095,12 +4127,558 @@ class GuiApp(QMainWindow):
         hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
         hdr.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
         hdr.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
         self.tree.setColumnWidth(0, 200)   # BEACON  (dot + id + alias)
         hdr.sectionClicked.connect(self._sort_by)
         hdr.setSectionsClickable(True)
 
         lay.addWidget(self.tree, 1)
         return pane
+
+    # ------------------------------------------------------------------
+    # Listeners panel
+
+    # ------------------------------------------------------------------
+    # Graph
+
+    def _build_graph_tab(self) -> QWidget:
+        pane = QWidget()
+        lay = QVBoxLayout(pane)
+        lay.setContentsMargins(Sp.M, Sp.M, Sp.M, Sp.M)
+        lay.setSpacing(Sp.S)
+
+        top = QHBoxLayout()
+        title = QLabel('Engagement graph')
+        title.setObjectName('toolbarTitle')
+        top.addWidget(title)
+        sub = QLabel('shared identity, privilege and relay parentage')
+        sub.setObjectName('dlgSub')
+        top.addWidget(sub)
+        top.addStretch(1)
+        self.graph_mode = QComboBox()
+        for label, key in (('Privilege', 'privilege'),
+                           ('User', 'user'), ('Domain', 'domain'),
+                           ('Subnet', 'subnet'), ('Session', 'session')):
+            self.graph_mode.addItem(label, key)
+        top.addWidget(self.graph_mode)
+        self.graph_refresh = QPushButton('Refresh')
+        self.graph_refresh.setObjectName('ghost')
+        self.graph_refresh.clicked.connect(self._refresh_graph_async)
+        top.addWidget(self.graph_refresh)
+        fit = QPushButton('Fit')
+        fit.setObjectName('ghost')
+        fit.clicked.connect(self._fit_graph)
+        top.addWidget(fit)
+        lay.addLayout(top)
+
+        self.graph_view = QGraphicsView()
+        self.graph_view.setObjectName('graphView')
+        self.graph_scene = QGraphicsScene(self)
+        self.graph_view.setScene(self.graph_scene)
+        self.graph_view.setRenderHint(
+            QPainter.RenderHint.Antialiasing)
+        self.graph_view.setDragMode(
+            QGraphicsView.DragMode.ScrollHandDrag)
+        lay.addWidget(self.graph_view, 1)
+
+        legend = QLabel(
+            '<span style="color:#f85149">system</span> · '
+            '<span style="color:#ff8c42">admin</span> · '
+            '<span style="color:#ffd166">root</span> · '
+            '<span style="color:#58a6ff">user</span> · '
+            '<span style="color:#6e7681">dead</span> · '
+            'white ring = elevated · red edge = relay parent')
+        legend.setObjectName('dlgSub')
+        lay.addWidget(legend)
+        self.graph_status = QLabel('refresh to build')
+        self.graph_status.setObjectName('dlgSub')
+        lay.addWidget(self.graph_status)
+
+        self._graph_timer = QTimer(self)
+        self._graph_timer.timeout.connect(self._refresh_graph_async)
+        self._graph_timer.start(5000)
+        self._refresh_graph_async()
+        return pane
+
+    def _refresh_graph_async(self) -> None:
+        if not getattr(self, '_connected', False):
+            return
+        self._command_q.put(('callable', self._fetch_graph_worker))
+
+    def _fetch_graph_worker(self) -> None:
+        try:
+            data = self.client.tp.post('/api/v1/graph',
+                                       {'mode': 'json'})
+        except Exception as exc:
+            self._log(f'graph refresh failed: {exc}', 'err')
+            return
+        self.sig_graph.emit(data)
+
+    def _fit_graph(self) -> None:
+        if self.graph_scene.items():
+            self.graph_view.fitInView(
+                self.graph_scene.itemsBoundingRect(),
+                Qt.AspectRatioMode.KeepAspectRatio)
+            self.graph_view.resetTransform()
+            self.graph_view.scale(1, 1)
+            self.graph_view.fitInView(
+                self.graph_scene.itemsBoundingRect(),
+                Qt.AspectRatioMode.KeepAspectRatio)
+
+    def _apply_graph(self, data) -> None:
+        nodes = (data or {}).get('nodes') or []
+        edges = (data or {}).get('edges') or []
+        self.graph_scene.clear()
+        if not nodes:
+            self.graph_scene.addText(
+                'no beacons — graph is empty')
+            self.graph_status.setText('0 nodes')
+            return
+
+        mode = self.graph_mode.currentData() or 'privilege'
+        groups = {}
+        for n in nodes:
+            key = n.get(mode) or n.get('user') or '(unknown)'
+            groups.setdefault(str(key), []).append(n)
+        ordered = sorted(groups.items())
+
+        positions = {}
+        for gi, (_key, members) in enumerate(ordered):
+            x = 100 + gi * 210
+            for ri, n in enumerate(sorted(members,
+                                          key=lambda z: z['id'])):
+                positions[n['id']] = (x, 70 + ri * 82)
+
+        node_by_id = {n['id']: n for n in nodes}
+        for e in edges:
+            a = positions.get(e.get('from'))
+            b = positions.get(e.get('to'))
+            if not a or not b:
+                continue
+            relay = 'relay-parent' in (e.get('shared') or [])
+            pen = QPen(QColor(Palette.ERR if relay else Palette.BORDER))
+            pen.setWidth(2 if relay else 1)
+            if not relay:
+                pen.setStyle(Qt.PenStyle.DashLine)
+            self.graph_scene.addLine(
+                a[0] + 75, a[1] + 26, b[0] + 75, b[1] + 26, pen)
+
+        colors = {
+            'system': '#f85149', 'root': '#ffd166',
+            'admin': '#ff8c42', 'user': Palette.ACCENT,
+        }
+        for n in nodes:
+            pos = positions.get(n['id'])
+            if not pos:
+                continue
+            priv = (n.get('privilege') or 'user').lower()
+            if not n.get('alive'):
+                fill = Palette.TEXT_FAINT
+            else:
+                fill = colors.get(priv, Palette.ACCENT)
+            pen = QPen(QColor(Palette.TEXT_INVERT if n.get('elevated')
+                              else Palette.BORDER))
+            pen.setWidth(2 if n.get('elevated') else 1)
+            path = QPainterPath()
+            path.addRoundedRect(pos[0], pos[1], 150, 52, 8, 8)
+            item = QGraphicsPathItem(path)
+            item.setBrush(QBrush(QColor(Palette.BG_SOFT)))
+            item.setPen(pen)
+            item.setToolTip(
+                f"#{n['id']} {n['name']}\n"
+                f"{n.get('user') or '?'}@{n.get('domain') or ''}\n"
+                f"{priv} integrity={n.get('integrity') or '?'}\n"
+                f"parent={n.get('parent_name') or '?'} "
+                f"({n.get('parent_pid') or 0})")
+            self.graph_scene.addItem(item)
+            stripe = QGraphicsRectItem(pos[0], pos[1], 4, 52)
+            stripe.setBrush(QBrush(QColor(fill)))
+            stripe.setPen(QPen(Qt.PenStyle.NoPen))
+            self.graph_scene.addItem(stripe)
+            label = QGraphicsTextItem(
+                f"#{n['id']}  {n['name']}")
+            label.setDefaultTextColor(QColor(Palette.TEXT))
+            label.setFont(_f_ui(9, bold=True))
+            label.setPos(pos[0] + 12, pos[1] + 7)
+            self.graph_scene.addItem(label)
+            sub = QGraphicsTextItem(
+                f"{priv.upper()}  ·  {n.get('user') or '?'}")
+            sub.setDefaultTextColor(QColor(fill))
+            sub.setFont(_f_mono(8))
+            sub.setPos(pos[0] + 12, pos[1] + 28)
+            self.graph_scene.addItem(sub)
+
+        self.graph_scene.setSceneRect(
+            self.graph_scene.itemsBoundingRect().adjusted(
+                -20, -20, 20, 20))
+        self.graph_status.setText(
+            f"{len(nodes)} node(s), {len(edges)} edge(s), "
+            f"grouped by {mode}")
+
+    def _build_listeners_tab(self) -> QWidget:
+        pane = QWidget()
+        lay = QVBoxLayout(pane)
+        lay.setContentsMargins(Sp.M, Sp.M, Sp.M, Sp.M)
+        lay.setSpacing(Sp.M)
+
+        can_view = 'listener.view' in getattr(self.client, 'caps', ())
+        if not can_view:
+            lbl = QLabel(
+                'This role may not include listener.view. Operator, '
+                'admin and local can view and manage listeners.')
+            lbl.setWordWrap(True)
+            lbl.setObjectName('callout')
+            lay.addWidget(lbl)
+
+        top = QHBoxLayout()
+        tcol = QVBoxLayout()
+        tcol.setSpacing(2)
+        title = QLabel('Beacon listeners')
+        title.setObjectName('toolbarTitle')
+        tcol.addWidget(title)
+        sub = QLabel(
+            'Persisted to listeners.json · survives restart · '
+            'visible to the whole team')
+        sub.setObjectName('dlgSub')
+        tcol.addWidget(sub)
+        top.addLayout(tcol)
+        self.listener_count = QLabel('0')
+        self.listener_count.setObjectName('countBadge')
+        top.addWidget(self.listener_count, 0, Qt.AlignmentFlag.AlignTop)
+        top.addStretch(1)
+        self.listener_refresh_btn = QPushButton('Refresh')
+        self.listener_refresh_btn.setObjectName('ghost')
+        self.listener_refresh_btn.clicked.connect(
+            self._refresh_listeners_async)
+        top.addWidget(self.listener_refresh_btn)
+        self.listener_create_btn = QPushButton('Create listener')
+        self.listener_create_btn.setObjectName('primary')
+        self.listener_create_btn.clicked.connect(
+            lambda: self._open_listener_dialog(False))
+        top.addWidget(self.listener_create_btn)
+        lay.addLayout(top)
+
+        split = QSplitter(Qt.Orientation.Horizontal)
+        lay.addWidget(split, 1)
+
+        self.listener_tree = QTreeWidget()
+        self.listener_tree.setRootIsDecorated(False)
+        self.listener_tree.setAlternatingRowColors(True)
+        self.listener_tree.setSelectionMode(
+            QTreeWidget.SelectionMode.SingleSelection)
+        self.listener_tree.setUniformRowHeights(True)
+        self.listener_tree.setHeaderLabels([
+            'ID', 'NAME', 'TYPE', 'BIND', 'STATUS',
+            'PROFILES', 'CREATED BY'])
+        hdr = self.listener_tree.header()
+        hdr.setStretchLastSection(True)
+        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        self.listener_tree.itemSelectionChanged.connect(
+            self._on_listener_selected)
+        split.addWidget(self.listener_tree)
+
+        card = QFrame()
+        card.setObjectName('detailCard')
+        dlay = QVBoxLayout(card)
+        dlay.setContentsMargins(14, 12, 14, 12)
+        dlay.setSpacing(8)
+
+        head = QHBoxLayout()
+        self.listener_name = QLabel('No selection')
+        self.listener_name.setFont(_f_ui(12, bold=True))
+        head.addWidget(self.listener_name)
+        self.listener_status = QLabel('—')
+        self.listener_status.setObjectName('statusPill')
+        head.addWidget(self.listener_status)
+        head.addStretch(1)
+        dlay.addLayout(head)
+
+        self.listener_detail = QLabel(
+            'Select a listener to inspect its bind, profiles and '
+            'state.\n\nA listener opened here survives restart '
+            'and is visible to the whole team.')
+        self.listener_detail.setWordWrap(True)
+        self.listener_detail.setTextFormat(
+            Qt.TextFormat.RichText)
+        self.listener_detail.setAlignment(
+            Qt.AlignmentFlag.AlignTop)
+        dlay.addWidget(self.listener_detail, 1)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(6)
+        self.listener_buttons = {}
+        for label, action, cap, style in (
+                ('Start', 'start', 'listener.manage', 'primary'),
+                ('Stop', 'stop', 'listener.manage', None),
+                ('Edit', 'edit', 'listener.manage', None),
+                ('Delete', 'delete', 'listener.delete', 'danger')):
+            b = QPushButton(label)
+            if style:
+                b.setObjectName(style)
+            b.clicked.connect(
+                lambda _=False, a=action: self._listener_do(a))
+            b.setEnabled(False)
+            if cap not in getattr(self.client, 'caps', ()):
+                b.setToolTip('role lacks ' + cap)
+            self.listener_buttons[action] = b
+            btn_row.addWidget(b)
+        dlay.addLayout(btn_row)
+        split.addWidget(card)
+        split.setStretchFactor(0, 3)
+        split.setStretchFactor(1, 2)
+        split.setSizes([620, 380])
+
+        self._refresh_listeners_async()
+        return pane
+
+    def _refresh_listeners_async(self) -> None:
+        if (getattr(self, 'listener_tree', None) is None
+                or not self._connected):
+            return
+        self._command_q.put(('callable', self._fetch_listeners_worker))
+
+    def _fetch_listeners_worker(self) -> None:
+        try:
+            r = self.client.listener_list()
+        except Exception as exc:
+            self._log(f"listener refresh failed: {exc}", 'err')
+            return
+        self.client.listeners = list(r.get('listeners') or [])
+        self.sig_listeners.emit(self.client.listeners)
+
+    @Slot(object)
+    def _apply_listener_rows(self, rows) -> None:
+        self._listener_rows = list(rows or [])
+        self._render_listeners()
+
+    def _render_listeners(self) -> None:
+        if getattr(self, 'listener_tree', None) is None:
+            return
+        keep = self._listener_selected
+        self.listener_tree.clear()
+        if hasattr(self, 'listener_count'):
+            self.listener_count.setText(str(len(self._listener_rows)))
+        if not self._listener_rows:
+            self.listener_name.setText('No listeners')
+            self.listener_status.setText('—')
+            self._set_status_pill('')
+            self.listener_detail.setText(
+                '<div style="color:%s; font-size:12pt; '
+                'font-weight:600; margin-bottom:6px;">'
+                'No listeners configured</div>'
+                'Open a port with <b>Create listener</b>. The '
+                'configuration is persisted, survives a restart and '
+                'is visible to the whole team.'
+                % Palette.TEXT_MUTED)
+            for b in getattr(self, 'listener_buttons', {}).values():
+                b.setEnabled(False)
+            return
+        for lst in self._listener_rows:
+            item = QTreeWidgetItem([
+                lst.get('id') or '',
+                lst.get('name') or '',
+                lst.get('type') or '',
+                f"{lst.get('host') or ''}:{lst.get('port') or ''}",
+                lst.get('status') or 'stopped',
+                ', '.join(lst.get('profiles') or []),
+                lst.get('created_by') or '',
+            ])
+            item.setData(0, Qt.ItemDataRole.UserRole, lst.get('id'))
+            if lst.get('status') == 'error':
+                item.setForeground(
+                    4, QBrush(QColor(Palette.ERR)))
+            elif lst.get('status') == 'running':
+                item.setForeground(
+                    4, QBrush(QColor(Palette.OK)))
+            self.listener_tree.addTopLevelItem(item)
+            if lst.get('id') == keep:
+                item.setSelected(True)
+        self._on_listener_selected()
+
+    def _selected_listener(self):
+        if getattr(self, 'listener_tree', None) is None:
+            return None
+        items = self.listener_tree.selectedItems()
+        if not items:
+            return None
+        lid = items[0].data(0, Qt.ItemDataRole.UserRole)
+        for lst in self._listener_rows:
+            if lst.get('id') == lid:
+                return lst
+        return None
+
+    def _on_listener_selected(self) -> None:
+        lst = self._selected_listener()
+        self._listener_selected = lst.get('id') if lst else None
+        from html import escape
+        can_manage = 'listener.manage' in getattr(
+            self.client, 'caps', ())
+        can_delete = 'listener.delete' in getattr(
+            self.client, 'caps', ())
+        status = (lst or {}).get('status', 'stopped')
+        for action, b in getattr(
+                self, 'listener_buttons', {}).items():
+            if lst is None:
+                b.setEnabled(False)
+                continue
+            if action == 'start':
+                b.setEnabled(can_manage and status != 'running')
+            elif action == 'stop':
+                b.setEnabled(can_manage and status == 'running')
+            elif action == 'edit':
+                b.setEnabled(can_manage)
+            else:
+                b.setEnabled(can_delete and status != 'running')
+        if lst is None:
+            self.listener_name.setText('No selection')
+            self.listener_status.setText('—')
+            self._set_status_pill('')
+            self.listener_detail.setText(
+                'Select a listener to inspect its bind, profiles and '
+                'state.')
+            return
+        self.listener_name.setText(lst.get('name') or '?')
+        self.listener_status.setText(status)
+        self._set_status_pill(status)
+        err = lst.get('error_message') or ''
+        dim = Palette.TEXT_FAINT
+        rows = [
+            ('ID', lst.get('id') or ''),
+            ('Type', lst.get('type') or ''),
+            ('Bind', f"{lst.get('host') or ''}:{lst.get('port') or ''}"),
+        ]
+        if lst.get('public_host'):
+            rows.append(('Public host', lst['public_host']))
+        if lst.get('domain'):
+            rows.append(('Zone', lst['domain']))
+        if lst.get('profiles'):
+            rows.append(('Profiles', ', '.join(lst['profiles'])))
+        if lst.get('subnet'):
+            rows.append(('Subnet', lst['subnet']))
+        if lst.get('server_tunnel_ip'):
+            rows.append(('Server tunnel IP', lst['server_tunnel_ip']))
+        if lst.get('created_by'):
+            rows.append(('Created by', lst['created_by']))
+        html_rows = ''.join(
+            f'<tr><td style="color:{dim}; padding:2px 14px 2px 0;">'
+            f'{escape(str(k))}</td>'
+            f'<td style="padding:2px 0;">{escape(str(v))}</td></tr>'
+            for k, v in rows)
+        body = f'<table cellspacing="0" cellpadding="0">{html_rows}</table>'
+        if err:
+            body += (f'<div style="color:{Palette.ERR}; '
+                     f'margin-top:10px;">{escape(err)}</div>')
+        self.listener_detail.setText(body)
+
+    def _set_status_pill(self, status) -> None:
+        if not hasattr(self, 'listener_status'):
+            return
+        self.listener_status.setProperty('state', status or '')
+        self.listener_status.style().unpolish(self.listener_status)
+        self.listener_status.style().polish(self.listener_status)
+
+    def _ensure_listener_aux(self, then) -> None:
+        if self._listener_certs is not None \
+                and self._listener_profiles is not None:
+            then()
+            return
+
+        def work():
+            try:
+                certs = self.client.listener_certs()
+                self.sig_listener_certs.emit(certs or {})
+            except Exception as exc:
+                self._log(f"cert list failed: {exc}", 'err')
+                self.sig_listener_certs.emit(
+                    {'certs': [], 'keys': [], 'cas': []})
+            try:
+                prof = self.client.tp.post(
+                    '/api/v1/c2-profiles', {})
+                self.sig_listener_profiles.emit(
+                    list(prof.get('profiles') or []))
+            except Exception as exc:
+                self._log(f"profile list failed: {exc}", 'err')
+                self.sig_listener_profiles.emit([])
+            self.sig_post.emit(then)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _open_listener_dialog(self, edit: bool) -> None:
+        if 'listener.manage' not in getattr(
+                self.client, 'caps', ()):
+            self._log('role lacks listener.manage', 'err')
+            return
+        lst = self._selected_listener() if edit else None
+        if edit and lst is None:
+            self._status('select a listener first')
+            return
+        self._ensure_listener_aux(
+            lambda: self._show_listener_dialog(lst))
+
+    def _show_listener_dialog(self, lst) -> None:
+        dlg = _ListenerDialog(
+            self,
+            self._listener_certs or {},
+            self._listener_profiles or [],
+            lst)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        spec = dlg.spec()
+        if spec is None:
+            return
+        if lst is None:
+            fn = lambda: self.client.listener_create(spec)
+            label = 'create'
+        else:
+            fn = lambda: self.client.listener_update(
+                lst['id'], spec)
+            label = 'update'
+        self._run_listener_call(fn, label)
+
+    def _listener_do(self, action: str) -> None:
+        lst = self._selected_listener()
+        if lst is None:
+            return
+        lid = lst['id']
+        if action == 'edit':
+            self._open_listener_dialog(True)
+            return
+        if action == 'delete':
+            ans = QMessageBox.question(
+                self, 'Delete listener',
+                f"Delete {lst.get('name')!r} ({lid})?\n"
+                'The listener must be stopped first.')
+            if ans != QMessageBox.StandardButton.Yes:
+                return
+            fn = lambda: self.client.listener_delete(lid)
+        elif action == 'start':
+            fn = lambda: self.client.listener_start(lid)
+        else:
+            fn = lambda: self.client.listener_stop(lid)
+        self._run_listener_call(fn, action)
+
+    def _run_listener_call(self, fn, label: str) -> None:
+        def work():
+            try:
+                r = fn()
+            except Exception as exc:
+                self.sig_post.emit(
+                    lambda: self._status(f'{label} failed: {exc}'))
+                return
+            if not r.get('ok'):
+                msg = r.get('error', 'failed')
+                self.sig_post.emit(
+                    lambda: self._status(f'{label} failed: {msg}'))
+                return
+            self.sig_post.emit(
+                lambda: self._status(f'listener {label} ok'))
+            self.sig_post.emit(self._refresh_listeners_async)
+
+        threading.Thread(target=work, daemon=True).start()
 
     # ------------------------------------------------------------------
     # Main pane (tabs + input bar)
@@ -3124,7 +4702,7 @@ class GuiApp(QMainWindow):
         self.log_widget.setFont(_f_mono(10))
         self.log_widget.setMaximumBlockCount(50000)
         log_lay.addWidget(self.log_widget)
-        self.tabs.addTab(log_tab, '  Log  ')
+        self.tabs.addTab(log_tab, '  ▤  Log  ')
 
         # ── Chat tab
         chat_tab = QWidget()
@@ -3148,7 +4726,18 @@ class GuiApp(QMainWindow):
         self.chat_widget.setReadOnly(True)
         self.chat_widget.setFont(_f_mono(10))
         chat_lay.addWidget(self.chat_widget, 1)
-        self.tabs.addTab(chat_tab, '  Chat  ')
+        self.tabs.addTab(chat_tab, '  ◈  Chat  ')
+
+        # ── Listeners tab
+        self.tabs.addTab(self._build_listeners_tab(),
+                         '  ◉  Listeners  ')
+
+        # ── Graph tab
+        self.tabs.addTab(self._build_graph_tab(), '  ⌁  Graph  ')
+
+        # ── AI tab
+        self.ai_panel = _AiPanel(self)
+        self.tabs.addTab(self.ai_panel, '  ✦  AI  ')
 
         # ── Input bar
         self.prompt_lbl = QLabel('›')
@@ -3167,6 +4756,7 @@ class GuiApp(QMainWindow):
         self.send_btn.clicked.connect(self._on_submit)
 
         inp_wrap = _FocusFrame(self.input_entry, name='inputBar')
+        self.input_bar = inp_wrap
         inp_lay = QHBoxLayout(inp_wrap)
         inp_lay.setContentsMargins(Sp.M, 2, 6, 2)
         inp_lay.setSpacing(4)
@@ -3178,10 +4768,8 @@ class GuiApp(QMainWindow):
         self.tabs.currentChanged.connect(
             lambda _i: self._on_tab_change())
 
-        self._chat_tab_active = (self.tabs.currentIndex() == 1)
-
         self.input_entry.set_history(self._history)
-        self.input_entry.setFocus()
+        self._on_tab_change()
         return pane
 
     # ------------------------------------------------------------------
@@ -3197,6 +4785,15 @@ class GuiApp(QMainWindow):
         self.status_lbl.setStyleSheet(
             f'color: {Palette.TEXT_MUTED};')
         sb.addWidget(self.status_lbl, 1)
+
+        for name in ('operator_lbl', 'role_lbl'):
+            lbl = QLabel('')
+            lbl.setObjectName('statusMeta')
+            setattr(self, name, lbl)
+            sb.addPermanentWidget(lbl)
+        self.mode_lbl = QLabel('MULTIPLAYER')
+        self.mode_lbl.setObjectName('statusMeta')
+        sb.addPermanentWidget(self.mode_lbl)
 
         self.clock_lbl = QLabel('')
         self.clock_lbl.setFont(_f_mono(9))
@@ -3221,8 +4818,14 @@ class GuiApp(QMainWindow):
                   activated=lambda: self._select_tab(0))
         QShortcut(QKeySequence('Ctrl+2'), self,
                   activated=lambda: self._select_tab(1))
+        QShortcut(QKeySequence('Ctrl+3'), self,
+                  activated=lambda: self._select_tab(3))
+        QShortcut(QKeySequence('Ctrl+4'), self,
+                  activated=lambda: self._select_tab(2))
         QShortcut(QKeySequence('F5'), self,
                   activated=self._refresh_beacons_async)
+        QShortcut(QKeySequence('Ctrl+K'), self,
+                  activated=self._open_palette)
         QShortcut(QKeySequence('Ctrl+Shift+W'), self,
                   activated=self._prompt_spawnto_selected)
         QShortcut(QKeySequence('Ctrl+C'), self,
@@ -3242,7 +4845,20 @@ class GuiApp(QMainWindow):
         self.tabs.setCurrentIndex(idx)
 
     def _on_tab_change(self) -> None:
-        self._chat_tab_active = (self.tabs.currentIndex() == 1)
+        idx = self.tabs.currentIndex()
+        self._chat_tab_active = (idx == 1)
+        # Listeners and AI own their inputs; the beacon command
+        # bar would only be confusing there.
+        if hasattr(self, 'input_bar'):
+            self.input_bar.setVisible(idx in (0, 1))
+        if idx == 4:
+            self.ai_panel.entry.setFocus()
+        elif idx == 3:
+            self.graph_view.setFocus()
+        elif idx == 2:
+            self.listener_tree.setFocus()
+        elif idx in (0, 1):
+            self.input_entry.setFocus()
         self._update_input_prompt()
         self._update_input_state()
 
@@ -3644,9 +5260,13 @@ class GuiApp(QMainWindow):
             else:
                 beacon_cell = f"{dot}  {b['id']}"
 
+            priv = (b.get('privilege') or 'user').lower()
+            if b.get('elevated'):
+                priv += '!'
             item = QTreeWidgetItem([
                 beacon_cell,
                 b.get('display_name') or '?',
+                priv,
                 plat,
                 age_s,
                 view_text,
@@ -3677,6 +5297,9 @@ class GuiApp(QMainWindow):
                 f"check-ins   : {checkins}\n"
                 f"last seen   : {age_s} ago\n"
                 f"spawnto     : {spawnto_note}\n"
+                f"privilege   : {priv}\n"
+                f"integrity   : {b.get('integrity') or '?'}\n"
+                f"parent      : {b.get('parent_name') or '?'}\n"
                 f"fingerprint : {fp}…"
             )
 
@@ -3702,20 +5325,30 @@ class GuiApp(QMainWindow):
             else:
                 view_color = QColor(Palette.WARN)
 
-            for c in range(5):
+            if priv.startswith('system'):
+                priv_color = QColor(Palette.ERR)
+            elif priv.startswith('root'):
+                priv_color = QColor(Palette.PRIV_ROOT)
+            elif priv.startswith('admin'):
+                priv_color = QColor(Palette.PRIV_ADMIN)
+            else:
+                priv_color = QColor(Palette.TEXT_MUTED)
+
+            for c in range(6):
                 item.setToolTip(c, tip)
 
             if live:
                 tint = QColor(Palette.OK)
                 tint.setAlpha(14)
-                for c in range(5):
+                for c in range(6):
                     item.setBackground(c, QBrush(tint))
 
             item.setForeground(0, QBrush(beacon_color))
             item.setForeground(1, QBrush(body_color))
-            item.setForeground(2, QBrush(QColor(Palette.TEXT_MUTED)))
+            item.setForeground(2, QBrush(priv_color))
             item.setForeground(3, QBrush(QColor(Palette.TEXT_MUTED)))
-            item.setForeground(4, QBrush(view_color))
+            item.setForeground(4, QBrush(QColor(Palette.TEXT_MUTED)))
+            item.setForeground(5, QBrush(view_color))
 
             self.tree.addTopLevelItem(item)
 
@@ -4101,6 +5734,18 @@ class GuiApp(QMainWindow):
             c._cmd_halt(parts)
         elif cmd == 'operators':
             c._cmd_operators(parts)
+        elif cmd == 'ai':
+            self.sig_post.emit(lambda: self._select_tab(4))
+            if len(parts) > 1 and parts[1].lower() in (
+                    'config', 'setup', 'configure'):
+                c._cmd_ai(parts)
+            elif len(parts) > 1:
+                q = ' '.join(parts[1:])
+
+                def run_q():
+                    self.ai_panel.entry.setText(q)
+                    self.ai_panel._send()
+                self.sig_post.emit(run_q)
         elif c.current_beacon:
             c._cmd_beacon(parts)
             if cmd in ('sleep', 'workhours', 'kill', 'forget',

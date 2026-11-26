@@ -2,8 +2,8 @@ package protocol
 
 import (
 	"bytes"
-	"runtime"
 	"encoding/json"
+	"runtime"
 )
 
 func (p Profile) Resolved() Profile {

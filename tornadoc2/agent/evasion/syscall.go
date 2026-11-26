@@ -10,8 +10,8 @@ package evasion
 // SetSyscallMethod, read by the Windows syscall primitives in the
 // same package.
 //
-//   "direct"   — call the ntdll stub address directly
-//   "indirect" — jump to the syscall instruction inside ntdll
+//	"direct"   — call the ntdll stub address directly
+//	"indirect" — jump to the syscall instruction inside ntdll
 //
 // The value has no effect on Linux; the variable is still present so
 // the code compiles without build-tagged call sites.

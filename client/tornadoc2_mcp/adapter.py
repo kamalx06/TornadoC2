@@ -209,13 +209,35 @@ class ClientAdapter:
         return (r or {}).get('text') or ''
 
     async def listeners(self):
-        """No dedicated endpoint. Synthesise from the fields
-        the Client cached at banner time."""
-        return {
-            'beacon_port':        getattr(self._client, 'beacon_port', None),
-            'quic_port':          getattr(self._client, 'quic_port', None),
-            'client_tunnel_port': getattr(self._client, 'client_tunnel_port', None),
-        }
+        """List configured listeners from the manager store."""
+        r = await self._post('/api/v1/listeners', {})
+        return (r or {}).get('listeners') or []
+
+    async def listener_get(self, lid):
+        return await self._post(f'/api/v1/listeners/{lid}', {})
+
+    async def listener_create(self, spec):
+        return await self._post('/api/v1/listeners/create',
+                                {'spec': spec})
+
+    async def listener_start(self, lid):
+        return await self._post(
+            f'/api/v1/listeners/{lid}/start', {})
+
+    async def listener_stop(self, lid):
+        return await self._post(
+            f'/api/v1/listeners/{lid}/stop', {})
+
+    async def listener_update(self, lid, patch):
+        return await self._post(
+            f'/api/v1/listeners/{lid}/update', patch)
+
+    async def listener_delete(self, lid):
+        return await self._post(
+            f'/api/v1/listeners/{lid}/delete', {})
+
+    async def listener_certs(self):
+        return await self._post('/api/v1/listeners/certs', {})
 
     async def commands(self, target_os=None):
         payload = {}

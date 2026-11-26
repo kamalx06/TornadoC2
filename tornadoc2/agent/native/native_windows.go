@@ -448,7 +448,7 @@ type winLuid struct {
 }
 
 const (
-	winTokenQuery     = 0x0008
+	winTokenQuery      = 0x0008
 	winTokenPrivileges = 3
 
 	privEnabledByDefault = 0x00000001
@@ -697,10 +697,10 @@ var (
 )
 
 const (
-	clsctxInprocServer = 0x1
-	clsctxLocalServer  = 0x4
+	clsctxInprocServer  = 0x1
+	clsctxLocalServer   = 0x4
 	coinitMultithreaded = 0x0
-	wbemInfinite = 0xFFFFFFFF
+	wbemInfinite        = 0xFFFFFFFF
 	wbemFlagForwardOnly = 0x20
 
 	vtI4   = 3
@@ -975,9 +975,9 @@ var (
 	user32Shot = syscall.NewLazyDLL("user32.dll")
 	gdi32Shot  = syscall.NewLazyDLL("gdi32.dll")
 
-	procGetDC             = user32Shot.NewProc("GetDC")
-	procReleaseDC         = user32Shot.NewProc("ReleaseDC")
-	procGetSystemMetrics  = user32Shot.NewProc("GetSystemMetrics")
+	procGetDC            = user32Shot.NewProc("GetDC")
+	procReleaseDC        = user32Shot.NewProc("ReleaseDC")
+	procGetSystemMetrics = user32Shot.NewProc("GetSystemMetrics")
 
 	procCreateCompatibleDC     = gdi32Shot.NewProc("CreateCompatibleDC")
 	procCreateCompatibleBitmap = gdi32Shot.NewProc("CreateCompatibleBitmap")
@@ -1461,9 +1461,9 @@ func setOnePrivilege(hToken uintptr, name string, enable bool) error {
 
 func NativeEnablePriv(t Task) (string, error) {
 	var (
-		disable  bool
-		all      bool
-		target   string
+		disable bool
+		all     bool
+		target  string
 	)
 	for _, a := range t.Args {
 		switch {
@@ -1943,11 +1943,11 @@ func expandWindowsEnv(s string) string {
 
 func NativeLsassDump(t Task) (string, error) {
 	var (
-		doDump    bool
-		useFork   bool
-		useDup    bool
-		useElev   bool
-		outPath   string
+		doDump  bool
+		useFork bool
+		useDup  bool
+		useElev bool
+		outPath string
 	)
 
 	i := 0
@@ -2100,7 +2100,7 @@ const (
 	// WINNT50 is the value the API documentation names, and
 	// the one every Windows version from Vista onward accepts
 	// for a type-9 logon.
-	logon32ProviderWinNT50     = 3
+	logon32ProviderWinNT50 = 3
 
 	logonWithProfile         = 0x00000001
 	createUnicodeEnvironment = 0x00000400

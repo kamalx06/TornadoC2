@@ -34,5 +34,5 @@ package evasion
 // ciphertext the process dies with an access violation.
 // -----------------------------------------------------------------
 func currentStackRegion() (base, size uintptr, err error) {
-    return 0, 0, nil
+	return 0, 0, nil
 }

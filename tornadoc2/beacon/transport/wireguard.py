@@ -59,6 +59,8 @@ class WireGuardTransport(Transport):
 
     def __init__(self, engine, host, port, config=None):
         super().__init__(engine, host, port, config)
+        self.listener_id = (self.config.get('id') or None)
+        self._last_error = None
         self._server_pubkey = None
         self._private_key = None
         self._peers = {}     # pubkey -> allowed_ips (always /32)
@@ -151,15 +153,18 @@ class WireGuardTransport(Transport):
 
     def start(self):
         if not _PYROUTE2:
+            self._last_error = 'pyroute2 not installed'
             log.error("wireguard: pyroute2 not installed "
                       "(pip install pyroute2)")
             return False
         if os.geteuid() != 0:
+            self._last_error = 'requires root or CAP_NET_ADMIN'
             log.error("wireguard: requires root or CAP_NET_ADMIN")
             return False
 
         import shutil as _shutil
         if _shutil.which('wg') is None:
+            self._last_error = 'wg not found on PATH'
             log.error("wireguard: `wg` not found on PATH — install "
                       "wireguard-tools, or pre-generate the server "
                       "key at .keys/wireguard/server.key")
@@ -169,12 +174,21 @@ class WireGuardTransport(Transport):
             self._private_key = self._load_or_generate_key()
             self._ipr = IPRoute()
             self._wg = WireGuard()
+            # Orphan cleanup: a previous handler may have crashed
+            # leaving the kernel interface behind. If we do not
+            # remove it here, `_setup_interface`'s `link('add')`
+            # silently no-ops, and `addr('add')` fails because the
+            # address is already assigned — producing a listener
+            # that reports success but has no route.
+            self._remove_orphan_interface()
             self._setup_interface()
         except Exception as exc:
+            self._last_error = str(exc)
             log.error("wireguard: setup failed: %s", exc)
             return False
 
         self._running = True
+        self._last_error = None
         log.info("wireguard: listening on %s:%d (subnet %s)",
                  self.host, self.wg_port, self.wg_subnet)
 
@@ -218,6 +232,31 @@ class WireGuardTransport(Transport):
             raise RuntimeError("wireguard: interface missing")
         return idx[0]
 
+    def _remove_orphan_interface(self):
+        """Remove the kernel interface if a previous handler left it.
+
+        Called at the top of start(), after IPRoute is up but
+        before the interface is added. A crashed handler leaves
+        the interface and its addresses in the kernel; pyroute2's
+        `link('add')` on an existing interface is a no-op, and
+        `addr('add')` on an already-assigned address fails, so
+        without this cleanup the listener would come up
+        successfully but its tunnel would be unreachable.
+        """
+        try:
+            idx = self._ipr.link_lookup(ifname=self.wg_interface)
+        except Exception:
+            return
+        if not idx:
+            return
+        try:
+            self._ipr.link('del', index=idx[0])
+            log.info("wireguard: removed orphan interface %s",
+                     self.wg_interface)
+        except Exception as exc:
+            log.warning("wireguard: orphan cleanup of %s failed: %s",
+                        self.wg_interface, exc)
+
     def _http_loop(self):
         """No-op.
 
@@ -244,12 +283,27 @@ class WireGuardTransport(Transport):
                  self.host, self.port)
 
     def stop(self):
+        """Tear down the interface and release the UDP port.
+
+        link_lookup is used instead of _if_index because a crashed
+        prior handler may already have removed the interface;
+        _if_index raises in that case.
+        """
         self._running = False
-        try:
-            if self._ipr is not None:
-                self._ipr.link('del', index=self._if_index())
-        except Exception:
-            pass
+        if self._ipr is not None:
+            try:
+                idx = self._ipr.link_lookup(ifname=self.wg_interface)
+                if idx:
+                    self._ipr.link('del', index=idx[0])
+            except Exception:
+                pass
         if self._thread is not None:
             self._thread.join(timeout=5.0)
             self._thread = None
+        if self._ipr is not None:
+            try:
+                self._ipr.close()
+            except Exception:
+                pass
+        self._ipr = None
+        self._wg = None

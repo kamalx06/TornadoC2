@@ -199,7 +199,7 @@ The wizard walks through every parameter. For scripted builds, use
 Before opening a pull request:
 
 1. **Build the agent for the platform your change touches.** A
-   change to `agent/core/main.go` should compile for Linux and
+   change to `agent/{windows,linux}/core` should compile for Linux and
    Windows, both amd64 and arm64, without warnings.
 2. **Run both the wizard and the config-file build path.** A
    change to `builder.py` should be exercised through both. The
@@ -493,7 +493,7 @@ If a verb has the same name on both platforms but a different
 implementation — `ps` and `id` are the current examples — put the
 platform-specific halves in `native_linux.go` and
 `native_windows.go` under the same function name, and the dispatcher
-in `agent/core/main.go` calls it without knowing which file it came
+in `agent/{windows,linux}/core` calls it without knowing which file it came
 from.
 
 For a cross-platform file verb in `native_extra.go`:
@@ -576,7 +576,7 @@ vice versa.
 
 ### 2. Register the verb in the dispatch switch
 
-In `agent/core/main.go`, in the `execute` method:
+In `agent/{windows,linux}/core`, in the `execute` method:
 
 ```go
 	case "cat":
@@ -650,9 +650,9 @@ different place depending on which one you are adding.
 | `agent/evasion/*.go` | Runtime evasion primitives: anti-sandbox heuristics, anti-debug checks, anti-VM probes, AMSI patching, ETW patching, PPID spoofing, sleep-mask implementations, indirect syscall stubs, string deobfuscation. **Most new evasion work happens here first** — a new primitive is a new file or a new function in an existing file under this directory. |
 | `agent/evasion/sleepmask_*.go` | Sleep-mask variants. `sleepmask_aesctr.go`, `sleepmask_rc4.go`, and `sleepmask_ekko.go` are the reference implementations. A new mask is a new file here plus a case in the mask dispatcher. |
 | `agent/syscalls/syscall_*.go` | Syscall method implementations. `direct` and `indirect` are the shipped methods; a new method is a new file plus a case in the dispatcher. |
-| `agent/core/main.go` | The call sites. A new evasion primitive is wired in from `Main()` or from the sleep loop, not from a new entry point. |
+| `agent/{windows,linux}/core` | The call sites. A new evasion primitive is wired in from `Main()` or from the sleep loop, not from a new entry point. |
 | `beacon/builder.py` | The build toggle. Every evasion primitive has a matching field in `BeaconBuildConfig` and a matching `-X main.<Name>Raw=` flag. |
-| `agent/stageless/ldflags.go` and `agent/stageless/main.go` | The linker-flag receiver and the `core.Config` copy. |
+| `agent/{windows,linux}/ldflags.go` and `agent/{windows,linux}/main.go` | The linker-flag receiver and the `core.Config` copy. |
 
 **Changing an existing evasion primitive** — a better anti-VM probe,
 a tighter AMSI patch, an updated sleep-mask pattern — is an edit to
@@ -670,9 +670,9 @@ a build-time toggle.
 ### The two-file rule for evasion primitives
 
 An evasion primitive lives in `agent/evasion/` and nowhere else.
-Do not put evasion logic in `agent/core/main.go` — the top-level
+Do not put evasion logic in `agent/{windows,linux}/core` — the top-level
 file calls into the evasion package, not the other way around. The
-current `agent/core/main.go` reads:
+current `agent/{windows,linux}/core` reads:
 
 ```go
 if AntiSandboxEnabled {
@@ -686,7 +686,7 @@ if AntiVm {
 }
 ```
 
-The pattern to match: `agent/core/main.go` holds the *decision* to
+The pattern to match: `agent/{windows,linux}/core` holds the *decision* to
 run the check; `agent/evasion/` holds the *implementation* of the
 check. A contribution that puts the implementation in `core/main.go`
 will be sent back to move it.
@@ -724,7 +724,7 @@ And read it in `stageless/main.go`:
     MyNewEvasion: MyNewEvasionRaw == "true",
 ```
 
-### 4. Read it in `agent/core/main.go`
+### 4. Read it in `agent/{windows,linux}/core`
 
 Add the field to the `Config` struct and copy it into package state
 in `Main(cfg Config)`.
@@ -857,10 +857,10 @@ of them.
 
 | File | What is added |
 |------|---------------|
-| `agent/core/config.go` | One `Config` struct field per build-time value |
-| `agent/core/main.go` | Package vars, `Main()` assignments, one `case` in the `newAgent()` switch |
-| `agent/stageless/ldflags.go` | One package var per field, with default value |
-| `agent/stageless/main.go` | One line in the `core.Config{...}` literal per field |
+| `agent/{windows,linux}/core/config.go` | One `Config` struct field per build-time value |
+| `agent/{windows,linux}/core/vars.go`, `run.go`, `agent.go` | Package var, `Main()` assignment, one `case` in `newAgent()` |
+| `agent/{windows,linux}/ldflags.go` | One package var per field, with default value |
+| `agent/{windows,linux}/main.go` | One line in the `core.Config{...}` literal per field |
 | `beacon/builder.py` | Transport validation plus one `-X main.X=Y` linker flag per field |
 | `beacon/build_manager.py` | One `cfg.X = params.get('x')` line per field |
 | `beacon_handler.py` | One CLI flag per listener port plus one `start()` call |
@@ -879,7 +879,7 @@ For a hypothetical transport named `foo` with two build-time
 values `foo_addr` and `foo_token`:
 
 ```go
-// agent/core/config.go
+// agent/{windows,linux}/core/config.go
 type Config struct {
     ...
     FooAddr  string
@@ -888,7 +888,7 @@ type Config struct {
 ```
 
 ```go
-// agent/core/main.go — package vars
+// agent/{windows,linux}/core — package vars
 var (
     ...
     FooAddr  string
@@ -897,13 +897,13 @@ var (
 ```
 
 ```go
-// agent/core/main.go — Main()
+// agent/{windows,linux}/core — Main()
 FooAddr  = cfg.FooAddr
 FooToken = cfg.FooToken
 ```
 
 ```go
-// agent/core/main.go — newAgent()
+// agent/{windows,linux}/core — newAgent()
 case "foo":
     if FooAddr == "" {
         return nil, errors.New("transport=foo but no FooAddr")
@@ -917,7 +917,7 @@ case "foo":
 ```
 
 ```go
-// agent/stageless/ldflags.go
+// agent/{windows,linux}/ldflags.go
 var (
     ...
     FooAddr  = ""
@@ -926,7 +926,7 @@ var (
 ```
 
 ```go
-// agent/stageless/main.go
+// agent/{windows,linux}/main.go
 core.Main(core.Config{
     ...
     FooAddr:  FooAddr,
@@ -1965,7 +1965,7 @@ Before opening a pull request:
       three answers belong in the transport's section.
 - [ ] **If the change adds a transport, the seven-file glue
       appears in all seven files.** A missing edit in
-      `agent/stageless/main.go` or `beacon/build_manager.py` is
+      `agent/{windows,linux}/main.go` or `beacon/build_manager.py` is
       the most common omission.
 - [ ] **If the change adds a C2 profile, the profile validates
       against the agent's shape walker.** Build an agent that

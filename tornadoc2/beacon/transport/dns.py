@@ -174,6 +174,8 @@ class DNSTransport(Transport):
 
     def __init__(self, engine, host, port, config=None):
         super().__init__(engine, host, port, config)
+        self.listener_id = (self.config.get('id') or None)
+        self._last_error = None
         self.domain = (self.config.get('domain') or 'c2.local').lower()
 
         dns_label = self.config.get('dns_label') or {}
@@ -208,6 +210,7 @@ class DNSTransport(Transport):
         try:
             from dnslib.server import DNSServer
         except ImportError:
+            self._last_error = 'dnslib not installed'
             self.log("dnslib not installed — `pip install dnslib`")
             return False
         try:
@@ -225,23 +228,25 @@ class DNSTransport(Transport):
                 tcp=True,
             )
             self._tcp_server.start_thread()
+        except PermissionError:
+            self._last_error = (
+                f'bind {self.host}:{self.port} denied — port '
+                f'{self.port} needs root or CAP_NET_BIND_SERVICE. '
+                f'Grant it with: sudo setcap '
+                f'cap_net_bind_service=+ep $(which python3), run '
+                f'the handler as root, or use a port above 1023.')
+            self.log(self._last_error)
+            self._cleanup_bind()
+            return False
         except Exception as exc:
-            self.log(f"failed to bind {self.host}:{self.port}: {exc}")
-            if self._server is not None:
-                try:
-                    self._server.stop()
-                except Exception:
-                    pass
-                self._server = None
-            if getattr(self, '_tcp_server', None) is not None:
-                try:
-                    self._tcp_server.stop()
-                except Exception:
-                    pass
-                self._tcp_server = None
+            self._last_error = (
+                f'bind {self.host}:{self.port} failed: {exc}')
+            self.log(self._last_error)
+            self._cleanup_bind()
             return False
 
         self._running = True
+        self._last_error = None
         self._rl_pruner = threading.Thread(
             target=self._rate_prune_loop, daemon=True,
         )
@@ -249,6 +254,20 @@ class DNSTransport(Transport):
         self.log(f"listener on {self.host}:{self.port} "
                  f"zone={self.domain}")
         return True
+
+    def _cleanup_bind(self):
+        if self._server is not None:
+            try:
+                self._server.stop()
+            except Exception:
+                pass
+            self._server = None
+        if getattr(self, '_tcp_server', None) is not None:
+            try:
+                self._tcp_server.stop()
+            except Exception:
+                pass
+            self._tcp_server = None
 
     def stop(self):
         self._running = False
@@ -485,7 +504,9 @@ class DNSTransport(Transport):
         try:
             session = self.engine.get(reply['id'])
             if session is not None:
-                session.transport = 'dns'
+                session.transport = self.name
+                if self.listener_id:
+                    session.listener_id = self.listener_id
         except Exception:
             pass
 

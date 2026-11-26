@@ -16,7 +16,7 @@
 // 16-byte aligned before SYSCALL. Linux does not require SYSCALL
 // alignment, but a signal delivered during the sleep does, and the
 // kernel restores the interrupted frame on the same stack.
-TEXT ·maskedSleepStub(SB), NOSPLIT, $0-8
+TEXT ·maskedSleepStub(SB), NOSPLIT, $0-4
     SUBQ $24, SP
 
     // Load ms (zero-extended into RAX).

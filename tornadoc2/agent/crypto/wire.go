@@ -19,9 +19,9 @@ var wireInfo = []byte("tornadoc2-wire-v2")
 
 type WireSession struct {
 	mu   sync.Mutex
-	peer *ecdh.PublicKey   // server's long-lived public key
-	priv *ecdh.PrivateKey  // current ephemeral keypair
-	key  []byte            // shared secret for `priv`
+	peer *ecdh.PublicKey  // server's long-lived public key
+	priv *ecdh.PrivateKey // current ephemeral keypair
+	key  []byte           // shared secret for `priv`
 }
 
 func NewWireSession(serverPubB64 string) (*WireSession, error) {

@@ -60,12 +60,12 @@ import (
 var dnBootstrapBytes []byte
 
 var (
-	dnOle32 = syscall.NewLazyDLL("ole32.dll")
+	dnOle32   = syscall.NewLazyDLL("ole32.dll")
 	dnMscoree = syscall.NewLazyDLL("mscoree.dll")
 
-	dnCoInitializeEx = dnOle32.NewProc("CoInitializeEx")
-	dnCoUninitialize = dnOle32.NewProc("CoUninitialize")
-	dnCoCreateInstance = dnOle32.NewProc("CoCreateInstance")
+	dnCoInitializeEx    = dnOle32.NewProc("CoInitializeEx")
+	dnCoUninitialize    = dnOle32.NewProc("CoUninitialize")
+	dnCoCreateInstance  = dnOle32.NewProc("CoCreateInstance")
 	dnCLRCreateInstance = dnMscoree.NewProc("CLRCreateInstance")
 )
 
@@ -122,8 +122,8 @@ func dnRelease(obj uintptr) {
 // entryType and entryMethod identify the entry point. The
 // convention is:
 //
-//     entryType   = "<namespace>.<class>"
-//     entryMethod = "<static method accepting string[]>"
+//	entryType   = "<namespace>.<class>"
+//	entryMethod = "<static method accepting string[]>"
 //
 // If entryType is empty, the loader tries the assembly's own
 // declared entry point via ICLRRuntimeHost::ExecuteInDefaultAppDomain,
@@ -169,7 +169,9 @@ func ExecuteDotNetAssemblyInProcess(assembly []byte, entryType, entryMethod, arg
 	// --- ICLRMetaHost::GetRuntime ---
 	ver, _ := syscall.UTF16PtrFromString("v4.0.30319")
 	var pInfo uintptr
-	hr = dnCall(pMetaHost, 3,
+	// ICLRMetaHost: IUnknown(0-2), EnumerateInstalledRuntimes(3),
+	// GetRuntime(4).
+	hr = dnCall(pMetaHost, 4,
 		uintptr(unsafe.Pointer(ver)),
 		uintptr(unsafe.Pointer(&dnIID_ICLRRuntimeInfo)),
 		uintptr(unsafe.Pointer(&pInfo)))
@@ -218,7 +220,17 @@ func ExecuteDotNetAssemblyInProcess(assembly []byte, entryType, entryMethod, arg
 	if args != "" {
 		argsB64 = base64.StdEncoding.EncodeToString([]byte(args))
 	}
-	payload := asmB64 + "|" + argsB64 + "|" + outPath
+	typeB64 := ""
+	methodB64 := ""
+	if entryType != "" {
+		typeB64 = base64.StdEncoding.EncodeToString([]byte(entryType))
+	}
+	if entryMethod != "" {
+		methodB64 = base64.StdEncoding.EncodeToString(
+			[]byte(entryMethod))
+	}
+	payload := asmB64 + "|" + argsB64 + "|" + outPath +
+		"|" + typeB64 + "|" + methodB64
 
 	pathW, _ := syscall.UTF16PtrFromString(bootstrapPath)
 	typeW, _ := syscall.UTF16PtrFromString("TornadoBootstrap.Entry")
@@ -226,9 +238,11 @@ func ExecuteDotNetAssemblyInProcess(assembly []byte, entryType, entryMethod, arg
 	argsW, _ := syscall.UTF16PtrFromString(payload)
 
 	var retCode uint32
-	// ICLRRuntimeHost::ExecuteInDefaultAppDomain.
-	// Vtable index 8. Index 4 is Stop().
-	hr = dnCall(pHost, 8,
+	// ICLRRuntimeHost: Start(3), Stop(4), SetHostControl(5),
+	// GetCLRControl(6), UnloadAppDomain(7), ExecuteInAppDomain(8),
+	// GetCurrentAppDomainId(9), ExecuteApplication(10),
+	// ExecuteInDefaultAppDomain(11).
+	hr = dnCall(pHost, 11,
 		uintptr(unsafe.Pointer(pathW)),
 		uintptr(unsafe.Pointer(typeW)),
 		uintptr(unsafe.Pointer(methodW)),

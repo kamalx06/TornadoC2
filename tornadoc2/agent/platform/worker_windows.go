@@ -157,8 +157,8 @@ func ExecAssemblyOutOfProcess(
 	}
 	defer os.RemoveAll(tmpDir)
 
-	asmPath  := filepath.Join(tmpDir, "a.b64")
-	outPath  := filepath.Join(tmpDir, "o.txt")
+	asmPath := filepath.Join(tmpDir, "a.b64")
+	outPath := filepath.Join(tmpDir, "o.txt")
 	codePath := filepath.Join(tmpDir, "c.txt")
 
 	if err := os.WriteFile(asmPath,

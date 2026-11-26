@@ -5,10 +5,11 @@ from .groq        import GroqProvider
 from .ollama      import OllamaProvider
 from .openai      import OpenAIProvider
 from .openrouter  import OpenRouterProvider
-from .base        import Provider, build_provider, ChatResponse, ToolCall
+from .base        import Provider, build_provider, ChatResponse, ToolCall, StreamEvent
 
 __all__ = [
     'Provider', 'ChatResponse', 'ToolCall', 'build_provider',
+    'StreamEvent',
     'AnthropicProvider', 'ClaudeCodeProvider', 'GeminiProvider',
     'GroqProvider', 'OllamaProvider', 'OpenAIProvider',
     'OpenRouterProvider',

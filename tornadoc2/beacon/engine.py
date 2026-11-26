@@ -125,7 +125,14 @@ class BeaconEngine:
                 "session and cookie. Run the child under a different "
                 "user or on a different host to give it its own "
                 "session.", child_fp[:16])
-        return self.handle_checkin(child_payload)
+        resp = self.handle_checkin(child_payload)
+        try:
+            sess = self.get(resp['id'])
+            if sess is not None:
+                sess.parent_id = parent_session.id
+        except Exception:
+            pass
+        return resp
 
     # ------------------------------------------------------------------
     # Pivot attachment

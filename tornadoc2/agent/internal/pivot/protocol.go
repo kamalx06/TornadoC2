@@ -17,7 +17,9 @@ import (
 )
 
 const PivotVersion = "v2"
+
 var hkdfInfo = []byte("tornadoc2-pivot-v1")
+
 const TimestampSkew = 300 * time.Second
 
 type FrameIO interface {
@@ -36,9 +38,9 @@ type HelloMsg struct {
 
 type AckMsg struct {
 	Version string `json:"pivot,omitempty"`
-	Epk string `json:"epk"`
-	Sig string `json:"sig"`
-	Ts  int64  `json:"ts"`
+	Epk     string `json:"epk"`
+	Sig     string `json:"sig"`
+	Ts      int64  `json:"ts"`
 }
 
 type ErrMsg struct {

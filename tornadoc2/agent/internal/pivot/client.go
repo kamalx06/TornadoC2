@@ -9,7 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"time"
-)	
+)
 
 func ClientHandshake(io FrameIO,
 	signingKey *ecdsa.PrivateKey,

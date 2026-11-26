@@ -11,7 +11,7 @@ set -uo pipefail
 #   * Python 3.7+ and the handler's Python dependencies
 #     (flask, cryptography, dnslib, aioquic, simple-websocket,
 #     pyroute2)
-#   * The Go 1.24 toolchain and garble
+#   * The Go 1.25.8 toolchain and garble
 #   * wireguard-tools and the WireGuard kernel module
 #   * libcap2-bin (for the setcap grants the ICMP and WireGuard
 #     transports need)
@@ -549,16 +549,16 @@ fi
 GO_VERSION_ACTUAL="$(go env GOVERSION 2>/dev/null | sed 's/^go//')"
 ok "go: $(go version)"
 
-# The agent's go.mod declares `go 1.24`. Reject anything older so the
+# The agent's go.mod declares `go 1.25.8`. Reject anything older so the
 # failure is legible here rather than three minutes into a build.
 GO_MAJOR="${GO_VERSION_ACTUAL%%.*}"
 GO_REST="${GO_VERSION_ACTUAL#*.}"
 GO_MINOR="${GO_REST%%.*}"
 if [[ -n "$GO_MAJOR" && -n "$GO_MINOR" ]]; then
     if (( GO_MAJOR < 1 )) || (( GO_MAJOR == 1 && GO_MINOR < 24 )); then
-        die "Go ${GO_VERSION_ACTUAL} is older than the 1.24 the agent \
+        die "Go ${GO_VERSION_ACTUAL} is older than the 1.25.8 the agent \
 requires. Debian 13, Ubuntu 24.04, RHEL 9, Fedora 40, and Arch ship \
-Go 1.24+. An older release needs the official tarball from \
+Go 1.25.8+. An older release needs the official tarball from \
 https://go.dev/dl/"
     fi
 fi
@@ -678,7 +678,7 @@ else
 fi
 
 # --------------------------------------------------------------------
-# Linux capabilities for the ICMP and WireGuard transports
+# Linux capabilities for DNS:53, ICMP and WireGuard
 
 PYTHON_BIN="$(command -v python3 || true)"
 say "checking transports that need elevated network capabilities"
@@ -698,11 +698,19 @@ elif command -v setcap >/dev/null 2>&1; then
         warn "CAP_NET_ADMIN not set — the WireGuard transport will refuse to start."
         warn "    grant with:  sudo setcap cap_net_admin+ep $PYTHON_BIN"
     fi
+    if getcap "$PYTHON_BIN" 2>/dev/null | grep -q "cap_net_bind_service"; then
+        ok "CAP_NET_BIND_SERVICE already set on $PYTHON_BIN"
+    else
+        warn "CAP_NET_BIND_SERVICE not set — a DNS listener on port 53 will refuse to start."
+        warn "    grant with:  sudo setcap cap_net_bind_service=+ep $PYTHON_BIN"
+        warn "    (or use a listener port above 1023)"
+    fi
 else
     warn "setcap not found (libcap2-bin on Debian, libcap on RHEL,"
     warn "libcap on Arch). Install it and run:"
     warn "    sudo setcap cap_net_raw+ep $PYTHON_BIN"
     warn "    sudo setcap cap_net_admin+ep $PYTHON_BIN"
+    warn "    sudo setcap cap_net_bind_service=+ep $PYTHON_BIN"
 fi
 
 # --------------------------------------------------------------------

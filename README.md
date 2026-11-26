@@ -44,6 +44,7 @@ loss, or legal consequences arising from the use of this project.
 - [Operational Security](#operational-security)
 - [Threat Model](#threat-model)
 - [Architecture](#architecture)
+- [Listener Management](#listener-management)
 - [Transports](#transports)
 - [Pivot Transports](#pivot-transports)
 - [Requirements & Installation](#requirements--installation)
@@ -175,6 +176,8 @@ The design choices in this framework are consequences of that decision, not inde
 
 **Startup-time handler configuration.** Profiles are read once, at handler start, and never again. No hot-reload, no runtime dispatch state, no "reload profiles" command. The handler runs the profile set the operator chose, for the duration of the run.
 
+**Operator-managed listeners.** A beacon-facing port is a resource, not a command-line flag. Listeners are created, started, stopped and deleted from the console, persisted to `listeners.json`, and restarted on the next boot if enabled. A crash or `kill -9` does not lose them, and one that fails to bind does not take the others down.
+
 **Ten transports.** Because the egress path is not always HTTPS. A network that permits HTTP/3 but blocks TCP/443, or permits ICMP but nothing else, is a real network, and it is not a network a generalist tool can be configured to work against. Ten is the number of transports I have actually needed at various points.
 
 **Concurrent multi-profile support.** Restarting a team server mid-engagement kills every live session. Running two servers doubles the operational surface and confuses the team. The framework assumes the operator wants to build new agents against a different profile while old agents keep running against the old one, and it was built to make that workflow the default rather than an exception.
@@ -183,7 +186,7 @@ The design choices in this framework are consequences of that decision, not inde
 
 **A team server that treats the team as the point.** The operator side is a coordination server, not a single-user console with a team feature bolted on. RBAC with a `guardian` role distinct from `admin`, because terminating an engagement is a different responsibility from running one. A hash-chained audit log with per-mutation correlation on every response, because what a team did during an engagement matters after the engagement ends. A shared credential vault where validation runs on the beacon rather than on the team server, because a bind attempt from the wrong network either fails silently or succeeds against a system the engagement is not authorised to touch. Owner-restricted task cancel so one operator cannot quietly remove another's queued work. Session viewers so an operator knows when someone else is on the same beacon. Engagement-wide and per-beacon notes, a content-addressed loot store, a chat with file sharing and forensic preservation, webhook notifications, and a dead-man's switch that only the guardian can arm. None of these touch the agent. All of them assume the operator is working as part of a team, even when they are not.
 
-**Three frontends plus an MCP bridge, no web UI.** A terminal REPL as the reference implementation, a Qt GUI as a presentation layer over the same client, and an AI console that drives the same methods through an agent loop. A standalone MCP server extends the read-only and safe-mutation surface to external MCP clients. Not a browser tab. Not a second protocol. Not a plugin framework. Every frontend and the MCP bridge consume the same `Client` methods, the same capability checks, and the same audit chain. The AI console is the one frontend that lives outside the human — it takes the operator's own LLM provider and key, keeps both on the operator's workstation, and gates every high-signal action behind a per-tool confirmation prompt. The MCP server goes one step further: it exposes only the read-only and safe-mutation tiers, because the approval prompt has nowhere to appear in the MCP protocol and a Tier-3 tool that ran silently would defeat the entire gate.
+**Three frontends plus an MCP bridge, no web UI.** A terminal REPL as the reference implementation, a Qt GUI as a presentation layer over the same client, and an AI console that drives the same methods through an agent loop. A standalone MCP server extends the read-only and safe-mutation surface to external MCP clients. Not a browser tab. Not a second protocol. Not a plugin framework. Every frontend and the MCP bridge consume the same `Client` methods, the same capability checks, and the same audit chain. The AI console is the one frontend that lives outside the human — it takes the operator's own LLM provider and key, keeps both on the operator's workstation, and gates every high-signal action behind a per-tool confirmation prompt. The MCP server goes one step further: it exposes only the read-only and safe-mutation tiers, because the approval prompt has nowhere to appear in the MCP protocol and a Tier-3 tool that ran silently would defeat the entire gate. Listener lifecycle is the exception inside Tier 2: list/get/start/stop/update are always available, while `create_listener` and `delete_listener` sit behind two `ai.json` opt-in booleans that default to `false`.
 
 **An honest README.** Every transport section ends with a threat model that says what the transport protects against and what it does not. Every feature that is not implemented is named as such. The sections on limits are not hedging. They are the record of what a defender looks for and what this framework does not do about it.
 
@@ -254,7 +257,7 @@ The rest of this document describes how it works. This section describes why it 
   on the same certificate, and each receives the response shape
   its own profile declared. There is no "active profile" for the
   handler — the path is the profile. Narrow to a single profile
-  with `--beacon-profile <name>` if strict isolation is wanted.
+  with a listener `--profiles` subset if strict isolation is wanted.
   The profile set is fixed at startup: profiles are read once
   when the handler boots and never reloaded at runtime. Adding
   or changing a profile requires a restart, which the queue and
@@ -454,9 +457,9 @@ BOF and .NET assembly execution are Windows-only.
 | **Loot store** | Content-addressed shared storage for files collected from beacons · Every verified `download` pushes the file to the server automatically; `--no-loot` opts out · `loot upload <local_path>` (alias `lootstore upload`) pushes a file that already exists on the operator's machine into the store under its SHA-256 · Any operator with `loot.use` retrieves by SHA-256 · Provenance carried in a `<hash>.meta` sidecar: source path, source beacon, uploader · Operators may delete only their own loot; admins may delete any, with an `override=admin` audit marker · Chunked upload path removes the per-file request-body limit — 128 GiB per file, 64 TiB cumulative, 32768 files, bounded by disk · Single-shot path for files ≤ 16 MiB · Capability granted to `operator` and `admin`; absent from `viewer` and `guardian` · Every operation written to the audit chain under `loot.*` |
 | **Dead-man's switch** | Runtime-armable auto-shutdown watchdog · Held by the `guardian` role only — admins and every other remote role cannot reach the switch · Guardian sub-verbs: `arm`, `arm-until`, `reset`, `disable`, `warn`, `halt`, `shred` · Local console retains the same verbs · Persists to `team_ca/deadman.json` · Wipes the `TornadoC2` repository tree on shutdown · Eleven deletion modes across traditional overwrite patterns (`fast`, `random`, `dod`, `gutmann`, `nist`, `schneier`, `hmg`, `bsi`) and modern-media structural techniques (`trim` for TRIM/discard, `scrub` for prealloc + O_DIRECT + TRIM, `crypto` for LUKS header destruction) · Optional host `shutdown` or `reboot` · Manual trigger with the top-level `halt` command |
 | **SOCKS5 pivot** | Client-side SOCKS5 listener on the operator's `127.0.0.1` · Tunnel carries bytes over the operator API to the team server · Team server bridges to a beacon dial-back on the pivot listener · Beacon opens the target connection from the target's network |
-| **Session graph** | Engagement-wide view of which beacons share a user, domain, or subnet · Four render modes: `tree`, `flat`, `summary`, `path` · Data model drives a future HTML/SVG renderer |
+| **Session graph** | Engagement map of shared user/domain/subnet, relay and process parentage, privilege, elevation, integrity and session · Text modes `tree`, `flat`, `summary`, `path` and a JSON mode for the GUI graph · Privilege collected at every check-in |
 | **Desktop notifications** | New beacon check-in, kill-deadline proximity, scheduled-task completion · Backends: `notify-send`, `terminal-notifier`, AppleScript, `ntfy.sh` |
-| **AI console and MCP server** | `beacon-client.py ai` opens an agent loop backed by the operator's own provider — `anthropic`, `openai`, `openrouter`, `gemini`, `groq`, `ollama`, `claude_code`, or `claude_code`'s one-shot synthesis mode. Configuration lives at `~/.tornadoc2/ai.json` (0600) on the workstation and never leaves it. Thirty-four tools across three tiers — 15 read-only, 10 safe-mutation, 9 approval-gated. Every Tier-3 call (`kill_beacon`, `killall_beacons`, `run_bof`, `creds_reveal`, `creds_validate`, file transfer, screenshot) prompts for a per-tool confirmation word before dispatch; `kill_beacon` requires the exact beacon ID, `killall_beacons` requires `yes` followed by the match count. The `mcp_allow_verbs` and `mcp_allow_bofs` allowlists bound the AI's mutation scope; a verb not on the list is refused by the dispatcher before the task reaches the queue. `python -m tornadoc2_mcp` exposes the Tier-1 and Tier-2 tools over stdio for external MCP clients — the Tier-3 tools are deliberately absent because the approval prompt has nowhere to appear in the MCP protocol. **No server-side change**: the AI console and MCP server consume the same `.cfg` the CLI does |
+| **AI console and MCP server** | `beacon-client.py ai` opens an agent loop backed by the operator's own provider — `anthropic`, `openai`, `openrouter`, `gemini`, `groq`, `ollama`, `claude_code`, or `claude_code`'s one-shot synthesis mode. Configuration lives at `<repo>/client/.tornadoc2/ai.json` (0600) on the workstation and never leaves it; `ai config` and GUI `Edit › AI settings` edit it without hand-written JSON. Forty-three tools across three tiers — 16 read-only, 18 safe-mutation, 9 approval-gated. Every Tier-3 call (`kill_beacon`, `killall_beacons`, `run_bof`, `creds_reveal`, `creds_validate`, file transfer, screenshot) prompts for a per-tool confirmation word before dispatch; `kill_beacon` requires the exact beacon ID, `killall_beacons` requires `yes` followed by the match count. The `mcp_allow_verbs` and `mcp_allow_bofs` allowlists bound the AI's mutation scope; a verb not on the list is refused by the dispatcher before the task reaches the queue. `python -m tornadoc2_mcp` exposes the Tier-1 and Tier-2 tools over stdio for external MCP clients — the Tier-3 tools are deliberately absent because the approval prompt has nowhere to appear in the MCP protocol. Listener lifecycle is fully exposed (list, get, create, start, stop, update, delete); create and delete are gated by `mcp_allow_listener_create` / `mcp_allow_listener_delete`, both `false` by default. **No server-side change**: the AI console and MCP server consume the same `.cfg` the CLI does |
 
 **Not supported:**Interactive streaming sessions or plugin execution
 over a live socket. These are deliberate omissions — the beacon's
@@ -495,14 +498,24 @@ config file for repeatable builds.
 
 ### Startup-time configuration
 
-The same principle applies one level up, on the handler side. C2
+The same principle applies to profiles on the handler side. C2
 profiles are read once, when the handler starts, and never again.
 The directory scan, the path registration, and the per-path shape
 map are all one-time operations at boot. There is no file watcher,
 no hot-reload, no "reload profiles" command on the console.
 
+**Listener lifecycle is the deliberate exception.** A beacon-facing
+listener is an operator-managed resource, persisted to
+`listeners.json` and created, started, stopped and deleted at
+runtime with the `listeners` command. Opening a new port does not
+restart the handler. The store is read at boot and every listener
+whose `enabled` flag is true starts; one that fails (port in use,
+missing certificate, no `CAP_NET_ADMIN`) is marked `error` without
+stopping the rest. Listeners survive a crash and a `kill -9`.
+
 To add, change, or remove a profile, you stop the handler, edit the
-directory, and start it again. That is the whole workflow.
+directory, and start it again. To change a listener, use
+`listeners`; see [Listener Management](#listener-management).
 
 **Why this is deliberate.** A profile is not just a fingerprint —
 it is a set of routes the handler registers, a per-path dispatch
@@ -670,12 +683,15 @@ team-server-wide decision.
 ### Concurrent multi-profile handlers
 
 A consequence of the path-based dispatch described under
-[C2 Profiles](#c2-profiles): a single handler serves every profile
-under `profiles/c2/` at once. A beacon built against a `chrome`
-profile and a beacon built against a `slack` profile reach the same
-listener, on the same port, on the same certificate. Each request
-is routed to the profile that declared its path, and each response
-is shaped by that profile.
+[C2 Profiles](#c2-profiles): the path→profile map is per-listener.
+A listener may serve every profile it can discover, and the
+handler's registered route table is the union across running
+listeners. A beacon built against a `chrome` profile and a beacon
+built against a `slack` profile can reach the same listener, on
+the same port, on the same certificate; each request is routed to
+the profile that declared its path, and each response is shaped by
+that profile. A listener can also be narrowed to a profile subset,
+so a noisy and a quiet beacon can live on separate ports.
 
 There is no "active profile" state on the handler. The path *is* the
 profile. This is different from every other C2 framework in the
@@ -796,19 +812,22 @@ sleep cycle, so two consecutive sleeps never produce the same
 ciphertext.
 
 **`rc4` and `aes-ctr` — Linux and Windows.** The agent locates the
-executable segment, flips it to read/write with `VirtualProtect`
-on Windows or `mprotect` on Linux, encrypts the region above a
-fixed tail with a per-cycle key, sets the region back to
-read/execute, and calls a native sleep stub that does not enter
-the Go runtime. On return, the segment is decrypted and restored.
+executable segment, flips it to read/write/execute for the
+transform, encrypts the region above a fixed tail with a
+per-cycle key, and restores read/execute. Windows runs a native
+sleep stub in the unencrypted tail.
 
-Both modes leave a fixed tail of the executable segment
-unencrypted because the sleep stub lives there. The Go linker
-places functions in a stable-enough order that the check at
-runtime refuses the build if the stub lands outside the tail; the
-build error names the function and the tail bounds. Do not
-increase the mask coverage by removing the check — it is the only
-thing turning an unexplained crash into an actionable error.
+Linux uses a detached helper: the agent re-executes itself, the
+helper attaches to every thread with `ptrace`, writes the masked
+bytes through `process_vm_writev`, sleeps, decrypts, and detaches.
+Nothing executes masked code while the process is frozen, so the
+old cross-thread fault window is gone. If `ptrace` is unavailable
+the agent logs once and falls back to the in-process stub.
+
+Both modes leave a fixed tail unencrypted because the stub lives
+there, and the runtime check refuses a build whose stub is
+outside the tail. The check turns a crash into an actionable
+error; keep it.
 
 **`cronos` — Windows amd64 only.** The agent converts its calling
 thread to a fiber, creates a second fiber whose entry point is a
@@ -840,9 +859,28 @@ in `currentStackRegion` in `agent/evasion/sleepmask_stack_windows.go`
 and is the same for every sleep-mask design that runs on the Go
 runtime.
 
-- **Indirect syscalls.** On Windows, the agent reads the system
-  service number out of the ntdll stub without executing it, then
-  jumps directly to the `syscall` instruction inside ntdll.
+- **Indirect syscalls.** On Windows amd64, the allocator, writer
+  and thread creator use raw Nt* calls. The SSN is parsed from
+  the ntdll export table without executing the stub; a hooked
+  stub is resolved from its nearest clean neighbour, and a
+  `syscall;ret` site is picked from a real stub. Resolution
+  failure falls back to the direct stub. Windows arm64 uses
+  `syscall.SyscallN`, and Linux maps the allocator to `mmap`.
+
+**Runtime hygiene.** Without adding verbs, the agent:
+
+- strips the operator's session markers (`SSH_*`, `TMUX`, `STY`,
+  `TERM_PROGRAM`, `PWD`, `GODEBUG`, shell history) from every
+  child environment;
+- sets the Linux main-thread `comm` to `kworker/u8:1` so `ps`
+  does not show the build artifact name;
+- sends a browser-shaped default `Accept`, `Accept-Language` and
+  cache headers on HTTP, QUIC, WebSocket and DoH whenever the
+  profile does not override them;
+- isolates panics in check-in, task execution and the run-loop
+  steps, so one bad task or transport cannot kill the beacon;
+- retries a failed result upload three times and keeps up to 200
+  undelivered results in memory for the next loop iteration.
 
 ### Self-deletion
 
@@ -960,6 +998,7 @@ never protect against.
 | Forensic analyst after the fact | Reads the disk, the memory, the logs | Self-deletion; kill deadline; dead-man's switch |
 | Another operator on the team server | Has an operator credential | RBAC; audit chain; per-beacon ownership rules |
 | Hostile operator with a valid credential | Same as above | The audit chain is the record; there is no hiding |
+| Operator opens a listener on an unexpected port | Has `listener.manage` | Every create names type, bind address and caller in the audit chain under `listener.create`; `listener.start`/`stop`/`delete` follow |
 
 ### What the framework protects against
 
@@ -1173,13 +1212,103 @@ on `PATH`, the handler exits during first-run certificate generation.
 
 ---
 
+## Listener Management
+
+Beacon-facing transports are operator-managed resources. They are
+not CLI flags and they are not created implicitly at boot. The
+console is the only entry point.
+
+### The store
+
+`listeners.json` lives at the repository root, beside `logs/`.
+It is created on first boot as `{"version": 1, "listeners": []}`,
+mode `0600`, and is gitignored. Writes are atomic (`.tmp` →
+`fsync` → `.bak` → `os.replace`). Runtime fields (`status`,
+`started_at`, `error_message`) are never persisted; a restart
+comes back `stopped`, then runs or fails again.
+
+The team server boots with zero beacon listeners on a fresh
+checkout. At boot it reads the store and starts every listener
+whose `enabled` flag is true. Boot is per-listener independent: a
+port collision, a missing certificate, or an absent
+`CAP_NET_ADMIN` marks that listener `status='error'` with the
+reason and does not prevent the others from starting. `kill -9`
+does not lose a configuration; the next boot retries it.
+
+### RBAC
+
+| Role | View | Create / start / stop / update | Delete |
+|------|------|-------------------------------|--------|
+| `operator` | yes | yes | yes |
+| `admin` | yes | yes | yes |
+| `local` | yes | yes | yes |
+| `viewer` | no | no | no |
+| `guardian` | no | no | no |
+
+`viewer` and `guardian` do not see the `listeners` command in
+`help`; every route returns 403 with an `X-Audit-Id`. Every
+mutation and every refusal writes one audit entry under
+`listener.<verb>` with the caller's identity. Route errors map to
+404 (unknown id), 400 (bad schema), 409 (name or port collision,
+invalid state), 500 (bind failure).
+
+### Per-type schema
+
+| Type | Required | Optional | Bind |
+|------|----------|----------|------|
+| `http` | `name`, `port`, `tls.cert_path`, `tls.key_path` | `host`, `public_host`, `profiles`, `tls.mode` (`server`/`mtls`), `tls.ca_path` (mTLS only) | TCP |
+| `quic` | same as http | same as http | UDP |
+| `websocket` | `name`, `port`, `tls.cert_path`, `tls.key_path` | `tls.mode` (`server`/`none`), `profiles` | TCP |
+| `dns` | `name`, `port`, `domain` | `host`, `profiles` (single `dns` profile) | UDP + TCP |
+| `icmp` | `name`, `public_host` | `profiles` (single `dns` profile) | raw socket |
+| `wireguard` | `name`, `port` | `host`, `subnet`, `server_tunnel_ip`, `interface` | UDP |
+
+`tls.mode` defaults to `server`; `wireguard` port defaults to
+51820 and subnet to `10.99.0.0/24`. Cert, key and CA paths must
+resolve under `<repo>/tls_certs` or `<repo>/mtls_certs`. Names are
+`[A-Za-z0-9._-]{1,64}`. Ids are generated once as `lst_<8 hex>`
+and never reused; build configs still speak `url` /
+`dns_domain` / `wireguard_*`, not ids.
+
+### Port collisions
+
+Two listeners conflict when they use the same port and their
+protocol sets overlap. `dns` binds UDP and TCP, so it conflicts
+with anything on the same port. `quic`, `wireguard` and `icmp`
+are UDP-only; `http` and `websocket` are TCP-only. Creating an
+enabled listener on a running listener's port is refused with the
+conflicting id named; disabling it (`--no-enabled`) is allowed.
+`stop` releases the port synchronously (`shutdown` + close, or
+interface teardown), so a new listener can reuse it immediately.
+
+### WireGuard recovery
+
+`start()` sweeps an orphan interface with `link_lookup` +
+`link('del')` before adding its own, because a crashed process
+leaves the kernel device and addresses behind. `stop()` uses the
+same idempotent lookup and nulls the pyroute2 handles.
+
+### Migration from CLI flags
+
+`--dns-port`, `--dns-domain`,
+`--beacon-quic-port`, `--ws-port`, `--ws-host`, `--icmp`,
+`--wireguard`, `--wireguard-port`, `--wireguard-subnet`,
+`--wireguard-server-ip`, `--beacon-mtls-ca`, `--beacon-mtls-dir`,
+`--beacon-mtls-server-cert`, `--beacon-mtls-server-key` and
+`--beacon-profile` are accepted but ignored. A non-default value
+prints one warning at boot. Nothing is synthesised from a flag;
+recreate the listener once with `listeners create`.
+
+DoH rides the DNS listener and SMB/TCP pivots stay beacon-side;
+they are not listener types.
+
 ## Transports
 
 The engine is transport-agnostic. Ten transports ship in-tree.
 
 ### HTTP (default)
 
-`beacon/listener.py` — `BeaconListener`. Runs on `--beacon-port`,
+`beacon/listener.py` — `BeaconListener`. Runs on the configured listener port,
 terminates TLS, reuses the handler's certificate material. ALPN
 advertises only `http/1.1` because Werkzeug cannot parse the HTTP/2
 preface. The Go client is configured to fall back cleanly.
@@ -1325,7 +1454,7 @@ QUIC stack does not implement.
 ### WebSocket
 
 `beacon/transport/websocket.py` — `WebSocketListener`. Runs on
-`--ws-port`, terminates TLS itself, and serves a single WebSocket
+its own listener port, terminates TLS itself, and serves a single WebSocket
 endpoint — `/ws` by default, overridable by a C2 profile's
 `beacon_path`. The wire body inside each frame is identical to the
 HTTP transport's JSON body, so wire encryption and malleable shaping
@@ -1363,7 +1492,7 @@ have carried over a plain request/response pair.
 
 | Flag | Default | Effect |
 |------|---------|--------|
-| `--ws-port <n>` | *(none)* | Bind the WebSocket listener to this TCP port. Uses the same certificate material as the HTTP listener |
+| `--ws-port <n>` | *(none)* | Legacy: WebSocket listener port |
 | `--ws-host <addr>` | *(none)* | Bind address. Defaults to `--host` |
 
 **Build invocation (agent side):**
@@ -1373,7 +1502,7 @@ beacon-build linux amd64 --transport websocket \
         --url https://c2.example.com:8884
 ```
 
-The `--url` port must match the handler's `--ws-port`. The scheme is
+The `--url` port must match the WebSocket listener's port. The scheme is
 converted to `wss://` at dial time by the client, so the same value
 the operator typed as the callback URL works for both HTTP and
 WebSocket builds.
@@ -1476,9 +1605,9 @@ like any other VPN traffic on the wire.
 
 | Flag | Default | Effect |
 |------|---------|--------|
-| `--wireguard` | off | Enable the WireGuard listener |
-| `--wireguard-port <n>` | `51820` | UDP port for the WireGuard listener |
-| `--wireguard-subnet <cidr>` | `10.99.0.0/24` | Tunnel subnet. The server takes the first usable address |
+| `--wireguard` | off | Legacy: enable the WireGuard listener |
+| `--wireguard-port <n>` | `51820` | Legacy: WireGuard UDP port |
+| `--wireguard-subnet <cidr>` | `10.99.0.0/24` | Legacy: tunnel subnet |
 | `--wireguard-server-ip <ipv4>` | `10.99.0.1` | Server IP inside the tunnel. Must match the build's `wireguard_server_tunnel_ip` / `--wireguard-server-tunnel-ip` value |
 
 **Build flags (agent side):**
@@ -1505,7 +1634,7 @@ WireGuard fields, and where each comes from:
 | `--wireguard-agent-privkey` | The agent's WireGuard private key, base64. Generated out of band with `wg genkey`. |
 | `--wireguard-tunnel-ip` | The agent's own address inside the tunnel. `10.99.0.2` for the first agent. |
 | `--wireguard-server-tunnel-ip` | The server's address inside the tunnel. Defaults to `10.99.0.1`. Must match the handler's `--wireguard-server-ip`. |
-| `--wireguard-inner-port` | The HTTPS port the agent dials on the server's tunnel IP. Must match the handler's `--beacon-port`. |
+| `--wireguard-inner-port` | The HTTPS port the agent dials on the server's tunnel IP. Must match the inner HTTP listener's port. |
 
 **Key distribution.** Unlike every other transport, the WireGuard
 keypairs are not generated by the builder. The server generates its
@@ -1568,8 +1697,8 @@ detection set. The tunnel protects the content, not the protocol.
 
 ### DNS TXT
 
-`beacon/transport/dns.py` — `DNSTransport`. Runs on `--dns-port`,
-serves TXT records for a configured `--dns-domain`. Opt-in: both
+`beacon/transport/dns.py` — `DNSTransport`. Runs on the `dns` listener port,
+serves TXT records for a configured zone. Opt-in: both
 flags must be set. Wire format (labels, left to right):
 
 ```
@@ -1600,7 +1729,7 @@ chunk. The server sends an empty TXT record as an ACK for chunks
 The transport allows up to 1000 chunks per transfer.
 
 **UDP with a TCP fallback.** The listener binds both a UDP and a
-TCP socket on `--dns-port`. The agent sends every chunk over UDP
+TCP socket on the listener's port. The agent sends every chunk over UDP
 first; when a UDP response carries the DNS TC (truncated) bit, the
 client retries that chunk over TCP. This matters because a TXT
 reply larger than 512 bytes does not fit in a plain UDP packet and
@@ -1694,9 +1823,9 @@ whitelisting them exposes the C2 on the whitelist.
 **The C2 must still run the DNS transport.** The public resolver
 forwards to the C2's authoritative NS on UDP/53 and, when a TXT
 reply exceeds the 512-byte UDP ceiling, retries on TCP/53. The
-Python `DNSTransport` binds both sockets on `--dns-port` with no
+Python `DNSTransport` binds both sockets on the listener's port with no
 additional configuration. Enable the DNS transport with
-`--dns-port 53 --dns-domain c2.example.com` as usual. The DoH
+`listeners create dns <name> --port 53 --domain c2.example.com` as usual. The DoH
 client is the only side that changes.
 
 From the C2's perspective a DoH-forwarded query is byte-identical
@@ -2870,7 +2999,7 @@ match the token on the child.
   launch to generate the server keypair. Not required at runtime
   after that; if the key file at `.keys/wireguard/server.key` is
   pre-generated, the handler starts without the tool present
-- **Go toolchain 1.24+** — compiles agents locally and for remote
+- **Go toolchain 1.25.8+** — compiles agents locally and for remote
   operators
 
 **Operator workstation (runs the client):**
@@ -3032,7 +3161,7 @@ waste.
 
 **Team server** — `install-deps-server.sh`. Installs the Python
 handler's dependencies (flask, cryptography, dnslib, aioquic,
-simple-websocket, pyroute2), the Go 1.24+ toolchain and garble,
+simple-websocket, pyroute2), the Go 1.25.8+ toolchain and garble,
 wireguard-tools, libcap2-bin, openssl, and the build tooling the
 handler needs to compile agents. Detects Debian / RHEL / Arch
 family and uses the native package manager where it can; falls
@@ -3121,17 +3250,23 @@ force:
   the `wasm32-unknown-unknown` target to an existing rustup and
   points at the upstream install line otherwise.
 
-Neither installer applies Linux capabilities itself. The ICMP and
-WireGuard transports need `CAP_NET_RAW` and `CAP_NET_ADMIN`
-respectively, and the safe way to grant them is a deliberate
-action. Both installers detect the current state and print the
-exact `setcap` lines to run; the operator decides whether the
-change is appropriate for the host.
+Neither installer applies Linux capabilities itself. A DNS
+listener on port 53 needs `CAP_NET_BIND_SERVICE`; ICMP and
+WireGuard need `CAP_NET_RAW` and `CAP_NET_ADMIN` respectively.
+The safe way to grant them is a deliberate action. Both installers
+detect the current state and print the exact `setcap` lines to
+run; the operator decides whether the change is appropriate for
+the host.
 
 After `install-deps-server.sh` completes, run `install-go-build.sh`
 from the repository root to repair `go.mod`, resolve the module
 graph, and confirm both target platforms compile. The scripts are
 independent and any can be rerun on its own.
+
+**Port 53.** A DNS listener on the privileged port needs
+`CAP_NET_BIND_SERVICE`, root, or a port above 1023:
+
+    sudo setcap cap_net_bind_service=+ep $(which python3)
 
 **Linux capability for the ICMP transport.** The ICMP listener
 requires `CAP_NET_RAW`. Grant it once:
@@ -3146,7 +3281,7 @@ unaffected.
 git clone <repo-url>
 cd <repo-dir>
 pip install flask cryptography dnslib
-python tornadoc2.py --beacon-port 8881
+python3 tornadoc2.py --operator-port 12341
 ```
 
 ---
@@ -3172,101 +3307,67 @@ On the operator workstation, install the client dependencies
 separately with `./install-deps-client.sh`. The two scripts are
 independent and each installs only what its side needs.
 
-Once the dependencies are in place:
+Once the dependencies are in place, start the team server. No
+beacon-facing port is bound yet — the boot set comes from
+`listeners.json`:
 
 ```bash
-# Default bind on 0.0.0.0, beacon listener on 8881
-python tornadoc2.py --beacon-port 8881
-
-# Specific bind and port
-python tornadoc2.py -H 0.0.0.0 --beacon-port 8881
-
-# With mTLS using the handler's own bundle
-python tornadoc2.py --beacon-port 8881 --beacon-mtls-ca mtls_certs/ca.pem
-
-# With a custom PKI directory
-python tornadoc2.py --beacon-port 8881 --beacon-mtls-dir /etc/pki/eng
-
-# With the DNS transport alongside HTTP
-python tornadoc2.py --beacon-port 8881 \
-                    --dns-port 53 --dns-domain c2.example.com
-
-# With the ICMP transport (requires CAP_NET_RAW)
-sudo python tornadoc2.py --beacon-port 8881 --icmp
-
-# With the QUIC / HTTP/3 transport on UDP 8885. Requires aioquic.
-python tornadoc2.py --beacon-port 8881 --beacon-quic-port 8885
-
-# With the WebSocket transport on TCP 8884. Requires simple-websocket.
-# Runs alongside the HTTP listener on its own socket; same certificate
-# and CA material.
-python tornadoc2.py --beacon-port 8881 --ws-port 8884
-
-# With the WireGuard transport on UDP 51820. Requires root or
-# CAP_NET_ADMIN and pyroute2. The handler generates its own WireGuard
-# keypair on first run and prints the public half — copy that value
-# into every agent build.
-sudo python tornadoc2.py --beacon-port 8881 --wireguard
-
-# With the DNS and DoH transports in one handler. DoH is served by
-# the same DNS listener; --dns-port enables both.
-sudo python tornadoc2.py --beacon-port 8881 \
-                         --dns-port 53 --dns-domain c2.example.com
-
-# With the team server (multiplayer) enabled — loopback by default
-python tornadoc2.py --beacon-port 8881 --operator-port 12341
-
-# With the team server exposed to remote operators
-python tornadoc2.py --beacon-port 8881 --operator-port 12341 \
-                    --operator-host 0.0.0.0
-
-# With the dead-man's switch armed and configured to shut the box down
-TORNADO_DEADMAN_HOURS=48 TORNADO_DEADMAN_HALT=shutdown \
-python tornadoc2.py \
-    --beacon-port 8881 --operator-port 12341 --operator-host 0.0.0.0
-
-# Run detached (Unix only). Daemonizes, writes logs/tornadoc2.pid,
-# redirects stdout/stderr to logs/console.log, and exits the
-# foreground process. Reattach with `python tornadoc2.py console`.
-# See Deployment Playbook › Running in daemon mode for the full
-# workflow.
-python tornadoc2.py --daemon \
-                    --beacon-port 8881 --operator-port 12341
+# Operator API only; the store is empty on a fresh checkout
+python3 tornadoc2.py --operator-port 12341 --operator-host 127.0.0.1
 ```
 
-If `--operator-port` is set and `--operator-host` is not, the
-operator listener binds to `0.0.0.0` — every interface — so a remote
-operator can reach it without a second flag. Pass `--operator-host
-127.0.0.1` explicitly for loopback-only. The startup banner prints a
-warning when the listener is exposed publicly.
+In the local console, open a listener and build against it:
 
-The listener auto-discovers every C2 profile under `profiles/c2/` and
-registers its paths alongside the defaults. **All profiles are served
-concurrently on the same port, the same certificate, and the same
-process.** A beacon built against one profile and a beacon built
-against another both check in to the same handler and each receives
-the response shape its own profile declared. There is no "active
-profile" — the path in the request is the profile.
+```text
+beacon> listeners create http primary --port 8881 --tls server
+beacon> listeners start primary
+beacon> build linux amd64 --url https://<host>:8881
+```
 
-To narrow the handler to a single profile — for strict isolation
-during a focused engagement, or to reduce the startup route table —
-pass `--beacon-profile <name>`. Without the flag, every profile in
-the directory is loaded.
+The same command covers every type. TLS material is offered from
+`tls_certs/` and `mtls_certs/`; profiles from the server's
+catalogue:
+
+```text
+beacon> listeners create quic h3 --port 8885 --profiles chrome
+beacon> listeners create dns dns1 --port 53 --domain c2.example.com --profiles dns
+beacon> listeners create wireguard wg --port 51820 --subnet 10.99.0.0/24
+sudo beacon> listeners create icmp icmp1 --public-host 203.0.113.5
+```
+
+`listeners` without a subcommand lists. `listeners edit` and
+`listeners delete` require the listener to be stopped. Every change
+is audited, and `listeners list` shows live status.
+
+Only `operator`, `admin` and `local` hold the listener
+capabilities. `viewer` and `guardian` do not see the command in
+`help` and receive 403 from every `/api/v1/listeners/*` route.
+
+If you pass a legacy transport flag (`--dns-port`, `--icmp`,
+`--wireguard`, `--beacon-quic-port`, `--ws-port`,
+`--beacon-mtls-ca`, …), the server prints a one-time warning and
+ignores it. Nothing is synthesised from flags; use `listeners
+create`. `--operator-port`, `--operator-host`, `-H`, `--cert`,
+`--key`, `--mtls-*`, `--daemon` and the bootstrap flags are still
+startup flags.
+
+C2 profiles are auto-discovered under `profiles/c2/` per listener.
+A listener created without `--profiles` serves every profile; one
+created with the flag serves only those names.
 
 Expected startup banner:
 
 ```
-[BEACON] listening on 0.0.0.0:8881
-[BEACON] DNS transport on 0.0.0.0:53 zone=c2.example.com
-[BEACON] ICMP transport active (raw socket)
+Listeners: 0 listeners configured — use `listeners create`
 [PIVOT] listener on 0.0.0.0:8882
 [TEAM] operator listener on 127.0.0.1:12341 (multiplayer off)
 [TUNNEL] client tunnel on 0.0.0.0:8883 (mTLS, capability beacon.socks)
 ```
 
-
-Every line except the first is optional and appears only when the
-corresponding flag is passed. If `--operator-host` is `0.0.0.0` or
+`Listeners:` reports `running/total` once a store exists, with the
+bound types. The pivot and tunnel ports derive from the fixed base
+8881. A listener that fails at boot prints `[LISTENERS] <name>
+failed: <reason>` and the rest still start. If `--operator-host` is `0.0.0.0` or
 `::`, the operator-listener line gains a warning that the port is
 reachable from every interface.
 
@@ -3315,7 +3416,7 @@ beacon> beacon-build linux amd64 --transport websocket \
         --c2-profile chrome --tls-profile chrome
 ```
 
-The `--url` port must match the handler's `--ws-port`. The scheme is
+The `--url` port must match the WebSocket listener's port. The scheme is
 converted to `wss://` at dial time by the client.
 
 **Non-interactive — WireGuard:**
@@ -3542,34 +3643,36 @@ each removes the "how do I actually start" step.
 ### Minimal HTTPS engagement
 
 ```bash
-# 1. Start the handler with the team server bound to loopback
-python tornadoc2.py --beacon-port 8881 \
-                    --operator-port 12341 \
-                    --operator-host 127.0.0.1
+# 1. Start the team server (operator API only; no beacon port yet)
+python3 tornadoc2.py --operator-port 12341 \
+                     --operator-host 127.0.0.1
 
-# 2. In the local console, create the operator account
+# 2. In the local console, open the beacon listener and start it
+beacon> listeners create http primary --port 8881 --tls server
+beacon> listeners start primary
+
+# 3. Create the operator account
 beacon> operator add alice operator
   # prompts for an optional password — leave blank for cert-only
   # for an automated workflow, set one for an interactive operator
 
-# 3. Export the client config
+# 4. Export the client config
 beacon> operator export alice
   ✓ exported config for alice (…)
     path: team_ca/operators/alice/alice.cfg
 
-# 4. Copy alice.cfg to the operator's machine out of band
+# 5. Copy alice.cfg to the operator's machine out of band
 
-# 5. On the operator machine, launch the client
+# 6. On the operator machine, launch the client
 python beacon-client.py -c alice.cfg
 ```
 
 ### With QUIC fallback
 
-```bash
-# Handler
-python tornadoc2.py --beacon-port 8881 \
-                    --beacon-quic-port 8885 \
-                    --operator-port 12341
+```text
+# Console
+beacon> listeners create quic h3 --port 8885 --profiles chrome
+beacon> listeners start h3
 ```
 
 ```json
@@ -3594,14 +3697,13 @@ and QUIC, build two binaries with different transports.
 
 For a network that filters TCP/443 but permits UDP outbound.
 
-```bash
-# Handler (as root, or with CAP_NET_ADMIN set on python3)
-sudo python tornadoc2.py \
-    --beacon-port 8881 \
-    --wireguard --wireguard-port 51820 \
-    --operator-port 12341
+```text
+# Start the server as root (or with CAP_NET_ADMIN on python3), then:
+beacon> listeners create wireguard wg --port 51820 \
+          --subnet 10.99.0.0/24 --server-ip 10.99.0.1
+beacon> listeners start wg
 
-# The startup banner prints the server's WireGuard public key.
+# The listener start prints the server's WireGuard public key.
 # Copy it into the build.
 ```
 
@@ -3622,7 +3724,9 @@ sudo python tornadoc2.py \
 ```
 
 After the agent is deployed, pin its public key on the server console
-with `wireguard add-peer <agent-pubkey> 10.99.0.2`. Until that pin is
+with `wireguard add-peer <agent-pubkey> 10.99.0.2`. The WireGuard
+listener defaults to port 51820 and the `10.99.0.0/24` tunnel. A
+stale interface left by a crash is removed at the next start. Until that pin is
 in place, WireGuard silently drops the agent's packets.
 
 ### Pivoted SMB deployment
@@ -3705,7 +3809,6 @@ handler ships its own daemonizer.
 # Start detached. Exits as soon as the child's console socket
 # is listening and the pidfile is written.
 python3 tornadoc2.py --daemon \
-    --beacon-port 8881 \
     --operator-port 12341 \
     --operator-host 0.0.0.0
 
@@ -3837,7 +3940,6 @@ Type=simple
 User=tornado
 WorkingDirectory=/opt/TornadoC2
 ExecStart=/usr/bin/python3 tornadoc2.py \
-    --beacon-port 8881 \
     --operator-port 12341 \
     --operator-host 127.0.0.1
 Restart=on-failure
@@ -3845,8 +3947,12 @@ RestartSec=10
 StandardOutput=journal
 StandardError=journal
 
+# Bind DNS:53 without root, and keep ICMP/WireGuard usable.
+AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_RAW CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_RAW CAP_NET_ADMIN
+
 # The dead-man's switch calls systemctl poweroff/reboot on halt.
-# Grant the two capabilities it needs via a polkit rule, not root.
+# Grant it the polkit rule it needs, not root.
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
@@ -3883,7 +3989,7 @@ Optional build args, all off by default except the first two:
 | `INSTALL_DONUT` | `0` | When `1`, installs `donut-shellcode` (the Python binding with a bundled `donut` binary) if no vendored binary is present at `beacon/bin/donut`. Required for `--format shellcode` builds and for `inject: true` on a Windows build |
 | `INSTALL_RUST` | `0` | Add rustup + `wasm32-unknown-unknown` for building WASM extensions |
 | `BOOTSTRAP_GO` | `1` | Run `install-go-build.sh` at build time to warm the Go module cache |
-| `GO_VERSION` | `1.24.4` | Pinned Go toolchain version |
+| `GO_VERSION` | `1.25.8` | Pinned Go toolchain version |
 
 ```bash
 # Minimal image — no UPX, no MinGW, no WASM toolchain.
@@ -3917,10 +4023,8 @@ docker run -d \
     -v "$PWD/beacon_output":/opt/TornadoC2/beacon_output \
     -v "$PWD/payloads":/opt/TornadoC2/payloads \
     tornadoc2:latest \
-    --beacon-port=8881 \
     --operator-port=12341 \
-    --operator-host=0.0.0.0 \
-    --dns-port=53 --dns-domain=c2.example.com
+    --operator-host=0.0.0.0
 ```
 
 The entrypoint forwards every argument to `tornadoc2.py`, so the full
@@ -4253,7 +4357,7 @@ profile's toggles one key at a time.
 | `wireguard_agent_privkey` | string | Base64 WireGuard private key | WireGuard only, required |
 | `wireguard_tunnel_ip` | string | IPv4 address | WireGuard only, required |
 | `wireguard_server_tunnel_ip` | string | IPv4 address | WireGuard only, optional; defaults to `10.99.0.1`. Must match the handler's `--wireguard-server-ip` |
-| `wireguard_inner_port` | string | Port number | WireGuard only, optional; defaults to `8881`. Must match the handler's `--beacon-port` |
+| `wireguard_inner_port` | string | Port number | WireGuard only, optional; defaults to `8881`. Must match the inner HTTP listener's port |
 | `pivot_key_path` | string | Path to a PEM file containing the engagement-wide pivot keypair (both halves). The builder embeds the half the build's role needs | **required** for every SMB or TCP build, parent or child |
 | `agent_keypair_path` | string | Path to the agent's ECDSA P-256 signing keypair, PEM-encoded, PKCS#8. The private half is embedded in every build; the public half is presented at check-in. When empty, a fresh keypair is generated **and not persisted** — the next build produces a different key, and the second agent is refused as an impersonation attempt against a server that pinned the first. Leave this set to `.keys/agent/agent_signing.key` for any deployment that expects to rebuild an agent for an existing session | all builds; mandatory for idempotent rebuilds |
 | `identity_role` | string | Optional build-time disambiguator, mixed into the server's session fingerprint when non-empty. Two agents built from the same tree, run on the same host, under the same user, would otherwise resolve to one session, one cookie, one task queue, and one row in the beacon list. Setting a role gives each agent its own session. The builder defaults the role to `smb-child`, `tcp-bind`, or `tcp-rev` for the three pivot child transports; every other build defaults to empty, which reproduces the pre-role fingerprint exactly. The role travels in its own wire field, not as a hostname suffix, so the beacon list shows the machine's real hostname | all builds; empty by default |
@@ -4930,7 +5034,7 @@ the shortcuts.
 | `jobs` | List active background transfers; `jobs kill <id>` cancels one |
 | `build [-c <file>]` | Compile an agent on the server |
 | `c2-profiles` / `c2p` | List C2 profiles available for build, or show one profile's full JSON |
-| `ai` | Open the AI console. Uses `~/.tornadoc2/ai.json` for provider and key, and drives the 34-tool catalogue through an agent loop. See [AI Operator Console and MCP Server](#ai-operator-console-and-mcp-server) |
+| `ai` | Open the AI console. Uses `client/.tornadoc2/ai.json` for provider and key (edit with `ai config`), and drives the 43-tool catalogue through an agent loop. See [AI Operator Console and MCP Server](#ai-operator-console-and-mcp-server) |
 | `bofs` / `bf` | Manage the server-side BOF registry — `list`, `add`, `remove` |
 | `chat` | Enter team chat |
 | `loot` / `lootstore` | Browse, retrieve, delete, and upload shared loot — `list`, `get`, `upload`, `delete`, `help` |
@@ -5241,6 +5345,33 @@ widget picks up the same colours without per-widget styling.
        alt="TornadoC2 operator console"
        width="900">
 </p>
+
+**Operator ergonomics.** `Ctrl+K` opens a command palette that
+searches the role-filtered command catalogue and live targets; the
+header carries a connection chip, online/offline pill and role
+badge; the status bar shows operator, role and clock; the target
+list has a privilege column (`user`, `admin`, `root`, `system`,
+with `!` for an elevated token) plus tooltips for parent, integrity
+and fingerprint. Every panel uses the same spacing, focus rings and
+dialog grammar.
+
+**The Graph tab** draws the engagement as rounded nodes grouped by
+privilege, user, domain, subnet or session. Privilege colours,
+elevated rings, relay-parent edges and hover details mirror the
+text model, with Refresh and Fit controls.
+
+**The AI panel.** A resident tab beside Log, Chat and Listeners
+runs the same agent loop on its own asyncio thread, so beacon
+work is never blocked by a model call. It keeps the transcript
+across turns, has Send/Stop/Reset, and uses the Settings dialog.
+T3 approvals still open the normal modal prompt.
+
+**The Listeners panel.** A dedicated tab lists every listener
+(id, name, type, bind, status, profiles, creator) and offers a
+protocol-aware create/edit dialog, Start, Stop and Delete, a 5 s
+status refresh, and the same `Client` listener methods the REPL
+uses. Cert and profile pickers come from the server. Host and port
+are locked while a listener runs, mirroring the server rule.
 
 **What it is not.** The GUI is not a different client. The CLI
 remains the reference implementation. Every protocol change, every
@@ -5619,17 +5750,42 @@ for the questions the CLI cannot answer:
 What it is **not** is an autonomous agent. Every tier-3 tool
 (LSASS-adjacent actions, credential reveal, kill, killall) pauses
 for a human prompt. Every queued task goes through the same
-`mcp_allow_verbs` allowlist the operator wrote by hand. The
+`mcp_allow_verbs` allowlist the operator ticked in settings. The
 approval gate exists because "the model thought it would help"
 is a bad reason to run `hashdump` on a production host.
 
 ### Per-operator, per-workstation configuration
 
-The AI configuration lives at `~/.tornadoc2/ai.json` on the
-operator's own machine, with `0600` permissions, and never leaves
-it. It is not in the `.cfg`, not in the audit chain, not on the
+The AI configuration lives at `<repo>/client/.tornadoc2/ai.json`
+on the operator's own machine, with `0600` permissions, and never
+leaves it. The whole client state tree (`ai.json`, `mcp.log`,
+`builds/`, signer pins, history) now lives there instead of
+`$HOME`; existing `~/.tornadoc2` state is copied over once on
+first use and never overwritten. It is not in the `.cfg`, not in the audit chain, not on the
 team server. The team server has no LLM code and no path that
 reads this file.
+
+The MCP journal is `client/.tornadoc2/mcp.log`.
+
+If `ai.json` is missing it is auto-created `0600` with only the
+non-credential skeleton (empty allowlists, listener flags off,
+build dir). The MCP server runs immediately; `ai` and the GUI open
+an editor automatically when the provider block is incomplete.
+
+Edit it in either frontend — no JSON typing:
+
+```text
+beacon> ai config                 # interactive fields and tick boxes
+beacon> ai config show            # redacted view
+beacon> ai config --provider ollama --model llama3 \
+          --allow-verb ls --listener-create on
+```
+
+In the GUI: `Edit › AI settings…` (`Ctrl+,`). The API key is
+masked until revealed. Base URL defaults to the provider's
+canonical endpoint (`https://api.anthropic.com`, local Ollama at
+`http://localhost:11434`, …), is editable for proxies, and must
+stay an `http(s)` URL. The JSON form still works:
 
 ```json
 {
@@ -5749,6 +5905,42 @@ approval prompt has nowhere to appear in the MCP protocol, and a
 Tier 3 tool that ran without approval would be exactly the
 silent action the gate exists to prevent. The MCP server returns
 `approval_required` with a pointer at `beacon-client.py ai`.
+
+### Listener lifecycle over MCP
+
+The seven listener operations map one-to-one onto
+`POST /api/v1/listeners/*`:
+
+| Tool | Capability | Opt-in |
+|------|-----------|--------|
+| `list_listeners` | `listener.view` | always |
+| `get_listener` | `listener.view` | always |
+| `start_listener` | `listener.manage` | always |
+| `stop_listener` | `listener.manage` | always |
+| `update_listener` | `listener.manage` | always |
+| `create_listener` | `listener.manage` | `mcp_allow_listener_create` |
+| `delete_listener` | `listener.delete` | `mcp_allow_listener_delete` |
+
+Start, stop and update are reversible or non-destructive, so they
+match the original Tier-2 rationale. Create and delete change the
+persistent listener set and bind or release ports with no approval
+prompt in the protocol, so they are refused **before** the HTTP
+call unless the matching boolean in `client/.tornadoc2/ai.json` is
+`true`:
+
+```json
+{
+  "mcp_allow_listener_create": true,
+  "mcp_allow_listener_delete": false
+}
+```
+
+The refusal names the exact flag and config path. Every response,
+success or refusal, carries the server's `audit_id` so the MCP
+client can hand it back to the operator for chain verification.
+The trade-off is deliberate: a fresh install keeps the original
+no-silent-destructive-action posture, and an operator who accepts
+the risk flips one switch.
 
 ### The AI console
 
@@ -6442,13 +6634,13 @@ beacon> beacon-build linux amd64 --transport dns \
 The listener must be started against the same profile for the
 verbs to match:
 
-```
-python tornadoc2.py --beacon-port 8881 \
-    --dns-port 53 --dns-domain c2.example.com \
-    --beacon-profile dns
+```text
+beacon> listeners create dns dns1 --port 53 \
+          --domain c2.example.com --profiles dns
+beacon> listeners start dns1
 ```
 
-Without `--beacon-profile`, the listener scans `profiles/c2/` in
+Without a profile, the listener scans `profiles/c2/` in
 alphabetical order and uses the first `dns_label` block it finds.
 
 ### Profile authoring rules
@@ -8002,8 +8194,19 @@ a hook owned by another operator is refused with the same 403.
 
 ## Session Graph
 
-`graph` renders a tree of every live session grouped by domain, then by
-user, then by beacon. Four render modes are available:
+`graph` renders the engagement. Nodes carry user, domain, subnet,
+privilege (`user`/`admin`/`root`/`system`), elevation, integrity,
+session and process parent. Edges connect shared attributes and
+known relay/process parentage. The GUI has a matching **Graph** tab
+with privilege grouping and a live refresh; the server exposes the
+same model as `{"mode": "json"}`.
+
+Privilege context is collected on every check-in: EUID/capabilities
+and groups on Linux; token user, elevation, integrity, Administrators
+membership, session and parent process on Windows. Token theft is
+reflected on the next check-in.
+
+Four text render modes are available:
 
 ### `graph tree` (default)
 
@@ -8011,14 +8214,14 @@ user, then by beacon. Four render modes are available:
 SESSION GRAPH
   CONTOSO
     alice
-      ● #1001 WIN-DEV [windows/amd64] 192.168.1.0/24 age=18s
+      ● #1001 WIN-DEV [USER] [windows/amd64] 192.168.1.0/24 age=18s
     bob
-      ● #1002 WIN-SRV2 [windows/amd64] 192.168.1.0/24 age=4s
+      ● #1002 WIN-SRV2 [ADMIN!] [windows/amd64] 192.168.1.0/24 age=4s
   (no domain)
     root
-      ● #1003 srv-linux [linux/amd64] 10.0.0.0/24 age=42s
+      ● #1003 srv-linux [ROOT!] [linux/amd64] 10.0.0.0/24 age=42s
   shared attributes:
-    #1001 ↔ #1002: domain=CONTOSO, subnet=192.168.1.0/24
+    #1001 → #1002: domain=CONTOSO, process-parent, subnet=192.168.1.0/24
 ```
 
 ### `graph flat`
@@ -8026,9 +8229,9 @@ SESSION GRAPH
 One line per beacon. Grep-friendly.
 
 ```
-● 1001  alice@WIN-DEV    windows/amd64  alice@CONTOSO  192.168.1.0/24  18s
-● 1002  bob@WIN-SRV2     windows/amd64  bob@CONTOSO    192.168.1.0/24   4s
-○ 1003  root@srv-linux   linux/amd64    root@-         10.0.0.0/24     42m
+● 1001  alice@WIN-DEV    windows/amd64  alice@CONTOSO  192.168.1.0/24  user    18s
+● 1002  bob@WIN-SRV2     windows/amd64  bob@CONTOSO    192.168.1.0/24  admin!   4s
+○ 1003  root@srv-linux   linux/amd64    root@-         10.0.0.0/24    root!   42m
 ```
 
 ### `graph summary`
@@ -8049,6 +8252,10 @@ SESSION GRAPH (summary)
   by subnet
     192.168.1.0/24  2 beacon(s)  #1001, #1002
     10.0.0.0/24     1 beacon(s)  #1003
+  by privilege
+    user            1 beacon(s)  #1001
+    admin!          1 beacon(s)  #1002
+    root!           1 beacon(s)  #1003
 ```
 
 ### `graph path <a> <b>`
@@ -8071,6 +8278,10 @@ PATH #1001 → #1003
 - **By domain.** `identity.domain` or `identity.userdomain`,
   uppercased.
 - **By user.** `identity.username`, lowercased.
+- **Privilege.** `identity.privilege`, refreshed on each check-in;
+  `!` marks an elevated token.
+- **Parentage.** Relay children carry the parent session id;
+  a matching `parent_pid` plus `machine_id` adds a process edge.
 - **By subnet.** First three octets of `last_addr` (IPv4 → `/24`)
   or the network prefix of an IPv6 address (`/64`). Compressed
   forms (`2001:db8::1`), scope ids (`fe80::1%eth0`), and
@@ -9328,13 +9539,22 @@ work in any of them, only a name-swap of the same pattern.
 
 | File | What is added |
 |------|---------------|
-| `agent/core/config.go` | One `Config` struct field per build-time value |
-| `agent/core/main.go` | Package vars, `Main()` assignments, one `case` in the `newAgent()` switch |
-| `agent/stageless/ldflags.go` | One package var per field, with default value |
-| `agent/stageless/main.go` | One line in the `core.Config{...}` literal per field |
+| `agent/windows/core/config.go` + `agent/linux/core/config.go` | One `Config` struct field per build-time value |
+| `agent/windows/core/vars.go` + `agent/linux/core/vars.go`, then `run.go` | Package var and `Main()` assignment |
+| `agent/windows/ldflags.go` + `agent/linux/ldflags.go` | One package var per field, with default value |
+| `agent/windows/main.go` + `agent/linux/main.go` | One line in the `core.Config{...}` literal per field |
+| `agent/windows/core/agent.go` + `agent/linux/core/agent.go` | One `case` in the `newAgent()` switch |
 | `beacon/builder.py` | Transport validation plus one `-X main.X=Y` linker flag per field |
 | `beacon/build_manager.py` | One `cfg.X = params.get('x')` line per field |
 | `beacon_handler.py` | One CLI flag per listener port plus one `start()` call |
+
+
+The agent source is split by OS: `agent/windows/` and `agent/linux/`
+each carry their own `main.go`, `ldflags.go`, `platform_*.go`, `core/`
+and `stager/`. Only the transport, crypto, protocol, shaping,
+`internal/`, native helpers, syscalls, evasion and platform packages
+are shared. The builder compiles `./windows` / `./linux` (and their
+`stager/` subdirectory); `darwin` is not a target.
 
 The operator client — `tornado_client/repl.py` and
 `tornado_client/gui.py` — needs no change at all. The client talks
@@ -11211,7 +11431,7 @@ swallowed and the session continues.
 - `curl -k <callback-url>` from the target's network — if the
   redirector or listener is unreachable, nothing else matters.
 - **WebSocket specifically.** The `--url` port must match the
-  handler's `--ws-port`, not its `--beacon-port`. A build whose URL
+  listener's WebSocket port, not its HTTP port. A build whose URL
   carries the beacon port reaches the HTTP listener, which does not
   speak WebSocket, and the upgrade fails silently.
 - **WireGuard specifically.** The agent's keypair must be pinned on
@@ -11291,10 +11511,10 @@ corrupt.
 |---------|-------|-----|
 | `ModuleNotFoundError: No module named 'httpx'` | The AI console and MCP server need `httpx` | `pip install httpx` |
 | `ModuleNotFoundError: No module named 'mcp'` | The standalone MCP server needs the `mcp` package | `pip install mcp` |
-| `~/.tornadoc2/ai.json not found` | No per-operator config yet | Create the file per [AI Operator Console and MCP Server](#ai-operator-console-and-mcp-server) |
-| `ai.json is readable by other users` | Config permissions are too loose | `chmod 600 ~/.tornadoc2/ai.json` |
+| `ai.json` missing or incomplete | Fresh client, or no provider yet | It is auto-created; run `ai config` or GUI `Edit › AI settings` |
+| `ai.json is readable by other users` | Config permissions are too loose | `chmod 600 client/.tornadoc2/ai.json` |
 | `provider 'xyz' is not one of ...` | Unknown provider | Use one of `anthropic`, `openai`, `openrouter`, `gemini`, `groq`, `ollama`, `claude_code` |
-| `api_key is required for provider 'anthropic'` (and the other API providers) | Missing key | Set `api_key` in `ai.json` |
+| `api_key is required for provider 'anthropic'` (and the other API providers) | Missing key | Run `ai config` (or the GUI dialog) and set one |
 | `allowlist_denied: verb 'ls' is not in mcp_allow_verbs` | The AI tried to queue a verb the operator did not allow | Add the verb to `mcp_allow_verbs`, or leave it out |
 | `approval_required` returned to an external MCP client | Tier-3 tool called from Claude Desktop / Cline | Tier-3 tools are only available from `beacon-client.py ai`. The MCP server is a read-and-safe-mutate interface by design |
 | `NON-JSON ON STDOUT` when validating the MCP stream | A stray `print()` leaked into the MCP stdio stream | A regression in `tornadoc2_mcp/` — grep the package for `print(` and route it through the logger. The package is designed so stdout is the protocol's alone |
@@ -11302,7 +11522,7 @@ corrupt.
 | Provider HTTP 401 | Wrong `api_key` | Check the key against the provider's dashboard |
 | Ollama refused the connection | `ollama serve` is not running | Start Ollama, or pick a different provider |
 | `claude_code` selected but the model does not use tools | `claude_code` does not support structured tool calling | Use an API provider (`anthropic`, `openai`, `openrouter`, `gemini`, `groq`, `ollama`) for the agent loop; `claude_code` is synthesis-only |
-| `tokens` reports a very large number and the loop feels slow | The transcript is large; the context manager is compacting | `reset` clears the transcript. The default `max_context_tokens` is 128 000; raise it in `ai.json` only if the provider's window is larger |
+| `tokens` reports a very large number and the loop feels slow | The transcript is large; the context manager is compacting | `reset` clears the transcript. The default `max_context_tokens` is 128 000; raise it in `ai config` only if the provider's window is larger |
 
 ---
 
@@ -11400,22 +11620,7 @@ listener.
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `-H` / `--host` | `0.0.0.0` | Beacon listener bind address |
-| `--beacon-port` | `8881` | Beacon listener port (TCP) |
-| `--beacon-quic-port` | *(none)* | QUIC / HTTP/3 listener port (UDP). Requires `aioquic`. Pass `0` to disable explicitly |
-| `--ws-port` | *(none)* | WebSocket (wss://) listener port (TCP). Requires `simple-websocket`. Uses the same certificate material as the HTTP listener |
-| `--ws-host` | *(none)* | WebSocket listener bind address. Defaults to `--host` |
-| `--wireguard` | off | Enable the WireGuard listener. Requires `pyroute2` and `CAP_NET_ADMIN` |
-| `--wireguard-port` | `51820` | WireGuard listener UDP port |
-| `--wireguard-subnet` | `10.99.0.0/24` | WireGuard tunnel subnet |
-| `--wireguard-server-ip` | `10.99.0.1` | Server IP inside the tunnel |
-| `--dns-port` | *(none)* | DNS transport port |
-| `--dns-domain` | *(none)* | Authoritative zone for DNS |
-| `--beacon-mtls-ca` | *(none)* | CA file for client certificate verification |
-| `--beacon-mtls-dir` | *(none)* | Directory with the mTLS bundle |
-| `--beacon-mtls-server-cert` | `mtls_certs/server-mtls.pem` | Server certificate |
-| `--beacon-mtls-server-key` | `mtls_certs/server-mtls.key` | Server private key |
-| `--beacon-profile <name>` | *(none)* | Narrow the listener to one C2 profile |
+| `-H` / `--host` | `0.0.0.0` | Base bind address for the pivot and operator defaults |
 | `--operator-port` | *(none)* | Team server operator listener port |
 | `--operator-host` | *(none)* | Operator listener bind address. When `--operator-port` is set and this flag is omitted, the listener binds to `0.0.0.0`. Pass `127.0.0.1` for loopback-only |
 | `--no-audit-verify` | off | Skip audit chain verification |
@@ -11427,6 +11632,13 @@ listener.
 | `--mtls-server-key` | `mtls_certs/server-mtls.key` | Default server key |
 | `--mtls-client-cert` | `mtls_certs/client.pem` | Default client cert |
 | `--mtls-client-key` | `mtls_certs/client.key` | Default client key |
+
+Beacon transport flags (`--beacon-port`, `--dns-port`,
+`--dns-domain`, `--beacon-quic-port`, `--ws-port`, `--ws-host`,
+`--icmp`, `--wireguard*`, `--beacon-mtls-*`, `--beacon-profile`)
+are still parsed but ignored. A non-default value prints a
+one-time warning. Use `listeners create`; see
+[Listener Management](#listener-management).
 
 ---
 

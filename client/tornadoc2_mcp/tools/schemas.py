@@ -56,12 +56,20 @@ TOOL_TABLE = [
         ['id'],
     ),
     (
-        'list_listeners', 'T1', None,
-        'Show the transports the team server is running: '
-        'HTTP, QUIC, WebSocket, WireGuard, DNS, ICMP, and '
-        'the pivot ports. Useful before recommending a build '
-        'transport.',
+        'list_listeners', 'T1', 'listener.view',
+        'List every configured beacon listener with id, name, '
+        'type, bind address, status, profiles and creator. '
+        'Listeners persist in listeners.json and survive a '
+        'server restart.',
         {}, [],
+    ),
+    (
+        'get_listener', 'T1', 'listener.view',
+        'Full configuration and runtime status of one listener '
+        'by id. Returns audit_id.',
+        {'id': {'type': 'string',
+                'description': 'listener id (lst_xxxxxxxx)'}},
+        ['id'],
     ),
     (
         'list_profiles', 'T1', 'beacon.build',
@@ -150,6 +158,47 @@ TOOL_TABLE = [
     ),
 
     # ---- Tier 2: safe mutations -------------------------------------
+    (
+        'create_listener', 'T2', 'listener.manage',
+        'Create a listener from a spec object (type, name, host, '
+        'port, tls, profiles, domain, subnet, server_tunnel_ip, '
+        'interface, enabled). Disabled by default until '
+        'mcp_allow_listener_create is true. Returns audit_id.',
+        {'spec': {'type': 'object',
+                  'description': 'listener spec; type and name '
+                                 'are required'}},
+        ['spec'],
+    ),
+    (
+        'start_listener', 'T2', 'listener.manage',
+        'Bind a stopped listener and mark it running. Returns '
+        'audit_id; a bind failure is a 500 with the reason.',
+        {'id': {'type': 'string'}},
+        ['id'],
+    ),
+    (
+        'stop_listener', 'T2', 'listener.manage',
+        'Stop a running listener and release its port. Returns '
+        'audit_id.',
+        {'id': {'type': 'string'}},
+        ['id'],
+    ),
+    (
+        'update_listener', 'T2', 'listener.manage',
+        'Patch a listener. Host and port are refused while it '
+        'is running. Returns audit_id.',
+        {'id':    {'type': 'string'},
+         'patch': {'type': 'object',
+                   'description': 'fields to change'}},
+        ['id', 'patch'],
+    ),
+    (
+        'delete_listener', 'T2', 'listener.delete',
+        'Delete a stopped listener. Disabled by default until '
+        'mcp_allow_listener_delete is true. Returns audit_id.',
+        {'id': {'type': 'string'}},
+        ['id'],
+    ),
     (
         'queue_task', 'T2', 'beacon.use',
         'Queue one task on a beacon. The verb must appear in '

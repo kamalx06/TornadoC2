@@ -6,7 +6,7 @@ set -euo pipefail
 # Configuration
 
 MODULE_NAME="tornadoc2/agent"
-GO_VERSION="1.24"
+GO_VERSION="1.25.8"
 
 GARBLE_VERSION="v0.17.0"
 
@@ -15,8 +15,10 @@ GARBLE_VERSION="v0.17.0"
 # the second is the output filename stem. A .exe suffix is
 # appended for windows targets.
 MAIN_PKGS=(
-    "stageless:beacon"
-    "stager:stager"
+    "windows:beacon"
+    "windows/stager:stager"
+    "linux:beacon"
+    "linux/stager:stager"
 )
 
 # Directory the compiled binaries land in, relative to the agent
@@ -75,7 +77,7 @@ say "target: $TARGET"
 command -v go >/dev/null 2>&1 || \
     die "go not found on PATH — install the Go toolchain first"
 
-GO_VERSION_INSTALLED="$(go env GOVERSION)"          # e.g. go1.24.3
+GO_VERSION_INSTALLED="$(go env GOVERSION)"          # e.g. go1.25.8
 GOPATH_BIN="$(go env GOPATH)/bin"
 
 say "go:         $GO_VERSION_INSTALLED"
@@ -217,7 +219,8 @@ say "rewriting go.mod (module=$MODULE_NAME, go=$GO_VERSION)"
 # --------------------------------------------------------------------
 # Report local packages
 
-for subdir in evasion stager extensions; do
+for subdir in windows/core linux/core windows/stager linux/stager \
+               windows linux evasion extensions; do
     if [[ -d "$subdir" ]]; then
         count=$(find "$subdir" -type f -name '*.go' | wc -l)
         say "local package: $subdir/ ($count .go file(s))"
@@ -276,6 +279,9 @@ for target in "${BUILD_TARGETS[@]}"; do
         src="${entry%%:*}"
         stem="${entry##*:}"
 
+        if [[ "${src%%/*}" != "$goos" ]]; then
+            continue
+        fi
         if [[ ! -d "$src" ]]; then
             warn "  $src/ not found — skipping $stem"
             continue

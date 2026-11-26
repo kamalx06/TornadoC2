@@ -22,10 +22,10 @@ type ShapingSpec struct {
 }
 
 type ShapeSpec struct {
-	Template json.RawMessage `json:"template"`
-	Extract  string          `json:"extract"`
-	Encoding string `json:"encoding,omitempty"`
-	Placement *Placement `json:"placement,omitempty"`
+	Template  json.RawMessage `json:"template"`
+	Extract   string          `json:"extract"`
+	Encoding  string          `json:"encoding,omitempty"`
+	Placement *Placement      `json:"placement,omitempty"`
 }
 
 type Placement struct {
@@ -62,27 +62,27 @@ func renderShaping(node interface{}, ctx map[string]interface{}) interface{} {
 }
 
 func ShapeWrap(spec *ShapeSpec, payload interface{}) ([]byte, error) {
-    inner, err := json.Marshal(payload)
-    if err != nil {
-        return nil, err
-    }
+	inner, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
 
-    var nb [8]byte
-    if _, rerr := crand.Read(nb[:]); rerr != nil {
-        binary.BigEndian.PutUint64(nb[:], uint64(time.Now().UnixNano()))
-    }
+	var nb [8]byte
+	if _, rerr := crand.Read(nb[:]); rerr != nil {
+		binary.BigEndian.PutUint64(nb[:], uint64(time.Now().UnixNano()))
+	}
 
-    ctx := map[string]interface{}{
-        "payload": encodePayload(inner, spec.Encoding),
-        "ts":      time.Now().Unix(),
-        "nonce":   hex.EncodeToString(nb[:]),
-    }
-    var tmpl interface{}
-    if err := json.Unmarshal(spec.Template, &tmpl); err != nil {
-        return nil, err
-    }
-    out := renderShaping(tmpl, ctx)
-    return json.Marshal(out)
+	ctx := map[string]interface{}{
+		"payload": encodePayload(inner, spec.Encoding),
+		"ts":      time.Now().Unix(),
+		"nonce":   hex.EncodeToString(nb[:]),
+	}
+	var tmpl interface{}
+	if err := json.Unmarshal(spec.Template, &tmpl); err != nil {
+		return nil, err
+	}
+	out := renderShaping(tmpl, ctx)
+	return json.Marshal(out)
 }
 
 func ShapeUnwrap(body []byte, spec *ShapeSpec) ([]byte, error) {
@@ -186,46 +186,46 @@ func walkPath(obj interface{}, path string) (interface{}, error) {
 }
 
 func ValidateShapingSpec(spec *ShapingSpec) error {
-    checks := []struct {
-        name string
-        s    *ShapeSpec
-    }{
-        {"checkin_response", spec.CheckinResponse},
-        {"tasks_response",   spec.TasksResponse},
-        {"results_request",  spec.ResultsRequest},
-    }
-    for _, c := range checks {
-        if c.s == nil {
-            continue
-        }
-        if len(c.s.Template) == 0 {
-            return fmt.Errorf("%s: template is empty", c.name)
-        }
-        if c.s.Extract == "" {
-            return fmt.Errorf("%s: extract is required", c.name)
-        }
-        probe := map[string]interface{}{
-            "__probe__": "ok",
-            "n":         float64(1),
-        }
-        rendered, err := ShapeWrap(c.s, probe)
-        if err != nil {
-            return fmt.Errorf("%s: template render: %w", c.name, err)
-        }
-        recovered, err := ShapeUnwrap(rendered, c.s)
-        if err != nil {
-            return fmt.Errorf("%s: extract %q: %w",
-                c.name, c.s.Extract, err)
-        }
-        var got interface{}
-        if err := json.Unmarshal(recovered, &got); err != nil {
-            return fmt.Errorf("%s: probe decode: %w", c.name, err)
-        }
-        if !reflect.DeepEqual(got, probe) {
-            return fmt.Errorf(
-                "%s: round-trip mismatch (got %#v, want %#v)",
-                c.name, got, probe)
-        }
-    }
-    return nil
+	checks := []struct {
+		name string
+		s    *ShapeSpec
+	}{
+		{"checkin_response", spec.CheckinResponse},
+		{"tasks_response", spec.TasksResponse},
+		{"results_request", spec.ResultsRequest},
+	}
+	for _, c := range checks {
+		if c.s == nil {
+			continue
+		}
+		if len(c.s.Template) == 0 {
+			return fmt.Errorf("%s: template is empty", c.name)
+		}
+		if c.s.Extract == "" {
+			return fmt.Errorf("%s: extract is required", c.name)
+		}
+		probe := map[string]interface{}{
+			"__probe__": "ok",
+			"n":         float64(1),
+		}
+		rendered, err := ShapeWrap(c.s, probe)
+		if err != nil {
+			return fmt.Errorf("%s: template render: %w", c.name, err)
+		}
+		recovered, err := ShapeUnwrap(rendered, c.s)
+		if err != nil {
+			return fmt.Errorf("%s: extract %q: %w",
+				c.name, c.s.Extract, err)
+		}
+		var got interface{}
+		if err := json.Unmarshal(recovered, &got); err != nil {
+			return fmt.Errorf("%s: probe decode: %w", c.name, err)
+		}
+		if !reflect.DeepEqual(got, probe) {
+			return fmt.Errorf(
+				"%s: round-trip mismatch (got %#v, want %#v)",
+				c.name, got, probe)
+		}
+	}
+	return nil
 }

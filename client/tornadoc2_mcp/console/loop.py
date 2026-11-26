@@ -38,8 +38,16 @@ Three entry points:
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures as _concurrent_futures
 import json
 import sys
+import threading
+
+# Python 3.15 ships PEP 810 lazy imports. An unresolved module
+# attribute can surface as a non-callable ``lazy_import`` proxy
+# inside ``asyncio``'s executor path under Qt. Touching the name
+# here forces the real class before any turn runs.
+_concurrent_futures.ThreadPoolExecutor
 
 from .. import errors, logging
 from ..adapter import ClientAdapter
@@ -249,6 +257,50 @@ async def run_one_shot(cfg: AiConfig, client: ClientAdapter,
 
 # ---------------------------------------------------------------------
 # The turn loop — unchanged from the previous version.
+
+_PRINT_LOCK = threading.Lock()
+
+
+async def run_ai_turn(cfg: AiConfig, client: ClientAdapter,
+                      transcript: list, question: str,
+                      on_text=None):
+    """Run one turn for a resident UI (the GUI AI tab).
+
+    Unlike ``run_console`` this never reads stdin. First-party
+    output is routed to ``on_text``; the transcript persists
+    across calls. Returns None on success or an error string.
+    """
+    provider = _build_provider(cfg)
+    if provider is None:
+        return 'provider not configured'
+    if not provider.supports_tools:
+        return (f'{cfg.provider} does not support tool calling')
+    tools = _tool_specs(client.capabilities)
+
+    def _sink(msg='', dim=False):
+        if on_text is not None:
+            on_text(msg)
+
+    global _print
+    with _PRINT_LOCK:
+        previous = _print
+        globals()['_print'] = _sink
+        try:
+            await _turn(client, provider, cfg, tools,
+                        transcript, question)
+            return None
+        except asyncio.CancelledError:
+            return 'cancelled'
+        except errors.ProviderError as exc:
+            hint = f' · {exc.hint}' if exc.hint else ''
+            return f'provider error: {exc}{hint}'
+        except Exception as exc:
+            logging.error('console.tab_turn_failed',
+                          err=f'{type(exc).__name__}: {exc}')
+            return f'{type(exc).__name__}: {exc}'
+        finally:
+            globals()['_print'] = previous
+
 
 async def _turn(client, provider, cfg, tools,
                 transcript: list, question: str):

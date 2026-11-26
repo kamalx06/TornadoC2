@@ -241,7 +241,7 @@ async def dispatch(
     except errors.McpError as exc:
         logging.warn('dispatch.refused',
                      tool=name, code=exc.code,
-                     msg=str(exc))
+                     detail=str(exc))
         return ToolResult(
             ok=False,
             error=f'{exc.code}: {exc}',
@@ -292,3 +292,15 @@ def _check_allowlist(name: str, args: dict,
                 f'BOF {bof!r} is not in mcp_allow_bofs',
                 hint=(f'add the BOF name to mcp_allow_bofs '
                       f'in {cfg.source_path}'))
+    if name == 'create_listener' \
+            and not cfg.mcp_allow_listener_create:
+        raise errors.AllowlistError(
+            'create_listener is disabled by default',
+            hint=('set "mcp_allow_listener_create": true in '
+                  f'{cfg.source_path} and restart the MCP server'))
+    if name == 'delete_listener' \
+            and not cfg.mcp_allow_listener_delete:
+        raise errors.AllowlistError(
+            'delete_listener is disabled by default',
+            hint=('set "mcp_allow_listener_delete": true in '
+                  f'{cfg.source_path} and restart the MCP server'))

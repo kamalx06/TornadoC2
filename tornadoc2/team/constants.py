@@ -35,6 +35,9 @@ ROLE_CAPABILITIES = {
         'operator.export.self',
         'operator.passwd.self',
         'deadman.view',
+        'listener.view',
+        'listener.manage',
+        'listener.delete',
     }),
     'guardian': frozenset({
         'commands.list',
@@ -68,6 +71,9 @@ ROLE_CAPABILITIES = {
         'operator.passwd.self',
         'operator.passwd.other',
         'deadman.view',
+        'listener.view',
+        'listener.manage',
+        'listener.delete',
     }),
     'local': frozenset({
         'beacon.list', 'beacon.info', 'beacon.use', 'beacon.forget',
@@ -86,6 +92,9 @@ ROLE_CAPABILITIES = {
         'multiplayer.toggle',
         'webhooks.manage', 'webhooks.manage.admin',
         'ca.rotate', 'creds.use',
+        'listener.view',
+        'listener.manage',
+        'listener.delete',
     }),
 }
 
@@ -127,3 +136,6 @@ BUILD_CONCURRENT_GLOBAL = 4
 BUILD_STAGE_TTL = 1800
 BUILD_CHUNK_SIZE = 512 * 1024
 BUILD_STAGE_DIR = 'beacon_output/remote'
+LISTENERS_STORE = 'listeners.json'
+LISTENER_TYPES = ('http', 'quic', 'websocket', 'dns', 'icmp',
+                  'wireguard')

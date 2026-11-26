@@ -7,7 +7,7 @@ is worse than useless.
 Two channels:
 
   console → printed to stderr, for the operator
-  journal → appended to ~/.tornadoc2/mcp.log, for post-hoc
+  journal → appended to <repo>/client/.tornadoc2/mcp.log
 
 Neither channel ever logs a value the operator has not seen on
 their own terminal. API keys are stripped by the config loader
@@ -20,8 +20,11 @@ import time
 from pathlib import Path
 from threading import Lock
 
+from .paths import MCP_LOG, ensure_state_dir
 
-_JOURNAL_PATH = Path.home() / '.tornadoc2' / 'mcp.log'
+
+_JOURNAL_PATH = MCP_LOG
+_MAX_BYTES = 5 * 1024 * 1024
 _JOURNAL_LOCK = Lock()
 _REDACT_KEYS = frozenset({
     'api_key', 'password', 'value', 'auth_hash',
@@ -50,9 +53,20 @@ def _fmt(level: str, msg: str, extra: dict) -> str:
 
 def _journal(line: str) -> None:
     try:
-        _JOURNAL_PATH.parent.mkdir(mode=0o700, exist_ok=True)
-        with _JOURNAL_LOCK, open(_JOURNAL_PATH, 'a', encoding='utf-8') as fh:
-            fh.write(line + '\n')
+        ensure_state_dir()
+        with _JOURNAL_LOCK:
+            try:
+                if _JOURNAL_PATH.stat().st_size > _MAX_BYTES:
+                    os.replace(_JOURNAL_PATH,
+                               _JOURNAL_PATH.with_suffix('.log.1'))
+            except OSError:
+                pass
+            with open(_JOURNAL_PATH, 'a', encoding='utf-8') as fh:
+                fh.write(line + '\n')
+            try:
+                os.chmod(_JOURNAL_PATH, 0o600)
+            except OSError:
+                pass
     except OSError:
         pass
 

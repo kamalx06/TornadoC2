@@ -14,10 +14,13 @@
 // maskedSleepStub's entry address is inside the excluded range; if
 // it is not, EncryptSelf refuses to encrypt and returns an error
 // rather than corrupting the process.
-TEXT ·maskedSleepStub(SB), NOSPLIT, $0-16
+TEXT ·maskedSleepStub(SB), NOSPLIT, $0-12
+    // 32 bytes shadow + 8 to align RSP 16-byte at the CALL.
+    SUBQ $40, SP
     MOVQ sleepExAddr+0(FP), AX
     MOVL ms+8(FP), CX       // 32-bit load, zero-extended (DWORD arg)
     XORQ DX, DX             // bAlertable = FALSE
     CALL AX
+    ADDQ $40, SP
     RET
     

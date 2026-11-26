@@ -111,6 +111,19 @@ COMMANDS = [
         'client_op': 'c2_profiles',
     },
     {
+        'name': 'listeners', 'aliases': ['listener', 'ls-listeners'],
+        'args': 'list | show <id> | create <type> [flags] | '
+                'start <id> | stop <id> | edit <id> | delete <id>',
+        'description': 'manage beacon-facing transport listeners '
+                       '(http, quic, websocket, dns, icmp, '
+                       'wireguard). Persisted to listeners.json '
+                       'at the repository root; created listeners '
+                       'survive a team-server restart.',
+        'capability': 'listener.view',
+        'category': None, 'scope': 'main', 'native': False,
+        'client_op': 'listeners',
+    },
+    {
         'name': 'bofs', 'aliases': ['bf'],
         'args': 'list | add <path> [--replace] | remove <name>',
         'description': 'manage the server-side BOF registry',

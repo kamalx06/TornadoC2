@@ -64,12 +64,12 @@ func SandboxDetected() bool {
 func vmMacAddress() bool {
 	prefixes := []string{
 		"00:05:69", "00:0c:29", "00:1c:14", "00:50:56", // VMware
-		"08:00:27",                                     // VirtualBox
-		"00:15:5d",                                     // Hyper-V
-		"52:54:00",                                     // QEMU/KVM
-		"00:16:3e",                                     // Xen
-		"00:1c:42",                                     // Parallels
-		"02:42",                                        // Docker bridge
+		"08:00:27", // VirtualBox
+		"00:15:5d", // Hyper-V
+		"52:54:00", // QEMU/KVM
+		"00:16:3e", // Xen
+		"00:1c:42", // Parallels
+		"02:42",    // Docker bridge
 	}
 
 	kernel := syscall.NewLazyDLL("iphlpapi.dll")

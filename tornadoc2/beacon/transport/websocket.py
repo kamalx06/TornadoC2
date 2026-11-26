@@ -225,19 +225,60 @@ class WebSocketListener(BeaconListener):
 
     name = 'websocket'
 
-    def __init__(self, engine, host: str, port: int,
-                 certfile: str, keyfile: str,
+    def __init__(self, engine, host: str = None, port: int = None,
+                 certfile: str = None, keyfile: str = None,
                  client_ca: str = None,
                  extra_paths: dict = None,
                  c2_profile_dir: str = None,
                  profile_filter: str = None,
+                 config: dict = None,
                  **kwargs):
         super().__init__(
             engine, host, port, certfile, keyfile,
             client_ca=client_ca,
             extra_paths=extra_paths,
             c2_profile_dir=c2_profile_dir,
-            profile_filter=profile_filter)
+            profile_filter=profile_filter,
+            config=config)
+        self._ws_server = None
+        self._last_error = None
+
+    def start(self) -> bool:
+        """Start the raw WebSocket server.
+
+        Deliberately does NOT call the parent's start(). The
+        parent binds a Flask server on host:port — but the
+        WebSocket transport dispatches via
+        `self._app.test_request_context(...)`, which is pure
+        in-process and does not need a bound Flask server. If
+        the parent's start() ran, its Flask bind on host:port
+        would collide with the raw WebSocket server binding the
+        same address.
+
+        The only socket this listener binds is the raw WebSocket
+        one.
+        """
+        if self._ws_server is not None and self._ws_server._bind_ok:
+            return True
+        server = WebSocketServer(self)
+        if not server.start():
+            self._last_error = (
+                f'bind {self.host}:{self.port} failed')
+            self._ws_server = None
+            return False
+        self._ws_server = server
+        self._running = True
+        self._last_error = None
+        return True
+
+    def stop(self) -> None:
+        if self._ws_server is not None:
+            try:
+                self._ws_server.stop()
+            except Exception:
+                pass
+            self._ws_server = None
+        self._running = False
 
     # ------------------------------------------------------------------
     # WebSocket message handler
@@ -518,3 +559,5 @@ class WebSocketServer:
             self._thread.join(timeout=5.0)
             self._thread = None
         self._server = None
+        self._bind_ok = False
+        self._ready.clear()

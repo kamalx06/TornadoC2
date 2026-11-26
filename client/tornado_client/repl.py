@@ -6,7 +6,7 @@ connection.
 
 Features:
   * Colored output on a TTY, plain otherwise.
-  * Readline history, persisted to ~/.tornadoc2_history.
+  * Readline history, persisted to client/.tornadoc2/history.
   * Tab completion for meta commands, beacon IDs, verbs, audit subs.
   * Ctrl-C at the prompt clears the line instead of exiting.
   * Table-style beacon listing.
@@ -114,6 +114,7 @@ FALLBACK_META = [
     'build', 'c2-profiles', 'c2p', 'bofs', 'creds', 'notes',
     'webhooks', 'operators', 'op', 'killall', 'recipes',
     'deadman', 'halt', 'loot', 'lootstore',
+    'listeners', 'listener',
 ]
 
 FALLBACK_BEACON = [
@@ -174,7 +175,20 @@ FALLBACK_NATIVE = frozenset({
 AUDIT_SUBS = ['tail', 'show', 'read', 'verify', 'checkpoint',
               'chat']
 
-HISTORY_FILE = os.path.expanduser('~/.tornadoc2_history')
+try:
+    from tornadoc2_mcp.paths import (
+        HISTORY_FILE as _CLIENT_HISTORY,
+        ensure_state_dir as _ensure_client_state,
+    )
+    HISTORY_FILE = str(_CLIENT_HISTORY)
+except Exception:                     # pragma: no cover
+    HISTORY_FILE = os.path.join(
+        os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__))), '.tornadoc2', 'history')
+
+    def _ensure_client_state():
+        os.makedirs(os.path.dirname(HISTORY_FILE),
+                    mode=0o700, exist_ok=True)
 
 _CHAT_OUTPUT_LOCK = threading.Lock()
 
@@ -1482,6 +1496,12 @@ class Client:
         self.client_tunnel_port = None
         self.quic_port = None
         self.server_version = '?'
+        # Listener cache, populated by banner() from the
+        # /identify response. The build wizard and the tab
+        # completer read this instead of making a fresh
+        # /api/v1/listeners call on every keystroke.
+        self.listeners = []
+        self.beacon_port = None
         self._chat_dm_peer = None
         self._chat_last_topic = None
         self.commands = None
@@ -1609,6 +1629,7 @@ class Client:
         readline.set_history_length(500)
         readline.set_completer(self._complete)
         try:
+            _ensure_client_state()
             readline.read_history_file(HISTORY_FILE)
         except (OSError, IOError):
             pass
@@ -1617,6 +1638,7 @@ class Client:
         if not readline:
             return
         try:
+            _ensure_client_state()
             readline.write_history_file(HISTORY_FILE)
         except (OSError, IOError):
             pass
@@ -1750,6 +1772,69 @@ class Client:
                 and len(words) > 1 and words[1] == '-o':
             return self._complete_paths(text)
 
+        if first == 'ai':
+            if arg_i == 1:
+                return sorted(x for x in ('config', 'setup')
+                              if x.startswith(text.lower()))
+            if arg_i == 2 and len(words) > 1 \
+                    and words[1].lower() in ('config', 'setup'):
+                return sorted(x for x in ('show', 'edit')
+                              if x.startswith(text.lower()))
+            if arg_i >= 2 and len(words) > 1 \
+                    and words[1].lower() in ('config', 'setup') \
+                    and words[-2:-1] == ['--provider']:
+                return sorted(
+                    x for x in ('anthropic', 'claude_code',
+                                'gemini', 'groq', 'ollama',
+                                'openai', 'openrouter')
+                    if x.startswith(text.lower()))
+            if arg_i >= 2 and len(words) > 1 \
+                    and words[1].lower() in ('config', 'setup'):
+                return sorted(
+                    f for f in self._AI_CONFIG_FLAGS
+                    if f.startswith(text))
+            return []
+
+        if first in ('listeners', 'listener'):
+            if arg_i == 1:
+                return sorted(
+                    s for s in ('list', 'show', 'create',
+                                'start', 'stop', 'edit',
+                                'delete', 'help')
+                    if s.startswith(text.lower()))
+            if arg_i == 2 and len(words) > 1 \
+                    and words[1].lower() in (
+                        'show', 'start', 'stop',
+                        'edit', 'delete'):
+                ids = []
+                names = []
+                for lst in getattr(self, 'listeners', []) or []:
+                    lid = lst.get('id') or ''
+                    if lid:
+                        ids.append(lid)
+                    nm = lst.get('name') or ''
+                    if nm:
+                        names.append(nm)
+                cands = ids + names
+                return sorted(c for c in cands
+                              if c.startswith(text))
+            if arg_i == 2 and len(words) > 1 \
+                    and words[1].lower() == 'create':
+                return sorted(
+                    t for t in ('http', 'quic', 'websocket',
+                                'dns', 'icmp', 'wireguard')
+                    if t.startswith(text.lower()))
+            if arg_i >= 3 and len(words) > 1 \
+                    and words[1].lower() == 'create':
+                return sorted(
+                    f for f in (
+                        '--name', '--host', '--port', '--tls',
+                        '--cert', '--key', '--ca', '--profiles',
+                        '--domain', '--subnet', '--server-ip',
+                        '--interface', '--no-enabled')
+                    if f.startswith(text))
+            return []
+
         if arg_i == 0:
             candidates = set(self._verbs_for('main'))
             candidates.add('lootstore')
@@ -1773,6 +1858,10 @@ class Client:
         self.quic_port = r.get('quic_port')
         self.beacon_port = r.get('beacon_port')
         self.server_version = r.get('server_version', '?')
+        self.listeners = list(r.get('listeners') or [])
+        if ('listener.view' not in self.caps
+                and self.listeners):
+            self.listeners = []
         self._load_commands()
 
         if quiet:
@@ -1910,6 +1999,8 @@ class Client:
                     self._cmd_halt(parts)
                 elif cmd == 'operators':
                     self._cmd_operators(parts)
+                elif cmd in ('listeners', 'listener'):
+                    self._cmd_listeners(parts)
                 elif self.current_beacon:
                     self._cmd_beacon(parts)
                 elif cmd in self._verbs_for('beacon'):
@@ -2086,7 +2177,7 @@ class Client:
         for name in ('beacons', 'use <id>', 'detach', 'info',
                      'caps', 'audit', 'chat', 'loot', 'history',
                      'clear', 'build', 'c2-profiles', 'bofs',
-                     'help', 'exit'):
+                     'listeners', 'help', 'exit'):
             print(f"  {c['green']}{name}{c['reset']}")
 
         _header('ATTACHED BEACON')
@@ -3551,6 +3642,712 @@ class Client:
             print(f"{c['green']}registered {ok}/{len(payloads)}"
                   f"{c['reset']}")
 
+    # ------------------------------------------------------------------
+    # Listener management
+
+    # ---- Client-level methods shared by the REPL and the GUI ----
+
+    def listener_list(self):
+        return self.tp.post('/api/v1/listeners', {})
+
+    def listener_get(self, lid):
+        return self.tp.post(f'/api/v1/listeners/{lid}', {})
+
+    def listener_create(self, spec):
+        return self.tp.post('/api/v1/listeners/create',
+                            {'spec': spec})
+
+    def listener_start(self, lid):
+        return self.tp.post(f'/api/v1/listeners/{lid}/start', {})
+
+    def listener_stop(self, lid):
+        return self.tp.post(f'/api/v1/listeners/{lid}/stop', {})
+
+    def listener_update(self, lid, patch):
+        return self.tp.post(f'/api/v1/listeners/{lid}/update',
+                            patch)
+
+    def listener_delete(self, lid):
+        return self.tp.post(f'/api/v1/listeners/{lid}/delete', {})
+
+    def listener_certs(self):
+        return self.tp.post('/api/v1/listeners/certs', {})
+
+    _LISTENER_CREATE_FLAGS = {
+        '--name': 'name',
+        '--host': 'host', '--port': 'port', '--tls': 'tls',
+        '--cert': 'cert', '--key': 'key', '--ca': 'ca',
+        '--profiles': 'profiles', '--domain': 'domain',
+        '--subnet': 'subnet', '--server-ip': 'server_ip',
+        '--interface': 'interface',
+    }
+
+    def _listeners_parse_flags(self, argv):
+        """Parse in-REPL create flags. Returns (opts, error)."""
+        opts = {}
+        i = 0
+        while i < len(argv):
+            a = argv[i]
+            if a == '--no-enabled':
+                opts['enabled'] = False
+                i += 1
+                continue
+            key = self._LISTENER_CREATE_FLAGS.get(a)
+            if key is None:
+                return None, f'unknown flag: {a}'
+            if i + 1 >= len(argv):
+                return None, f'{a} needs a value'
+            opts[key] = argv[i + 1]
+            i += 2
+        return opts, None
+
+    def _cmd_listeners(self, parts):
+        """listeners [list | show <id> | create <type> [flags] |
+                      start <id> | stop <id> | edit <id> |
+                      delete <id> | help]
+
+        Flags are parsed in-REPL; with no flags the wizard runs.
+        Both paths feed the same spec builder, so the API payload
+        is identical. There are no listener flags on `tornadoc2.py`.
+        """
+        c = CLR
+        if 'listener.view' not in self.caps:
+            print(f"{c['red']}your role does not include "
+                  f"listener.view{c['reset']}")
+            return
+
+        sub = (parts[1].lower() if len(parts) > 1 else 'list')
+
+        if sub in ('help', '?', '-h', '--help'):
+            print("listeners [list | show <id> | create <type> "
+                  "[flags] | start <id> | stop <id> | edit <id> | "
+                  "delete <id>]")
+            print(f"  {c['dim']}types: http, quic, websocket, "
+                  f"dns, icmp, wireguard{c['reset']}")
+            print(f"  {c['dim']}create flags: --host --port --tls "
+                  f"--cert --key --ca --profiles --domain "
+                  f"--subnet --server-ip --interface "
+                  f"--no-enabled{c['reset']}")
+            return
+
+        if sub in ('list', 'ls'):
+            self._listeners_list_view()
+            return
+
+        if sub == 'show':
+            if len(parts) < 3:
+                print(f"{c['red']}usage: listeners show <id|name>"
+                      f"{c['reset']}")
+                return
+            self._listeners_show(parts[2])
+            return
+
+        if sub == 'create':
+            if len(parts) < 3:
+                print(f"{c['red']}usage: listeners create "
+                      f"<http|quic|websocket|dns|icmp|wireguard> "
+                      f"[flags]{c['reset']}")
+                return
+            self._listeners_create(parts[2].lower(), parts[3:])
+            return
+
+        if sub in ('start', 'stop', 'delete', 'edit'):
+            if len(parts) < 3:
+                print(f"{c['red']}usage: listeners {sub} "
+                      f"<id|name>{c['reset']}")
+                return
+            self._listeners_mutate(sub, parts[2])
+            return
+
+        print(f"{c['red']}unknown listeners subcommand: {sub}"
+              f"{c['reset']}")
+
+    def _listeners_resolve(self, ref):
+        """Resolve an id or a name to a listener config dict."""
+        ref_low = (ref or '').strip()
+        if not ref_low:
+            return None
+        for lst in (getattr(self, 'listeners', []) or []):
+            if lst.get('id') == ref_low:
+                return lst
+            if lst.get('name') == ref_low:
+                return lst
+        return None
+
+    def _listeners_refresh(self):
+        """Re-fetch the listener list after a mutation."""
+        try:
+            r = self.listener_list()
+            self.listeners = list(r.get('listeners') or [])
+        except Exception:
+            pass
+
+    def _listeners_list_view(self):
+        c = CLR
+        try:
+            r = self.listener_list()
+        except Exception as exc:
+            print(f"{c['red']}listeners list failed: {exc}"
+                  f"{c['reset']}")
+            return
+        rows = r.get('listeners') or []
+        self.listeners = list(rows)
+
+        if not rows:
+            print(f"  {c['dim']}(no listeners configured){c['reset']}")
+            print(f"  {c['dim']}create one with: "
+                  f"listeners create http{c['reset']}")
+            return
+
+        _header(f'LISTENERS  ·  {len(rows)}')
+        for lst in rows:
+            lid = lst.get('id', '?')
+            name = lst.get('name', '?')
+            ltype = lst.get('type', '?')
+            host = lst.get('host', '?')
+            port = lst.get('port', '?')
+            status = lst.get('status', 'stopped')
+            profiles = lst.get('profiles') or []
+            domain = lst.get('domain', '')
+            err = lst.get('error_message') or ''
+
+            if status == 'running':
+                status_s = f"{c['green']}running{c['reset']}"
+            elif status == 'error':
+                status_s = f"{c['red']}error{c['reset']}"
+            else:
+                status_s = f"{c['dim']}stopped{c['reset']}"
+
+            print(f"  {c['cyan']}{name:<20}{c['reset']} "
+                  f"{c['dim']}{lid}{c['reset']}")
+            print(f"    {c['dim']}type   :{c['reset']} {ltype}")
+            print(f"    {c['dim']}bind   :{c['reset']} {host}:{port}")
+            print(f"    {c['dim']}status :{c['reset']} {status_s}")
+            if profiles:
+                print(f"    {c['dim']}profiles:{c['reset']} "
+                      f"{', '.join(profiles)}")
+            if domain:
+                print(f"    {c['dim']}domain :{c['reset']} {domain}")
+            if err:
+                print(f"    {c['red']}error  : {err}{c['reset']}")
+            print()
+
+        print(f"  {c['dim']}show details:    "
+              f"listeners show <id|name>{c['reset']}")
+        print(f"  {c['dim']}start / stop:    "
+              f"listeners <start|stop> <id|name>{c['reset']}")
+        print()
+
+    def _listeners_show(self, ref):
+        c = CLR
+        lst = self._listeners_resolve(ref)
+        if lst is None:
+            print(f"{c['red']}no listener matching {ref!r}"
+                  f"{c['reset']}")
+            return
+        print()
+        print(json.dumps(lst, indent=2, sort_keys=True))
+        print()
+
+    def _listeners_mutate(self, action, ref):
+        c = CLR
+        if action in ('start', 'stop', 'edit') \
+                and 'listener.manage' not in self.caps:
+            print(f"{c['red']}your role does not include "
+                  f"listener.manage{c['reset']}")
+            return
+        if action == 'delete' \
+                and 'listener.delete' not in self.caps:
+            print(f"{c['red']}your role does not include "
+                  f"listener.delete{c['reset']}")
+            return
+
+        lst = self._listeners_resolve(ref)
+        if lst is None:
+            print(f"{c['red']}no listener matching {ref!r}"
+                  f"{c['reset']}")
+            return
+        lid = lst['id']
+
+        if action == 'delete':
+            try:
+                ans = input(
+                    f"  {c['yellow']}delete listener "
+                    f"{lst.get('name')!r} ({lid})? "
+                    f"[y/N]{c['reset']} ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                return
+            if ans not in ('y', 'yes'):
+                print(f"{c['dim']}cancelled{c['reset']}")
+                return
+
+        if action == 'edit':
+            self._listeners_edit(lst)
+            return
+
+        try:
+            if action == 'start':
+                r = self.listener_start(lid)
+            elif action == 'stop':
+                r = self.listener_stop(lid)
+            else:
+                r = self.listener_delete(lid)
+        except Exception as exc:
+            print(f"{c['red']}listeners {action} failed: {exc}"
+                  f"{c['reset']}")
+            return
+        if not r.get('ok'):
+            print(f"{c['red']}{r.get('error', 'failed')}"
+                  f"{c['reset']}")
+            return
+        print(f"{c['green']}✓{c['reset']} {action} "
+              f"{lst.get('name')!r} ({lid})")
+        self._listeners_refresh()
+
+    # ---- create / edit wizards -----------------------------------
+
+    def _listeners_cert_pool(self):
+        if getattr(self, '_listener_cert_pool_cache', None) is None:
+            try:
+                self._listener_cert_pool_cache = self.listener_certs()
+            except Exception:
+                self._listener_cert_pool_cache = {}
+        return self._listener_cert_pool_cache
+
+    def _listeners_pick_path(self, bucket, prompt, default):
+        """Choose a path from a server-side cert list, or type one."""
+        c = CLR
+        pool = self._listeners_cert_pool().get(bucket) or []
+        if not pool:
+            return default
+        print(f"  {c['dim']}{prompt} choices:{c['reset']}")
+        for i, path in enumerate(pool, 1):
+            print(f"    {c['cyan']}{i}.{c['reset']} {path}")
+        suffix = f" [{default}]" if default else ''
+        try:
+            raw = input(f"  {c['green']}▸{c['reset']} {prompt}"
+                        f"{suffix} (number or path): ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return None
+        if not raw:
+            return default
+        if raw.isdigit() and 1 <= int(raw) <= len(pool):
+            return pool[int(raw) - 1]
+        return raw
+
+    def _listeners_pick_profiles(self, default_list, single=False):
+        c = CLR
+        try:
+            r = self.tp.post('/api/v1/c2-profiles', {})
+        except Exception:
+            r = {}
+        rows = r.get('profiles') or []
+        if single:
+            rows = [p for p in rows if p.get('has_dns_label')]
+            if not rows:
+                rows = r.get('profiles') or []
+        names = [p.get('name') for p in rows if p.get('name')]
+        if not names:
+            return list(default_list or [])
+        print(f"  {c['dim']}profiles:{c['reset']}")
+        for i, name in enumerate(names, 1):
+            print(f"    {c['cyan']}{i}.{c['reset']} {name}")
+        dflt = ','.join(default_list or [])
+        suffix = f" [{dflt}]" if dflt else ''
+        try:
+            raw = input(f"  {c['green']}▸{c['reset']} profiles "
+                        f"(numbers or names, blank = all)"
+                        f"{suffix}: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return None
+        if not raw:
+            return list(default_list or [])
+        out = []
+        for tok in raw.split(','):
+            tok = tok.strip()
+            if tok.isdigit() and 1 <= int(tok) <= len(names):
+                out.append(names[int(tok) - 1])
+            elif tok:
+                out.append(tok)
+        if single:
+            return out[:1]
+        return out
+
+    def _listeners_spec_from(self, ltype, flags, answers):
+        """Build the create payload from flags + wizard answers.
+
+        The single source of truth for both the quick path and the
+        wizard; the API never sees two different shapes.
+        """
+        spec = {'type': ltype}
+        spec.update(answers)
+        for key in ('host', 'public_host', 'domain', 'subnet',
+                    'server_ip', 'interface'):
+            if flags.get(key):
+                spec[key] = flags[key]
+        if flags.get('port') is not None:
+            try:
+                spec['port'] = int(flags['port'])
+            except ValueError:
+                spec['port'] = 0
+        if flags.get('profiles'):
+            spec['profiles'] = [
+                p.strip() for p in flags['profiles'].split(',')
+                if p.strip()]
+        mode = flags.get('tls')
+        if mode:
+            tls = dict(spec.get('tls') or {})
+            tls['mode'] = mode
+            for key in ('cert', 'key', 'ca'):
+                if flags.get(key):
+                    tls[f'{key}_path'] = flags[key]
+            spec['tls'] = tls
+        if flags.get('enabled') is False:
+            spec['enabled'] = False
+        return spec
+
+    def _listeners_create(self, ltype, argv):
+        c = CLR
+        if 'listener.manage' not in self.caps:
+            print(f"{c['red']}your role does not include "
+                  f"listener.manage{c['reset']}")
+            return
+        if ltype not in ('http', 'quic', 'websocket',
+                         'dns', 'icmp', 'wireguard'):
+            print(f"{c['red']}unknown listener type: {ltype}"
+                  f"{c['reset']}")
+            return
+        flags, err = self._listeners_parse_flags(argv)
+        if err:
+            print(f"{c['red']}{err}{c['reset']}")
+            return
+
+        def ask(prompt, default=''):
+            suffix = f" [{default}]" if default else ""
+            try:
+                val = input(f"  {prompt}{suffix}: ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                return None
+            return val or default
+
+        def field(key, prompt, default=''):
+            if flags.get(key) is not None:
+                return flags[key]
+            return ask(prompt, default)
+
+        answers = {}
+        print(f"\n{c['cyan']}  Create {ltype} listener{c['reset']}")
+        print(f"{c['cyan']}{'=' * 55}{c['reset']}")
+
+        name = field('name', 'Name', f'{ltype}-1')
+        if name is None:
+            return
+        answers['name'] = name
+
+        host = field('host', 'Bind host', '0.0.0.0')
+        if host is None:
+            return
+        answers['host'] = host
+
+        if ltype == 'icmp':
+            answers['port'] = 0
+            pub = field('public_host', 'Public IPv4', '')
+            if pub is None:
+                return
+            answers['public_host'] = pub
+        else:
+            default_port = {
+                'http': '8881', 'quic': '8883',
+                'websocket': '8884', 'dns': '53',
+                'wireguard': '51820',
+            }.get(ltype, '0')
+            p = field('port', 'Port', default_port)
+            if p is None:
+                return
+            try:
+                answers['port'] = int(p)
+            except ValueError:
+                print(f"{c['red']}invalid port: {p}{c['reset']}")
+                return
+
+        if ltype in ('http', 'quic', 'websocket'):
+            tls_opts = (('server', 'mtls') if ltype != 'websocket'
+                        else ('server', 'none'))
+            if flags.get('tls'):
+                mode = flags['tls']
+            else:
+                print(f"  {c['dim']}TLS mode options: "
+                      f"{', '.join(tls_opts)}{c['reset']}")
+                mode = ask('TLS mode', 'server')
+                if mode is None:
+                    return
+            tls = {'mode': mode}
+            if mode != 'none':
+                cert_def = 'tls_certs/server.pem'
+                if flags.get('cert'):
+                    cert = flags['cert']
+                elif flags.get('tls'):
+                    cert = cert_def
+                else:
+                    cert = self._listeners_pick_path(
+                        'certs', 'Cert path', cert_def)
+                if cert is None:
+                    return
+                key_def = 'tls_certs/server.key'
+                if flags.get('key'):
+                    key = flags['key']
+                elif flags.get('tls'):
+                    key = key_def
+                else:
+                    key = self._listeners_pick_path(
+                        'keys', 'Key path', key_def)
+                if key is None:
+                    return
+                tls['cert_path'] = cert
+                tls['key_path'] = key
+                if mode == 'mtls':
+                    ca_def = 'mtls_certs/ca.pem'
+                    if flags.get('ca'):
+                        ca = flags['ca']
+                    elif flags.get('tls'):
+                        ca = ca_def
+                    else:
+                        ca = self._listeners_pick_path(
+                            'cas', 'CA path', ca_def)
+                    if ca is None:
+                        return
+                    tls['ca_path'] = ca
+            answers['tls'] = tls
+
+            if flags.get('profiles') is not None:
+                answers['profiles'] = [
+                    p.strip() for p in flags['profiles'].split(',')
+                    if p.strip()]
+            else:
+                prof = self._listeners_pick_profiles(None)
+                if prof is None:
+                    return
+                if prof:
+                    answers['profiles'] = prof
+
+        elif ltype == 'dns':
+            domain = field('domain', 'DNS zone', 'c2.example.com')
+            if domain is None:
+                return
+            answers['domain'] = domain
+            if flags.get('profiles') is not None:
+                answers['profiles'] = [
+                    p.strip() for p in flags['profiles'].split(',')
+                    if p.strip()]
+            else:
+                prof = self._listeners_pick_profiles(None, single=True)
+                if prof is None:
+                    return
+                if prof:
+                    answers['profiles'] = prof
+
+        elif ltype == 'icmp':
+            print(f"  {c['dim']}The handler host needs CAP_NET_RAW "
+                  f"(sudo or setcap cap_net_raw).{c['reset']}")
+            if flags.get('profiles') is not None:
+                answers['profiles'] = [
+                    p.strip() for p in flags['profiles'].split(',')
+                    if p.strip()]
+            else:
+                prof = self._listeners_pick_profiles(None, single=True)
+                if prof is None:
+                    return
+                if prof:
+                    answers['profiles'] = prof
+
+        elif ltype == 'wireguard':
+            print(f"  {c['yellow']}Requires CAP_NET_ADMIN and the "
+                  f"wireguard kernel module.{c['reset']}")
+            subnet = field('subnet', 'Subnet', '10.99.0.0/24')
+            if subnet is None:
+                return
+            answers['subnet'] = subnet
+            srv_ip = field('server_ip', 'Server tunnel IPv4',
+                           '10.99.0.1')
+            if srv_ip is None:
+                return
+            answers['server_tunnel_ip'] = srv_ip
+            answers['server_ip'] = srv_ip
+            iface = field('interface', 'Interface (blank = auto)', '')
+            if iface is None:
+                return
+            if iface:
+                answers['interface'] = iface
+
+        if 'enabled' in flags:
+            answers['enabled'] = flags['enabled']
+        else:
+            enabled = ask('Start on next boot? (Y/n)', 'y')
+            if enabled is None:
+                return
+            answers['enabled'] = enabled.lower() not in ('n', 'no')
+
+        spec = self._listeners_spec_from(ltype, flags, answers)
+
+        print()
+        print(f"  {c['dim']}spec: "
+              f"{json.dumps(spec, indent=2)}{c['reset']}")
+
+        try:
+            r = self.listener_create(spec)
+        except Exception as exc:
+            print(f"{c['red']}listeners create failed: {exc}"
+                  f"{c['reset']}")
+            return
+        if not r.get('ok'):
+            print(f"{c['red']}{r.get('error', 'failed')}"
+                  f"{c['reset']}")
+            return
+        created = r.get('listener') or {}
+        lid = created.get('id', '?')
+        print(f"{c['green']}✓{c['reset']} created {spec.get('name')} "
+              f"({lid})")
+        print(f"  {c['dim']}start it with: "
+              f"listeners start {lid}{c['reset']}")
+        self._listeners_refresh()
+
+    def _listeners_edit(self, lst):
+        """Edit a listener. Host/port are locked while running."""
+        c = CLR
+        lid = lst['id']
+        running = (lst.get('status') == 'running')
+        if running:
+            print(f"{c['yellow']}listener is running; stop it "
+                  f"first with `listeners stop {lid}` to edit "
+                  f"host or port{c['reset']}")
+        print(f"\n{c['cyan']}  Edit listener {lid}{c['reset']}")
+        print(f"{c['cyan']}{'=' * 55}{c['reset']}")
+
+        def ask(prompt, default=''):
+            suffix = f" [{default}]" if default else ""
+            try:
+                val = input(f"  {prompt}{suffix}: ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                return None
+            return val or default
+
+        patch = {}
+
+        name = ask('Name', lst.get('name', ''))
+        if name is None:
+            return
+        if name != lst.get('name'):
+            patch['name'] = name
+
+        if not running:
+            host = ask('Bind host', lst.get('host', ''))
+            if host is None:
+                return
+            if host != lst.get('host'):
+                patch['host'] = host
+
+            if lst.get('type') != 'icmp':
+                port = ask('Port', str(lst.get('port', '')))
+                if port is None:
+                    return
+                try:
+                    port_int = int(port)
+                except ValueError:
+                    print(f"{c['red']}invalid port{c['reset']}")
+                    return
+                if port_int != lst.get('port'):
+                    patch['port'] = port_int
+
+        if lst.get('type') in ('http', 'quic', 'websocket'):
+            tls = dict(lst.get('tls') or {})
+            print(f"  {c['dim']}current TLS mode: "
+                  f"{tls.get('mode', 'server')}{c['reset']}")
+            new_mode = ask('TLS mode', tls.get('mode', 'server'))
+            if new_mode is None:
+                return
+            tls_changed = new_mode != tls.get('mode')
+            tls['mode'] = new_mode
+            if new_mode != 'none':
+                cert = self._listeners_pick_path(
+                    'certs', 'Cert path',
+                    tls.get('cert_path') or 'tls_certs/server.pem')
+                if cert is None:
+                    return
+                key = self._listeners_pick_path(
+                    'keys', 'Key path',
+                    tls.get('key_path') or 'tls_certs/server.key')
+                if key is None:
+                    return
+                tls['cert_path'] = cert
+                tls['key_path'] = key
+                if new_mode == 'mtls':
+                    ca = self._listeners_pick_path(
+                        'cas', 'CA path',
+                        tls.get('ca_path') or 'mtls_certs/ca.pem')
+                    if ca is None:
+                        return
+                    tls['ca_path'] = ca
+            if tls_changed or tls != (lst.get('tls') or {}):
+                patch['tls'] = tls
+            profiles = ','.join(lst.get('profiles') or [])
+            new_p = ask('Profiles (comma-separated)', profiles)
+            if new_p is None:
+                return
+            new_plist = [p.strip() for p in new_p.split(',')
+                         if p.strip()]
+            if new_plist != (lst.get('profiles') or []):
+                patch['profiles'] = new_plist
+
+        if lst.get('type') == 'dns':
+            domain = ask('DNS zone', lst.get('domain', ''))
+            if domain is None:
+                return
+            if domain != lst.get('domain'):
+                patch['domain'] = domain
+
+        if lst.get('type') == 'wireguard':
+            subnet = ask('Subnet', lst.get('subnet', ''))
+            if subnet is None:
+                return
+            if subnet != lst.get('subnet'):
+                patch['subnet'] = subnet
+            srv_ip = ask('Server tunnel IPv4',
+                         lst.get('server_tunnel_ip', ''))
+            if srv_ip is None:
+                return
+            if srv_ip != lst.get('server_tunnel_ip'):
+                patch['server_tunnel_ip'] = srv_ip
+
+        enabled = ask('Start on next boot? (y/n)',
+                      'y' if lst.get('enabled') else 'n')
+        if enabled is None:
+            return
+        enabled_bool = enabled.lower() in ('y', 'yes')
+        if enabled_bool != lst.get('enabled'):
+            patch['enabled'] = enabled_bool
+
+        if not patch:
+            print(f"{c['dim']}nothing changed{c['reset']}")
+            return
+
+        try:
+            r = self.listener_update(lid, patch)
+        except Exception as exc:
+            print(f"{c['red']}listeners update failed: {exc}"
+                  f"{c['reset']}")
+            return
+        if not r.get('ok'):
+            print(f"{c['red']}{r.get('error', 'failed')}"
+                  f"{c['reset']}")
+            return
+        print(f"{c['green']}✓{c['reset']} updated {lid}")
+        self._listeners_refresh()
+
     def _cmd_c2_profiles(self, parts):
         """c2-profiles [<name>]
 
@@ -3829,21 +4626,21 @@ class Client:
         print()
 
     def _cmd_ai(self, parts):
-        """ai [<question>]
+        """ai [<question>] | ai config [...]
 
-        No argument — open the AI console inline, sharing this
-        session's authenticated Client. When the console exits,
-        control returns to this REPL.
-
-        With a question — run a single turn, print the answer,
-        return to the prompt. Cheaper than opening the full
-        console for a one-line question.
+        No argument opens the AI console inline. `ai config` edits
+        the provider settings without touching JSON; with flags it
+        writes them non-interactively.
         """
         c = CLR
+        if len(parts) > 1 and parts[1].lower() in (
+                'config', 'setup', 'configure'):
+            return self._cmd_ai_config(parts[2:])
+
         try:
             from tornadoc2_mcp.adapter import ClientAdapter
             from tornadoc2_mcp.config import (
-                load_ai_config, DEFAULT_AI_PATH,
+                DEFAULT_AI_PATH, ensure_ai_config, load_ai_config,
             )
             from tornadoc2_mcp.console.loop import (
                 run_console, run_one_shot,
@@ -3856,8 +4653,8 @@ class Client:
                       f"pip install httpx{c['reset']}")
             elif 'tornadoc2_mcp' in msg:
                 print(f"{c['dim']}tornadoc2_mcp is not importable. "
-                      f"run beacon-client.py from the repository "
-                      f"root, or add the repo root to PYTHONPATH."
+                      f"run beacon-client.py from the client "
+                      f"directory, or add it to PYTHONPATH."
                       f"{c['reset']}")
             else:
                 print(f"{c['dim']}check that the tornadoc2_mcp "
@@ -3866,14 +4663,28 @@ class Client:
             return
 
         try:
-            ai_cfg = load_ai_config(DEFAULT_AI_PATH)
+            created = ensure_ai_config(DEFAULT_AI_PATH)
+            if created:
+                print(f"{c['dim']}created {DEFAULT_AI_PATH} "
+                      f"(skeleton, 0600){c['reset']}")
+            ai_cfg = load_ai_config(DEFAULT_AI_PATH,
+                                    require_provider=True)
         except Exception as exc:
-            print(f"{c['red']}ai: {exc}{c['reset']}")
+            print(f"{c['yellow']}ai is not configured yet: "
+                  f"{exc}{c['reset']}")
             hint = getattr(exc, 'hint', '') or ''
             if hint:
-                for line in hint.splitlines():
-                    print(f"{c['dim']}{line}{c['reset']}")
-            return
+                print(f"{c['dim']}{hint}{c['reset']}")
+            print(f"{c['cyan']}opening the settings editor…"
+                  f"{c['reset']}")
+            if not self._ai_config_edit():
+                return
+            try:
+                ai_cfg = load_ai_config(DEFAULT_AI_PATH,
+                                        require_provider=True)
+            except Exception as exc2:
+                print(f"{c['red']}ai: {exc2}{c['reset']}")
+                return
 
         adapter = ClientAdapter(self)
 
@@ -3889,6 +4700,283 @@ class Client:
             print()
         except Exception as exc:
             print(f"{c['red']}ai error: {exc}{c['reset']}")
+
+    # ---- AI settings -------------------------------------------------
+
+    _AI_CONFIG_FLAGS = (
+        '--provider', '--model', '--api-key', '--base-url',
+        '--temperature', '--max-tokens', '--max-context',
+        '--max-turns', '--build-dir', '--allow-verb',
+        '--allow-bof', '--listener-create', '--listener-delete',
+    )
+
+    def _cmd_ai_config(self, argv):
+        from tornadoc2_mcp.config import (
+            DEFAULT_AI_PATH, load_ai_config, redacted_view,
+            save_ai_config,
+        )
+        c = CLR
+        sub = argv[0].lower() if argv else 'edit'
+
+        if sub == 'show':
+            try:
+                cfg = load_ai_config(DEFAULT_AI_PATH)
+            except Exception as exc:
+                print(f"{c['red']}{exc}{c['reset']}")
+                return
+            print(json.dumps(redacted_view(cfg), indent=2,
+                             sort_keys=True))
+            print(f"  {c['dim']}path: {DEFAULT_AI_PATH}{c['reset']}")
+            return
+
+        if sub in ('edit', 'setup', 'configure'):
+            self._ai_config_edit()
+            return
+
+        patch, err = self._ai_config_parse_flags(argv)
+        if err:
+            print(f"{c['red']}{err}{c['reset']}")
+            return
+        try:
+            cfg = save_ai_config(DEFAULT_AI_PATH, patch,
+                                 require_provider=True)
+        except Exception as exc:
+            print(f"{c['red']}save failed: {exc}{c['reset']}")
+            hint = getattr(exc, 'hint', '') or ''
+            if hint:
+                print(f"{c['dim']}{hint}{c['reset']}")
+            return
+        print(f"{c['green']}✓{c['reset']} saved {DEFAULT_AI_PATH} "
+              f"({cfg.provider}/{cfg.model})")
+
+    def _ai_config_parse_flags(self, argv):
+        patch = {}
+        verbs = []
+        bofs = []
+        i = 0
+        while i < len(argv):
+            flag = argv[i]
+            if flag not in self._AI_CONFIG_FLAGS:
+                return None, f'unknown flag: {flag}'
+            if i + 1 >= len(argv):
+                return None, f'{flag} needs a value'
+            val = argv[i + 1]
+            i += 2
+            if flag == '--provider':
+                patch['provider'] = val.strip().lower()
+            elif flag == '--model':
+                patch['model'] = val.strip()
+            elif flag == '--api-key':
+                patch['api_key'] = val.strip()
+            elif flag == '--base-url':
+                patch['base_url'] = val.strip()
+            elif flag == '--build-dir':
+                patch['build_output_dir'] = val.strip()
+            elif flag == '--allow-verb':
+                verbs.append(val.strip())
+            elif flag == '--allow-bof':
+                bofs.append(val.strip())
+            elif flag in ('--listener-create', '--listener-delete'):
+                low = val.strip().lower()
+                if low not in ('on', 'off', 'true', 'false', 'yes', 'no'):
+                    return None, f'{flag} must be on or off'
+                key = ('mcp_allow_listener_create'
+                       if flag == '--listener-create'
+                       else 'mcp_allow_listener_delete')
+                patch[key] = low in ('on', 'true', 'yes')
+            else:
+                try:
+                    patch[flag[2:].replace('-', '_')] = float(val)
+                except ValueError:
+                    return None, f'{flag} must be a number'
+        if verbs:
+            patch['mcp_allow_verbs'] = verbs
+        if bofs:
+            patch['mcp_allow_bofs'] = bofs
+        if not patch:
+            return None, 'no flags given; run `ai config` to edit'
+        return patch, None
+
+    def _ai_ask_key(self, current: str) -> str:
+        import getpass
+        shown = 'set (blank keeps)' if current else 'not set'
+        try:
+            val = getpass.getpass(
+                f"  API key [{shown}]: ", stream=None)
+        except Exception:
+            val = input(f"  API key [{shown}]: ")
+        return val.strip() or current
+
+    def _ai_toggle_list(self, title, available, selected):
+        """Checkbox-style multi-select over a known list."""
+        c = CLR
+        chosen = set(selected)
+        names = list(dict.fromkeys(list(available) + list(chosen)))
+        while True:
+            print(f"  {c['dim']}{title}{c['reset']}")
+            for i, name in enumerate(names, 1):
+                mark = 'x' if name in chosen else ' '
+                print(f"    {c['cyan']}{i:>3}. [{mark}]{c['reset']} "
+                      f"{name}")
+            try:
+                raw = input(
+                    f"  {c['green']}▸{c['reset']} toggle numbers or "
+                    f"names (blank = done): ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                return sorted(chosen)
+            if not raw:
+                return sorted(chosen)
+            for tok in raw.split():
+                if tok.isdigit() and 1 <= int(tok) <= len(names):
+                    name = names[int(tok) - 1]
+                else:
+                    name = tok
+                if name in chosen:
+                    chosen.discard(name)
+                else:
+                    chosen.add(name)
+
+    def _ai_config_edit(self) -> bool:
+        from tornadoc2_mcp.config import (
+            DEFAULT_AI_PATH, KEYLESS_PROVIDERS, _VALID_PROVIDERS,
+            load_ai_config, redacted_view, save_ai_config,
+        )
+        c = CLR
+        try:
+            cfg = load_ai_config(DEFAULT_AI_PATH)
+        except Exception as exc:
+            print(f"{c['red']}{exc}{c['reset']}")
+            return False
+
+        def ask(prompt, default=''):
+            suffix = f" [{default}]" if default else ''
+            try:
+                val = input(f"  {c['green']}▸{c['reset']} "
+                            f"{prompt}{suffix}: ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                return None
+            return val or default
+
+        print(f"\n{c['cyan']}  AI settings{c['reset']}  "
+              f"{c['dim']}{DEFAULT_AI_PATH}{c['reset']}")
+        print(f"  {c['dim']}blank keeps the current value; "
+              f"Ctrl+C cancels{c['reset']}")
+
+        providers = list(_VALID_PROVIDERS)
+        print(f"  {c['dim']}providers (keyless: "
+              f"{', '.join(sorted(KEYLESS_PROVIDERS))}){c['reset']}")
+        for i, p in enumerate(providers, 1):
+            mark = '*' if p == cfg.provider else ' '
+            print(f"    {c['cyan']}{i:>2}.{mark}{c['reset']} {p}")
+        raw = ask('Provider', cfg.provider)
+        if raw is None:
+            return False
+        if raw.isdigit() and 1 <= int(raw) <= len(providers):
+            provider = providers[int(raw) - 1]
+        else:
+            provider = raw.lower()
+        if provider not in providers:
+            print(f"{c['red']}unknown provider{c['reset']}")
+            return False
+
+        model = ask('Model', cfg.model)
+        if model is None:
+            return False
+
+        api_key = cfg.api_key
+        if provider not in KEYLESS_PROVIDERS:
+            api_key = self._ai_ask_key(cfg.api_key)
+        else:
+            print(f"  {c['dim']}{provider} needs no API key"
+                  f"{c['reset']}")
+
+        from tornadoc2_mcp.provider_defaults import default_base_url
+        base_default = (
+            cfg.base_url if cfg.base_url and provider == cfg.provider
+            else default_base_url(provider))
+        base_url = ask('Base URL', base_default)
+        if base_url is None:
+            return False
+        temperature = ask('Temperature (0-2)', str(cfg.temperature))
+        if temperature is None:
+            return False
+        max_tokens = ask('Max tokens', str(cfg.max_tokens))
+        if max_tokens is None:
+            return False
+        max_context = ask('Max context tokens',
+                          str(cfg.max_context_tokens))
+        if max_context is None:
+            return False
+        max_turns = ask('Max turns', str(cfg.max_turns))
+        if max_turns is None:
+            return False
+        build_dir = ask('Build output dir', str(cfg.build_output_dir))
+        if build_dir is None:
+            return False
+
+        verbs_avail = []
+        try:
+            cat = self.commands or {}
+            for row in (cat.get('main') or []) + (cat.get('beacon') or []):
+                if isinstance(row, dict) and row.get('name'):
+                    verbs_avail.append(row['name'])
+        except Exception:
+            pass
+        verbs = self._ai_toggle_list(
+            'MCP allow_verbs (queued verbs)', verbs_avail,
+            cfg.mcp_allow_verbs)
+        bofs_avail = []
+        try:
+            rows = self.tp.post('/api/v1/bofs', {}) or []
+            bofs_avail = [r.get('name') for r in rows if r.get('name')]
+        except Exception:
+            pass
+        bofs = self._ai_toggle_list(
+            'MCP allow_bofs', bofs_avail, cfg.mcp_allow_bofs)
+
+        create = ask('allow MCP create_listener (on/off)',
+                     'on' if cfg.mcp_allow_listener_create else 'off')
+        if create is None:
+            return False
+        delete = ask('allow MCP delete_listener (on/off)',
+                     'on' if cfg.mcp_allow_listener_delete else 'off')
+        if delete is None:
+            return False
+
+        patch = {
+            'provider': provider,
+            'model': model,
+            'api_key': api_key,
+            'base_url': base_url,
+            'temperature': float(temperature),
+            'max_tokens': int(max_tokens),
+            'max_context_tokens': int(max_context),
+            'max_turns': int(max_turns),
+            'build_output_dir': build_dir,
+            'mcp_allow_verbs': verbs,
+            'mcp_allow_bofs': bofs,
+            'mcp_allow_listener_create':
+                create.lower() in ('on', 'yes', 'true', 'y'),
+            'mcp_allow_listener_delete':
+                delete.lower() in ('on', 'yes', 'true', 'y'),
+        }
+        try:
+            cfg2 = save_ai_config(DEFAULT_AI_PATH, patch,
+                                  require_provider=True)
+        except Exception as exc:
+            print(f"{c['red']}save failed: {exc}{c['reset']}")
+            hint = getattr(exc, 'hint', '') or ''
+            if hint:
+                print(f"{c['dim']}{hint}{c['reset']}")
+            return False
+
+        print(f"\n  {c['dim']}saved (key not shown):{c['reset']}")
+        view = redacted_view(cfg2)
+        for line in json.dumps(view, indent=2, sort_keys=True).splitlines():
+            print(f"  {c['dim']}{line}{c['reset']}")
+        return True
 
     # ------------------------------------------------------------------
     # Remote build
@@ -4476,16 +5564,42 @@ class Client:
 
             if ('http' in modes or 'quic' in modes
                     or 'websocket' in modes):
-                quic_only = ('quic' in modes
-                             and 'http' not in modes
-                             and 'websocket' not in modes)
-                if quic_only and self.quic_port:
-                    port = self.quic_port
+                ltype = next(m for m in modes
+                             if m in ('http', 'quic', 'websocket'))
+                running = [
+                    lst for lst in (self.listeners or [])
+                    if lst.get('type') == ltype
+                    and lst.get('status') == 'running'
+                ]
+
+                def _url_of(lst):
+                    h = (lst.get('public_host') or lst.get('host')
+                         or self.cfg['server_host'])
+                    if h in ('0.0.0.0', '::'):
+                        h = self.cfg['server_host']
+                    return f"https://{h}:{lst['port']}"
+
+                if len(running) == 1:
+                    default_url = _url_of(running[0])
+                    print(f"    {c['dim']}using listener "
+                          f"{running[0]['name']} "
+                          f"({running[0]['id']}){c['reset']}")
+                elif len(running) > 1:
+                    v = choose(
+                        f'Running {ltype} listener',
+                        [(_url_of(lst), lst['name'],
+                          f"{lst['host']}:{lst['port']}")
+                         for lst in running], 0)
+                    if v in ('BACK', 'CANCEL'):
+                        return v
+                    default_url = v
                 else:
-                    port = (getattr(self, 'beacon_port', None)
-                            or 8881)
-                default_url = (
-                    f"https://{self.cfg['server_host']}:{port}")
+                    print(f"    {c['yellow']}no running {ltype} "
+                          f"listener — create one with "
+                          f"`listeners create {ltype}`; using a "
+                          f"manual URL{c['reset']}")
+                    default_url = (
+                        f"https://{self.cfg['server_host']}:8881")
                 v = ask('Callback URL', default_url,
                         validate=_is_https)
                 if v in ('BACK', 'CANCEL'):
@@ -4493,7 +5607,20 @@ class Client:
                 state['url'] = v
 
             if 'dns' in modes or 'doh' in modes:
-                v = ask('Authoritative zone', 'c2.example.com',
+                running_dns = [
+                    lst for lst in (self.listeners or [])
+                    if lst.get('type') == 'dns'
+                    and lst.get('status') == 'running'
+                ]
+                zone_default = (
+                    (running_dns[0].get('domain')
+                     if running_dns else '')
+                    or 'c2.example.com')
+                if not running_dns:
+                    print(f"    {c['yellow']}no running DNS "
+                          f"listener — create one with "
+                          f"`listeners create dns`{c['reset']}")
+                v = ask('Authoritative zone', zone_default,
                         validate=_is_zone)
                 if v in ('BACK', 'CANCEL'):
                     return v
@@ -4528,7 +5655,23 @@ class Client:
                     f"server needs CAP_NET_RAW on the Python "
                     f"process; see the README for the setcap "
                     f"line.{c['reset']}")
-                v = ask('C2 IPv4 address', validate=_is_ipv4)
+                running_icmp = [
+                    lst for lst in (self.listeners or [])
+                    if lst.get('type') == 'icmp'
+                    and lst.get('status') == 'running'
+                ]
+                if running_icmp and running_icmp[0].get('public_host'):
+                    v = ask(
+                        'C2 IPv4 address',
+                        running_icmp[0]['public_host'],
+                        validate=_is_ipv4)
+                else:
+                    if not running_icmp:
+                        print(f"    {c['yellow']}no running ICMP "
+                              f"listener — create one with "
+                              f"`listeners create icmp`"
+                              f"{c['reset']}")
+                    v = ask('C2 IPv4 address', validate=_is_ipv4)
                 if v in ('BACK', 'CANCEL'):
                     return v
                 state['icmp_host'] = v
@@ -5491,6 +6634,13 @@ class Client:
         W_LAST  = 8
         W_CHK   = 5
         W_VIEW  = 14
+        W_LST   = 12
+        W_PRIV  = 8
+        listener_names = {
+            lst.get('id'): lst.get('name')
+            for lst in (self.listeners or [])
+            if lst.get('id')
+        }
 
         header = (
             f"  {'':2}  "
@@ -5501,6 +6651,8 @@ class Client:
             f"{'LAST':>{W_LAST}}  "
             f"{'CHK':>{W_CHK}}  "
             f"{'VIEWERS':<{W_VIEW}} "
+            f"{'PRIV':<{W_PRIV}} "
+            f"{'LISTENER':<{W_LST}} "
             f"ADDR"
         )
         print(f"{c['bold']}{header}{c['reset']}")
@@ -5524,6 +6676,19 @@ class Client:
             chk = str(b['checkins'])
             addr = b.get('last_addr', '') or '—'
             id_col = c['cyan'] if b['alive'] else c['dim']
+            priv = (b.get('privilege') or 'user')
+            if b.get('elevated'):
+                priv += '!'
+            priv_s = (f"{c['magenta']}{priv}{c['reset']}"
+                      if priv.rstrip('!') in ('admin', 'root', 'system')
+                      else f"{c['dim']}{priv}{c['reset']}")
+            lid = b.get('listener_id')
+            if not lid:
+                lst_col = f"{c['dim']}—{c['reset']}"
+            elif lid in listener_names:
+                lst_col = f"{c['cyan']}{listener_names[lid]}{c['reset']}"
+            else:
+                lst_col = f"{c['dim']}{lid}{c['reset']}"
 
             viewers = b.get('viewers') or []
             if not viewers:
@@ -5548,6 +6713,8 @@ class Client:
                 f"{last:>{W_LAST}}  "
                 f"{chk:>{W_CHK}}  "
                 f"{view_col:<{W_VIEW + 20}} "
+                f"{priv_s:<{W_PRIV + 20}} "
+                f"{lst_col:<{W_LST + 20}} "
                 f"{c['dim']}{addr}{c['reset']}"
             )
         print()

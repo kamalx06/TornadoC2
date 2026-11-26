@@ -95,6 +95,7 @@ class BeaconSession:
         self.tags: List[str] = []
         self.cookie: Optional[str] = None
         self.agent_pubkey = None
+        self.parent_id: Optional[int] = None
 
     # ------------------------------------------------------------------
     # Session state

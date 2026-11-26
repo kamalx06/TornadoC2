@@ -23,6 +23,21 @@ class ChatResponse:
     usage:       dict = field(default_factory=dict)
 
 
+@dataclass
+class StreamEvent:
+    """One incremental event from ``Provider.chat_stream``.
+
+    ``kind`` is ``text`` (delta in ``text``), ``usage`` (token
+    counters in ``usage``) or ``done`` (the assembled response in
+    ``response``). Providers without streaming simply never emit
+    one.
+    """
+    kind:     str
+    text:     str = ''
+    usage:    dict = field(default_factory=dict)
+    response: ChatResponse | None = None
+
+
 class Provider(abc.ABC):
     name: str = ''
     supports_tools: bool = True

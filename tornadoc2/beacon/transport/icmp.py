@@ -110,12 +110,14 @@ class ICMPTransport(DNSTransport):
                 socket.IPPROTO_ICMP)
             self._sock.settimeout(1.0)
         except PermissionError:
+            self._last_error = 'requires CAP_NET_RAW'
             self.log("ICMP transport requires CAP_NET_RAW — run "
                      "the handler with sudo, or set the capability "
                      "on the python binary")
             return False
         except OSError as exc:
-            self.log(f"ICMP socket: {exc}")
+            self._last_error = f'ICMP socket: {exc}'
+            self.log(self._last_error)
             return False
 
         try:
@@ -127,6 +129,7 @@ class ICMPTransport(DNSTransport):
             self._sock_v6 = None
 
         self._running = True
+        self._last_error = None
         self._thread = threading.Thread(
             target=self._recv_loop, args=(self._sock, False),
             daemon=True)
@@ -152,6 +155,13 @@ class ICMPTransport(DNSTransport):
                     s.close()
                 except OSError:
                     pass
+        self._sock = None
+        self._sock_v6 = None
+        for t in (self._thread, self._thread_v6):
+            if t is not None:
+                t.join(timeout=2.0)
+        self._thread = None
+        self._thread_v6 = None
 
     # ------------------------------------------------------------------
     # Receive and dispatch

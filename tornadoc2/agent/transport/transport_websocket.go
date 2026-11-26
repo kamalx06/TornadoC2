@@ -180,6 +180,9 @@ func (t *wsTransport) buildHeaders() http.Header {
 	}
 	if t.profile.UserAgent != "" {
 		h.Set("User-Agent", t.profile.UserAgent)
+		h.Set("Accept-Language", "en-US,en;q=0.9")
+		h.Set("Cache-Control", "no-cache")
+		h.Set("Pragma", "no-cache")
 	}
 	return h
 }

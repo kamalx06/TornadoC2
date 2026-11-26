@@ -61,7 +61,7 @@ func NewTCPBindTransport(addr, token string,
 	agentPriv *ecdsa.PrivateKey,
 	pivotPub *ecdsa.PublicKey,
 	identity protocol.Identity,
-	shaping *features.ShapingSpec) (*tcpBindTransport, error) {	
+	shaping *features.ShapingSpec) (*tcpBindTransport, error) {
 
 	if addr == "" {
 		addr = "0.0.0.0:4444"

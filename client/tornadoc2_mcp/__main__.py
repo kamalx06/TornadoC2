@@ -24,7 +24,8 @@ def main():
     args = p.parse_args()
 
     try:
-        cfg = load_ai_config(args.ai_config)
+        cfg = load_ai_config(args.ai_config,
+                             require_provider=args.ai)
     except errors.McpError as exc:
         print(f'[ai] {exc}', file=sys.stderr)
         hint = getattr(exc, 'hint', '') or ''

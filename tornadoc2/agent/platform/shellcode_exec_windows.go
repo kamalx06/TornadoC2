@@ -14,15 +14,15 @@ import (
 )
 
 var (
-	scKernel32          = syscall.NewLazyDLL("kernel32.dll")
-	scVirtualAlloc      = scKernel32.NewProc("VirtualAlloc")
-	scCreateThread      = scKernel32.NewProc("CreateThread")
-	scWaitForSingle     = scKernel32.NewProc("WaitForSingleObject")
-	scCloseHandle       = scKernel32.NewProc("CloseHandle")
-	scRtlMoveMemory     = scKernel32.NewProc("RtlMoveMemory")
-	scSetStdHandle      = scKernel32.NewProc("SetStdHandle")
-	scGetStdHandle      = scKernel32.NewProc("GetStdHandle")
-	scCreatePipe        = scKernel32.NewProc("CreatePipe")
+	scKernel32      = syscall.NewLazyDLL("kernel32.dll")
+	scVirtualAlloc  = scKernel32.NewProc("VirtualAlloc")
+	scCreateThread  = scKernel32.NewProc("CreateThread")
+	scWaitForSingle = scKernel32.NewProc("WaitForSingleObject")
+	scCloseHandle   = scKernel32.NewProc("CloseHandle")
+	scRtlMoveMemory = scKernel32.NewProc("RtlMoveMemory")
+	scSetStdHandle  = scKernel32.NewProc("SetStdHandle")
+	scGetStdHandle  = scKernel32.NewProc("GetStdHandle")
+	scCreatePipe    = scKernel32.NewProc("CreatePipe")
 )
 
 const (

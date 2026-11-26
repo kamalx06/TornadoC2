@@ -1,6 +1,6 @@
-"""Operator listener over mTLS.
+"""Operator server over mTLS.
 
-The listener is the entire trust boundary between the team server
+The server is the entire trust boundary between the team server
 and remote operators. Every request passes through `_require`,
 which enforces three things:
 
@@ -730,8 +730,56 @@ class OperatorListener:
             return self._with_cap(
                 'beacon.build', self._c2_profiles)
 
+        @app.route('/api/v1/listeners', methods=['POST'])
+        def listeners_list():
+            return self._with_cap(
+                'listener.view', self._listeners_list)
+
+        @app.route('/api/v1/listeners/<lid>', methods=['POST'])
+        def listeners_get(lid):
+            return self._with_cap(
+                'listener.view',
+                lambda n, r, ip: self._listeners_get(n, r, ip, lid))
+
+        @app.route('/api/v1/listeners/certs', methods=['POST'])
+        def listeners_certs():
+            return self._with_cap(
+                'listener.view', self._listeners_certs)
+
+        @app.route('/api/v1/listeners/create', methods=['POST'])
+        def listeners_create():
+            return self._with_cap(
+                'listener.manage', self._listeners_create)
+
+        @app.route('/api/v1/listeners/<lid>/start', methods=['POST'])
+        def listeners_start(lid):
+            return self._with_cap(
+                'listener.manage',
+                lambda n, r, ip: self._listeners_start(n, r, ip, lid))
+
+        @app.route('/api/v1/listeners/<lid>/stop', methods=['POST'])
+        def listeners_stop(lid):
+            return self._with_cap(
+                'listener.manage',
+                lambda n, r, ip: self._listeners_stop(n, r, ip, lid))
+
+        @app.route('/api/v1/listeners/<lid>/update', methods=['POST'])
+        def listeners_update(lid):
+            return self._with_cap(
+                'listener.manage',
+                lambda n, r, ip: self._listeners_update(n, r, ip, lid))
+
+        @app.route('/api/v1/listeners/<lid>/delete', methods=['POST'])
+        def listeners_delete(lid):
+            return self._with_cap(
+                'listener.delete',
+                lambda n, r, ip: self._listeners_delete(
+                    n, r, ip, lid))
+
         return app
 
+    # ------------------------------------------------------------------
+    # Beacon management
 
     def _beacon_kill(self, name, role, ip):
         """Bulk self-destruct.
@@ -3895,6 +3943,7 @@ class OperatorListener:
                 'client_tunnel_port': tunnel_port,
                 'quic_port': quic_port,
                 'beacon_port': beacon_port,
+                'listeners': self._identify_listeners(role),
             })
         finally:
             _concurrent_release(name)
@@ -3939,6 +3988,12 @@ class OperatorListener:
                 'viewers': others,
                 'viewer_count': len(others),
                 'spawnto': getattr(s, 'spawn_to', '') or '',
+                'listener_id': getattr(s, 'listener_id', None),
+                'privilege': s.identity.get('privilege', 'user'),
+                'elevated': bool(s.identity.get('elevated')),
+                'integrity': s.identity.get('integrity', ''),
+                'parent_name': s.identity.get('parent_name', ''),
+                'parent_id': getattr(s, 'parent_id', None),
             })
 
         return jsonify(beacons)
@@ -4130,6 +4185,9 @@ class OperatorListener:
         mode = (payload.get('mode') or 'tree').lower()
 
         g = Graph(self.engine)
+
+        if mode == 'json':
+            return jsonify(g.build())
 
         if mode == 'path':
             try:
@@ -4378,6 +4436,269 @@ class OperatorListener:
         })
 
     # ------------------------------------------------------------------
+    # Listener management
+
+    def _lman(self):
+        """Return the ListenerManager or None.
+
+        The handler is the entry point that owns the manager.
+        Nothing else in this file touches the manager directly.
+        """
+        handler = getattr(self.engine, 'handler', None)
+        if handler is None:
+            return None
+        return getattr(handler, '_listener_manager', None)
+
+    def _lman_err(self, name, role, ip, action, exc):
+        """Translate a manager exception to a JSON error response
+        with an audit entry."""
+        from ..beacon.listener_manager import (
+            ListenerNotFound, ListenerInvalid,
+            ListenerConflict, ListenerStateError,
+            ListenerStartError,
+        )
+        if isinstance(exc, ListenerNotFound):
+            code = 404
+        elif isinstance(exc, ListenerInvalid):
+            code = 400
+        elif isinstance(exc, (ListenerConflict,
+                              ListenerStateError)):
+            code = 409
+        elif isinstance(exc, ListenerStartError):
+            code = 500
+        else:
+            code = 400
+        audit_id = self.audit.write(
+            operator=name, role=role, source_ip=ip,
+            action=action, outcome='error',
+            detail=str(exc)[:200])
+        resp = jsonify({'error': str(exc),
+                        'audit_id': audit_id})
+        resp.status_code = code
+        resp.headers['X-Audit-Id'] = audit_id
+        return resp
+
+    def _identify_listeners(self, role, is_local=False):
+        """Role-filtered listener list for /identify.
+
+        Viewers and guardians see nothing — the existence of a
+        bound port reveals the team's transport shape, and the
+        route-level RBAC on /api/v1/listeners is the authoritative
+        gate. This is the belt-and-suspenders filter so a future
+        capability-matrix edit cannot accidentally leak the list
+        through /identify.
+        """
+        if not constants.has_capability(
+                role, 'listener.view', is_local=is_local):
+            return []
+        mgr = self._lman()
+        if mgr is None:
+            return []
+        try:
+            rows = mgr.list()
+        except Exception:
+            return []
+        return [
+            {
+                'id':          r.get('id'),
+                'name':        r.get('name'),
+                'type':        r.get('type'),
+                'host':        r.get('host'),
+                'port':        r.get('port'),
+                'public_host': r.get('public_host', ''),
+                'enabled':     r.get('enabled'),
+                'status':      r.get('status'),
+                'profiles':    r.get('profiles') or [],
+                'domain':      r.get('domain', ''),
+            }
+            for r in rows
+        ]
+
+    def _listeners_certs(self, name, role, ip):
+        """List cert/key/CA material under the two allowed roots.
+
+        Read-only catalogue for the console and GUI pickers. Paths
+        are repo-relative; the manager re-validates on create.
+        """
+        repo = _os.path.dirname(
+            _os.path.dirname(_os.path.abspath(__file__)))
+        out = {'certs': [], 'keys': [], 'cas': []}
+        for sub in ('tls_certs', 'mtls_certs'):
+            root = _os.path.join(repo, sub)
+            if not _os.path.isdir(root):
+                continue
+            try:
+                entries = sorted(_os.listdir(root))
+            except OSError:
+                continue
+            for entry in entries:
+                full = _os.path.join(root, entry)
+                if not _os.path.isfile(full):
+                    continue
+                rel = f'{sub}/{entry}'
+                low = entry.lower()
+                if low.endswith('.key'):
+                    out['keys'].append(rel)
+                elif low.endswith(('.pem', '.crt')):
+                    bucket = 'cas' if 'ca' in low else 'certs'
+                    out[bucket].append(rel)
+        audit_id = self.audit.write(
+            operator=name, role=role, source_ip=ip,
+            action='listener.certs',
+            detail=(f"certs={len(out['certs'])} "
+                    f"keys={len(out['keys'])} "
+                    f"cas={len(out['cas'])}"))
+        return jsonify({**out, 'audit_id': audit_id})
+
+    def _listeners_list(self, name, role, ip):
+        if not constants.has_capability(
+                role, 'listener.view', is_local=False):
+            audit_id = self.audit.write(
+                operator=name, role=role, source_ip=ip,
+                action='listener.list', outcome='denied',
+                detail='role lacks listener.view')
+            resp = jsonify({'listeners': [],
+                            'audit_id': audit_id})
+            resp.headers['X-Audit-Id'] = audit_id
+            return resp
+        mgr = self._lman()
+        if mgr is None:
+            return Response(status=503)
+        try:
+            rows = mgr.list()
+        except Exception as exc:
+            return self._lman_err(
+                name, role, ip, 'listener.list', exc)
+        audit_id = self.audit.write(
+            operator=name, role=role, source_ip=ip,
+            action='listener.list',
+            detail=f'{len(rows)} listeners')
+        return jsonify({'listeners': rows, 'audit_id': audit_id})
+
+    def _listeners_get(self, name, role, ip, lid):
+        mgr = self._lman()
+        if mgr is None:
+            return Response(status=503)
+        cfg = mgr.get(lid)
+        if cfg is None:
+            audit_id = self.audit.write(
+                operator=name, role=role, source_ip=ip,
+                action='listener.get', target=lid,
+                outcome='error', detail='not found')
+            resp = jsonify({
+                'error': f'listener {lid!r} not found',
+                'audit_id': audit_id,
+            })
+            resp.status_code = 404
+            resp.headers['X-Audit-Id'] = audit_id
+            return resp
+        audit_id = self.audit.write(
+            operator=name, role=role, source_ip=ip,
+            action='listener.get', target=lid,
+            detail=(f'{cfg.get("type")} '
+                    f'{cfg.get("host")}:{cfg.get("port")}'))
+        return jsonify({'listener': cfg, 'audit_id': audit_id})
+
+    def _listeners_create(self, name, role, ip):
+        mgr = self._lman()
+        if mgr is None:
+            return Response(status=503)
+        payload = request.get_json(force=True, silent=True) or {}
+        spec = payload.get('spec')
+        if not isinstance(spec, dict):
+            spec = payload
+        try:
+            created = mgr.create(spec, by=name)
+        except Exception as exc:
+            return self._lman_err(
+                name, role, ip, 'listener.create', exc)
+        audit_id = self.audit.write(
+            operator=name, role=role, source_ip=ip,
+            action='listener.create', target=created['id'],
+            detail=(f"type={created['type']} "
+                    f"bind={created['host']}:{created['port']} "
+                    f"enabled={created.get('enabled')}"))
+        resp = jsonify({'ok': True, 'listener': created,
+                        'audit_id': audit_id})
+        resp.headers['X-Audit-Id'] = audit_id
+        return resp
+
+    def _listeners_start(self, name, role, ip, lid):
+        mgr = self._lman()
+        if mgr is None:
+            return Response(status=503)
+        try:
+            cfg = mgr.start(lid, by=name)
+        except Exception as exc:
+            return self._lman_err(
+                name, role, ip, 'listener.start', exc)
+        audit_id = self.audit.write(
+            operator=name, role=role, source_ip=ip,
+            action='listener.start', target=lid,
+            detail=(f"{cfg.get('type')} "
+                    f"{cfg.get('host')}:{cfg.get('port')}"))
+        resp = jsonify({'ok': True, 'listener': cfg,
+                        'audit_id': audit_id})
+        resp.headers['X-Audit-Id'] = audit_id
+        return resp
+
+    def _listeners_stop(self, name, role, ip, lid):
+        mgr = self._lman()
+        if mgr is None:
+            return Response(status=503)
+        try:
+            cfg = mgr.stop(lid, by=name)
+        except Exception as exc:
+            return self._lman_err(
+                name, role, ip, 'listener.stop', exc)
+        audit_id = self.audit.write(
+            operator=name, role=role, source_ip=ip,
+            action='listener.stop', target=lid,
+            detail=(f"{cfg.get('type')} "
+                    f"{cfg.get('host')}:{cfg.get('port')}"))
+        resp = jsonify({'ok': True, 'listener': cfg,
+                        'audit_id': audit_id})
+        resp.headers['X-Audit-Id'] = audit_id
+        return resp
+
+    def _listeners_update(self, name, role, ip, lid):
+        mgr = self._lman()
+        if mgr is None:
+            return Response(status=503)
+        payload = request.get_json(force=True, silent=True) or {}
+        try:
+            cfg = mgr.update(lid, payload, by=name)
+        except Exception as exc:
+            return self._lman_err(
+                name, role, ip, 'listener.update', exc)
+        audit_id = self.audit.write(
+            operator=name, role=role, source_ip=ip,
+            action='listener.update', target=lid,
+            detail=f'fields={",".join(sorted(payload))}')
+        resp = jsonify({'ok': True, 'listener': cfg,
+                        'audit_id': audit_id})
+        resp.headers['X-Audit-Id'] = audit_id
+        return resp
+
+    def _listeners_delete(self, name, role, ip, lid):
+        mgr = self._lman()
+        if mgr is None:
+            return Response(status=503)
+        try:
+            mgr.delete(lid, by=name)
+        except Exception as exc:
+            return self._lman_err(
+                name, role, ip, 'listener.delete', exc)
+        audit_id = self.audit.write(
+            operator=name, role=role, source_ip=ip,
+            action='listener.delete', target=lid,
+            detail='deleted')
+        resp = jsonify({'ok': True, 'id': lid,
+                        'audit_id': audit_id})
+        resp.headers['X-Audit-Id'] = audit_id
+        return resp
+
+    # ------------------------------------------------------------------
     # C2 profile catalogue
 
     def _c2_profiles(self, name, role, ip):
@@ -4480,6 +4801,7 @@ class OperatorListener:
                 'request_headers':  prof.get('request_headers') or {},
                 'has_shaping':      bool(shaping),
                 'shaping_kinds':    shape_kinds,
+                'has_dns_label':    bool(prof.get('dns_label')),
             })
 
         audit_id = self.audit.write(

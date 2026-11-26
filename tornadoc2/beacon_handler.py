@@ -11,8 +11,11 @@ no plugin system. What lives here is:
   * The TLS / mTLS certificate bootstrap.
   * The operator console with readline completion.
   * The ``beacon-build`` wizard and the non-interactive build path.
-  * A thin startup that boots ``BeaconListener`` and drops into the
-    main loop.
+  * A ``ListenerManager`` that owns every beacon-facing transport
+    (HTTP, QUIC, WebSocket, DNS, ICMP, WireGuard). The manager is
+    constructed in ``__init__``; the persisted listener set is
+    loaded and started by ``start()``. The handler itself never
+    binds a beacon port.
 
 The beacon engine reads exactly three attributes off this handler:
 
@@ -127,13 +130,16 @@ class BeaconHandler:
     """The operator-side handler for the beacon subsystem.
 
     Provides the minimum surface the beacon engine, listener, and
-    console need. No listeners are started in ``__init__`` — the
-    beacon listener is created by ``start()`` and owns its own TLS
-    context."""
+    console need. No listeners are started in ``__init__``. The
+    ``ListenerManager`` is constructed empty; ``start()`` loads the
+    persisted listener set from ``listeners.json`` and starts every
+    listener whose ``enabled`` flag is true. Per-listener failures
+    (port in use, missing cert, ``CAP_NET_ADMIN`` absent) mark that
+    listener as ``status='error'`` and do not prevent the others
+    from starting."""
 
     def __init__(self,
                  host='0.0.0.0',
-                 beacon_port=8881,
                  certfile=os.path.join('tls_certs', 'server.pem'),
                  keyfile=os.path.join('tls_certs', 'server.key'),
                  mtls_ca_cert=os.path.join('mtls_certs', 'ca.pem'),
@@ -146,7 +152,9 @@ class BeaconHandler:
                  mtls_client_key=os.path.join(
                      'mtls_certs', 'client.key')):
         self.host = host
-        self.beacon_port = beacon_port
+        # Pivot (+1) and client-tunnel (+2) ports are derived from
+        # this fixed base; beacon listeners live in the manager.
+        self.beacon_port = 8881
         self.certfile = certfile
         self.keyfile = keyfile
         self.mtls_ca_cert = mtls_ca_cert
@@ -196,7 +204,6 @@ class BeaconHandler:
 
         self.beacon = None
         self.beacon_console = None
-        self._beacon_listener = None
         self._pivot_manager = None
         self._client_tunnel = None
         self.no_audit_verify = False
@@ -208,34 +215,20 @@ class BeaconHandler:
         self._multiplayer = None
         self.multiplayer_off = False
 
-        self.beacon_mtls_ca = None
-        self.beacon_mtls_dir = None
-        self.beacon_mtls_server_cert = None
-        self.beacon_mtls_server_key = None
-
-        self.beacon_c2_profile = None
-
-        self.dns_port = None
-        self.dns_domain = None
-        self._dns_transport = None
-        self.icmp_enabled = False
-        self._icmp_transport = None
-
-        self.quic_port = None
-        self._quic_listener = None
-
-        self.ws_port = None
-        self.ws_host = None
-        self._ws_listener = None
-        self._ws_server = None
-
-        self.wireguard_enabled = False
-        self.wireguard_port = 51820
-        self.wireguard_subnet = '10.99.0.0/24'
-        self.wireguard_server_ip = '10.99.0.1'
-        self._wireguard_transport = None
-
-        self.profile = None
+        # Listener state lives in the ListenerManager. The manager
+        # owns <repo>/listeners.json and exposes create/start/stop/
+        # delete/list/update. The handler no longer holds per-
+        # transport attributes; every beacon-facing bind goes
+        # through self._listener_manager. Handler restart re-reads
+        # the store and re-starts every listener whose `enabled`
+        # flag is true — nothing here persists across boots.
+        self._listener_manager = None
+        try:
+            from .beacon.listener_manager import ListenerManager
+            self._listener_manager = ListenerManager(self)
+        except Exception as _lm_exc:
+            print(f"[listeners] manager unavailable: {_lm_exc}. "
+                  f"Beacon listeners cannot be started.")
 
         self._completer_mode = 'main'
         self._completion_matches = []
@@ -269,9 +262,82 @@ class BeaconHandler:
 
 {c['dim']}{'─' * 62}{c['end']}
 
-{c['green']}Listener:{c['end']} {self.host}:{self.beacon_port}
+{c['green']}Listeners:{c['end']} {self._listener_summary()}
 """
         print(banner)
+
+    def _listener_summary(self):
+        """One-line summary for the banner.
+
+        Returns the running/total count and the set of transport
+        types currently bound, or a pointer to `listeners create`
+        if none are configured.
+        """
+        if self._listener_manager is None:
+            return "unavailable"
+        try:
+            running = self._listener_manager.list(running_only=True)
+            all_lst = self._listener_manager.list()
+        except Exception:
+            return "unavailable"
+        if not all_lst:
+            return "0 listeners configured — use `listeners create`"
+        if not running:
+            return (f"0/{len(all_lst)} running — "
+                    f"use `listeners start <id>`")
+        types = sorted({lst['type'] for lst in running})
+        return (f"{len(running)}/{len(all_lst)} running "
+                f"({', '.join(types)})")
+
+    # ------------------------------------------------------------------
+    # Listener management pass-throughs
+
+    def listener_list(self):
+        if self._listener_manager is None:
+            return []
+        return self._listener_manager.list()
+
+    def listener_get(self, listener_id):
+        if self._listener_manager is None:
+            return None
+        return self._listener_manager.get(listener_id)
+
+    def listener_create(self, spec, by):
+        if self._listener_manager is None:
+            raise RuntimeError('listener manager unavailable')
+        return self._listener_manager.create(spec, by=by)
+
+    def listener_start(self, listener_id, by):
+        if self._listener_manager is None:
+            raise RuntimeError('listener manager unavailable')
+        return self._listener_manager.start(listener_id, by=by)
+
+    def listener_stop(self, listener_id, by):
+        if self._listener_manager is None:
+            raise RuntimeError('listener manager unavailable')
+        return self._listener_manager.stop(listener_id, by=by)
+
+    def listener_delete(self, listener_id, by):
+        if self._listener_manager is None:
+            raise RuntimeError('listener manager unavailable')
+        return self._listener_manager.delete(listener_id, by=by)
+
+    def listener_update(self, listener_id, patch, by):
+        if self._listener_manager is None:
+            raise RuntimeError('listener manager unavailable')
+        return self._listener_manager.update(
+            listener_id, patch, by=by)
+
+    def listener_reload_store(self):
+        """Re-read listeners.json and reconcile running state.
+
+        Used by the operator API after a listener mutation that
+        was made through the console. The manager is the single
+        source of truth; this just exposes its reload hook.
+        """
+        if self._listener_manager is None:
+            return
+        self._listener_manager.reload()
 
     # ------------------------------------------------------------------
     # Restart support
@@ -280,11 +346,13 @@ class BeaconHandler:
         if not self._shutdown_lock.acquire(blocking=False):
             return
         try:
+            if self._listener_manager is not None:
+                try:
+                    self._listener_manager.stop_all()
+                except Exception:
+                    pass
             for attr in (
-                '_beacon_listener', '_dns_transport', '_icmp_transport',
-                '_quic_listener', '_ws_listener', '_ws_server',
-                '_wireguard_transport', '_pivot_manager',
-                '_client_tunnel', 'operator_listener',
+                '_pivot_manager', '_client_tunnel', 'operator_listener',
             ):
                 obj = getattr(self, attr, None)
                 if obj is None:
@@ -660,19 +728,31 @@ class BeaconHandler:
         return source_dir, output_dir
 
     def _beacon_build_default_url(self, for_quic=False):
-        """Derive a sensible callback URL from the running config.
+        """Derive a sensible callback URL from a running listener.
 
-        `for_quic=True` uses the QUIC listener's port when one was
-        configured at handler start (`--beacon-quic-port`). When no
-        QUIC listener is running, the value falls through to the
-        HTTP listener's port — the operator who then types a
-        different port is telling the wizard something the handler
-        does not know.
+        Asks the manager for the first running listener of the
+        requested type and builds the URL from its public_host /
+        host + port. Falls back to the handler's beacon_port only
+        when no listener is running — which in normal operation
+        means the operator has not created one yet, in which case
+        the wizard's prompt is the first chance to tell them.
         """
-        if for_quic and getattr(self, 'quic_port', None):
-            port = self.quic_port
-        else:
-            port = self.beacon_port or 8444
+        ltype = 'quic' if for_quic else 'http'
+        if self._listener_manager is not None:
+            try:
+                running = self._listener_manager.list(
+                    type=ltype, running_only=True)
+            except Exception:
+                running = []
+            if running:
+                lst = running[0]
+                host = (lst.get('public_host')
+                        or lst.get('host')
+                        or '127.0.0.1')
+                if host in ('0.0.0.0', '::'):
+                    host = '127.0.0.1'
+                return f"https://{host}:{lst['port']}"
+        port = self.beacon_port or 8444
         host = self.host if self.host not in ('0.0.0.0', '::') \
                else '127.0.0.1'
         return f"https://{host}:{port}"
@@ -950,8 +1030,17 @@ class BeaconHandler:
                 print(f"  {c['red']}A tunnel IP is required."
                       f"{c['end']}")
                 return None
-            handler_server_ip = getattr(
-                self, 'wireguard_server_ip', None) or '10.99.0.1'
+            handler_server_ip = '10.99.0.1'
+            if self._listener_manager is not None:
+                try:
+                    wg = self._listener_manager.list(
+                        type='wireguard', running_only=True)
+                except Exception:
+                    wg = []
+                if wg:
+                    handler_server_ip = (
+                        wg[0].get('server_tunnel_ip')
+                        or '10.99.0.1')
             print(f"  {c['yellow']}The server's IPv4 address "
                   f"inside the tunnel. Must match the handler's "
                   f"--wireguard-server-ip value; the default is "
@@ -1254,19 +1343,51 @@ class BeaconHandler:
 
         if ('http' in _modes or 'quic' in _modes
                 or 'websocket' in _modes):
-            if 'quic' in _modes and 'http' not in _modes:
-                default_url = self._beacon_build_default_url(
-                    for_quic=True)
+            _ltype = ('quic' if ('quic' in _modes
+                                 and 'http' not in _modes)
+                      else 'websocket' if 'websocket' in _modes
+                      else 'http')
+            _running = []
+            if self._listener_manager is not None:
+                try:
+                    _running = self._listener_manager.list(
+                        type=_ltype, running_only=True)
+                except Exception:
+                    _running = []
+            if _running:
+                _lst = _running[0]
+                if len(_running) > 1:
+                    print(f"\n{c['cyan']}Running {_ltype} "
+                          f"listeners:{c['end']}")
+                    for _i, _cand in enumerate(_running, 1):
+                        print(f"    {_i}. {_cand['name']} "
+                              f"({_cand['host']}:{_cand['port']})")
+                    _pick = _ask('Listener number', '1')
+                    if _pick is None:
+                        return None
+                    try:
+                        _lst = _running[int(_pick) - 1]
+                    except (ValueError, IndexError):
+                        _lst = _running[0]
+                _h = (_lst.get('public_host')
+                      or _lst.get('host') or '127.0.0.1')
+                if _h in ('0.0.0.0', '::'):
+                    _h = '127.0.0.1'
+                default_url = f"https://{_h}:{_lst['port']}"
+                print(f"  {c['dim']}using listener "
+                      f"{_lst['name']} ({_lst['id']}){c['end']}")
             else:
-                default_url = self._beacon_build_default_url()
+                default_url = self._beacon_build_default_url(
+                    for_quic=(_ltype == 'quic'))
+                print(f"\n{c['yellow']}No running {_ltype} "
+                      f"listener — create one with "
+                      f"`listeners create {_ltype}`. Entering a "
+                      f"manual URL for now.{c['end']}")
             print(f"\n{c['cyan']}[5/9] Callback URL{c['end']}")
             print(f"  {c['yellow']}Use the handler's reachable "
                   f"address, not 127.0.0.1 unless the target is "
-                  f"local. For a QUIC build this is the "
-                  f"--beacon-quic-port URL. For a WebSocket build "
-                  f"this is the --ws-port URL; the scheme is "
-                  f"converted to wss:// at dial time by the "
-                  f"client.{c['end']}")
+                  f"local. The scheme is converted to wss:// at "
+                  f"dial time for a WebSocket build.{c['end']}")
             url = _ask('Callback URL', default_url)
             if url is None:
                 return None
@@ -1680,21 +1801,32 @@ class BeaconHandler:
                 print(f"    client cert: {mtls_cert_override}")
                 print(f"    client key : {mtls_key_override}")
                 print(f"    root CA    : {mtls_ca_override}")
-            handler_ca = getattr(self, 'beacon_mtls_ca', None)
-            handler_dir = getattr(self, 'beacon_mtls_dir', None)
-            if handler_dir:
-                print(f"  {c['yellow']}Listener mTLS: "
-                      f"{handler_dir} (from --beacon-mtls-dir)"
-                      f"{c['end']}")
-            elif handler_ca:
-                print(f"  {c['yellow']}Listener mTLS: "
-                      f"{handler_ca} (from --beacon-mtls-ca)"
-                      f"{c['end']}")
+            mtls_capable = []
+            if self._listener_manager is not None:
+                try:
+                    for lst in self._listener_manager.list(
+                            running_only=True):
+                        if lst.get('type') not in (
+                                'http', 'quic'):
+                            continue
+                        tls = lst.get('tls') or {}
+                        if tls.get('mode') == 'mtls' \
+                                and tls.get('ca_path'):
+                            mtls_capable.append(lst['id'])
+                except Exception:
+                    pass
+            if mtls_capable:
+                print(f"  {c['green']}Listener mTLS: OK — "
+                      f"running listener(s) "
+                      f"{', '.join(mtls_capable)} accept mTLS "
+                      f"client certs{c['end']}")
             else:
-                print(f"  {c['yellow']}Listener mTLS: NOT CONFIGURED "
-                      f"— the beacon listener is running server-TLS "
-                      f"only and will reject this agent's handshake"
-                      f"{c['end']}")
+                print(f"  {c['yellow']}Listener mTLS: NOT AVAILABLE "
+                      f"— no running listener has mTLS enabled. "
+                      f"The built agent will reject the server "
+                      f"cert chain unless you create one with "
+                      f"`listeners create http <name> --mtls` and "
+                      f"build against it{c['end']}")
         else:
             print(f"  mTLS bundle  : no")
         print()
@@ -3120,16 +3252,30 @@ class BeaconHandler:
         if params['use_mtls']:
             warn_lines = []
 
-            if (getattr(self, 'beacon_mtls_ca', None) is None
-                    and getattr(self, 'beacon_mtls_dir', None) is None):
+            mtls_capable = []   # (listener_id, ca_path)
+            if self._listener_manager is not None:
+                try:
+                    for lst in self._listener_manager.list(
+                            running_only=True):
+                        if lst.get('type') not in (
+                                'http', 'quic'):
+                            continue
+                        tls = lst.get('tls') or {}
+                        if (tls.get('mode') == 'mtls'
+                                and tls.get('ca_path')):
+                            mtls_capable.append(
+                                (lst['id'], tls['ca_path']))
+                except Exception:
+                    pass
+
+            if not mtls_capable:
                 warn_lines.append(
-                    "This build embeds an mTLS client bundle, but the "
-                    "running beacon listener is NOT configured for "
-                    "mTLS (no --beacon-mtls-ca or --beacon-mtls-dir at "
-                    "handler start). The agent will reject the server "
-                    "certificate chain on every check-in. Restart the "
-                    "handler with matching mTLS flags, or rebuild "
-                    "without --mtls."
+                    "This build embeds an mTLS client bundle, but "
+                    "no running listener has mTLS enabled. The "
+                    "agent will reject the server cert chain "
+                    "unless you create one with "
+                    "`listeners create http <name> --mtls` and "
+                    "build against it."
                 )
             else:
                 build_dir = params.get('mtls_dir')
@@ -3140,29 +3286,20 @@ class BeaconHandler:
                     build_dir_norm = os.path.realpath(
                         self.mtls_cert_dir)
 
-                handler_dir = getattr(
-                    self, 'beacon_mtls_dir', None)
-                if handler_dir:
-                    handler_dir_norm = os.path.realpath(
-                        os.path.expanduser(handler_dir))
-                elif getattr(self, 'beacon_mtls_ca', None):
-                    handler_dir_norm = os.path.realpath(
-                        os.path.dirname(self.beacon_mtls_ca))
-                else:
-                    handler_dir_norm = None
+                handler_ca = os.path.realpath(
+                    os.path.expanduser(mtls_capable[0][1]))
+                handler_dir_norm = os.path.dirname(handler_ca)
 
-                if (handler_dir_norm is not None
-                        and handler_dir_norm != build_dir_norm):
+                if handler_dir_norm != build_dir_norm:
                     warn_lines.append(
                         f"Bundle mismatch: this build uses "
-                        f"{build_dir_norm}, but the running beacon "
-                        f"listener is configured with "
+                        f"{build_dir_norm}, but the running listener "
+                        f"{mtls_capable[0][0]} verifies against "
                         f"{handler_dir_norm}. The agent's embedded CA "
                         f"will not match the server's chain. Either "
                         f"rebuild with --mtls-dir {handler_dir_norm}, "
-                        f"or restart the handler with "
-                        f"--beacon-mtls-dir {build_dir_norm} before "
-                        f"deploying the agent."
+                        f"or recreate the listener with a CA under "
+                        f"{build_dir_norm} before deploying the agent."
                     )
 
                 build_ca = params.get('mtls_ca')
@@ -3170,10 +3307,6 @@ class BeaconHandler:
                     build_ca = os.path.join(build_dir_norm, 'ca.pem')
                 if not build_ca:
                     build_ca = self.mtls_ca_cert
-                handler_ca = (
-                    os.path.join(handler_dir_norm, 'ca.pem')
-                    if handler_dir_norm else self.beacon_mtls_ca
-                )
                 try:
                     if (build_ca and handler_ca
                             and os.path.isfile(build_ca)
@@ -3313,16 +3446,20 @@ class BeaconHandler:
     # Startup
 
     def start(self):
-        """Start the beacon listener and drop into the operator loop."""
+        """Boot the handler, then drop into the operator loop.
+
+        No beacon-facing port is bound here. The ``ListenerManager``
+        reads ``listeners.json`` and starts every listener whose
+        ``enabled`` flag is true. One listener failing is logged and
+        marked ``status='error'``; the others still start.
+        """
         self.print_banner()
         self.ensure_tls_certificates()
         self.ensure_mtls_certificates()
         self.ensure_pivot_keypair()
 
         try:
-            from .beacon import (
-                BeaconEngine, BeaconListener, BeaconConsole,
-            )
+            from .beacon import BeaconEngine, BeaconConsole
         except ImportError as exc:
             print(f"{self.colors['red']}[BEACON] subsystem unavailable: "
                   f"{exc}{self.colors['end']}")
@@ -3332,6 +3469,35 @@ class BeaconHandler:
 
         self.beacon = BeaconEngine(self)
         self.beacon_console = BeaconConsole(self.beacon, self)
+
+        # ---- Beacon-facing listeners (operator-managed) ------------
+        if self._listener_manager is None:
+            print(f"{self.colors['yellow']}[LISTENERS] manager "
+                  f"unavailable — no beacon port will be bound"
+                  f"{self.colors['end']}")
+        else:
+            self._listener_manager.load_from_store()
+            self._listener_manager.start_all_enabled()
+            try:
+                running = self._listener_manager.list(running_only=True)
+                failed = [
+                    lst for lst in self._listener_manager.list()
+                    if lst.get('status') == 'error'
+                ]
+            except Exception:
+                running, failed = [], []
+            if running:
+                binds = ', '.join(
+                    f"{lst['name']} ({lst['type']} "
+                    f"{lst['host']}:{lst['port']})"
+                    for lst in running)
+                print(f"{self.colors['green']}[LISTENERS] started: "
+                      f"{binds}{self.colors['end']}")
+            for lst in failed:
+                print(f"{self.colors['yellow']}[LISTENERS] "
+                      f"{lst['name']} failed: "
+                      f"{lst.get('error_message') or 'unknown error'}"
+                      f"{self.colors['end']}")
 
         pivot_port = self.beacon_port + 1
         try:
@@ -3366,228 +3532,6 @@ class BeaconHandler:
             print(f"{self.colors['yellow']}[PIVOT] unavailable: "
                   f"{exc}{self.colors['end']}")
             self._pivot_manager = None
-
-        beacon_ca = self.beacon_mtls_ca
-        beacon_dir = self.beacon_mtls_dir
-        beacon_sc = self.beacon_mtls_server_cert
-        beacon_sk = self.beacon_mtls_server_key
-
-        if beacon_dir:
-            beacon_dir = os.path.expanduser(beacon_dir)
-            beacon_ca = os.path.join(beacon_dir, 'ca.pem')
-            server_cert = os.path.join(beacon_dir, 'server-mtls.pem')
-            server_key = os.path.join(beacon_dir, 'server-mtls.key')
-        elif beacon_ca:
-            server_cert = beacon_sc or self.mtls_server_cert
-            server_key = beacon_sk or self.mtls_server_key
-        else:
-            server_cert = self.certfile
-            server_key = self.keyfile
-
-        if beacon_ca:
-            missing = [p for p in (beacon_ca, server_cert, server_key)
-                       if not os.path.isfile(p)]
-            if missing:
-                print(f"{self.colors['red']}[BEACON] mTLS material "
-                      f"missing:{self.colors['end']}")
-                for p in missing:
-                    print(f"  {self.colors['red']}{p}"
-                          f"{self.colors['end']}")
-                return
-
-        self._beacon_listener = BeaconListener(
-            self.beacon, self.host, self.beacon_port,
-            server_cert, server_key,
-            client_ca=beacon_ca,
-            profile_filter=self.beacon_c2_profile,
-        )
-        if self._beacon_listener.start():
-            print(f"{self.colors['green']}[BEACON] listening on "
-                  f"{self.host}:{self.beacon_port}"
-                  f"{self.colors['end']}\n")
-        else:
-            self._beacon_listener = None
-            print(f"{self.colors['yellow']}[BEACON] listener failed "
-                  f"(pip install flask){self.colors['end']}")
-            return
-
-        if self.dns_port and self.dns_domain:
-            try:
-                from .beacon.transport import DNSTransport
-                dns_label_cfg = {}
-                try:
-                    import os as _os
-                    import json as _json
-                    from .beacon.builder import DEFAULT_C2_PROFILE_DIR
-
-                    if self.beacon_c2_profile:
-                        stem = (self.beacon_c2_profile[:-5]
-                                if self.beacon_c2_profile.endswith('.json')
-                                else self.beacon_c2_profile)
-                        candidates = [stem + '.json']
-                    else:
-                        candidates = sorted(
-                            e for e in _os.listdir(DEFAULT_C2_PROFILE_DIR)
-                            if e.endswith('.json')
-                            and not e.startswith('.')) \
-                            if _os.path.isdir(DEFAULT_C2_PROFILE_DIR) else []
-
-                    for name in candidates:
-                        path = _os.path.join(DEFAULT_C2_PROFILE_DIR, name)
-                        try:
-                            with open(path, 'r', encoding='utf-8') as fh:
-                                prof = _json.load(fh)
-                        except (OSError, ValueError):
-                            continue
-                        block = prof.get('dns_label') or {}
-                        if isinstance(block, dict) and block:
-                            dns_label_cfg = block
-                            break
-                except Exception as exc:
-                    print(f"{self.colors['yellow']}[BEACON] "
-                          f"could not load dns_label config: {exc}"
-                          f"{self.colors['end']}")
-
-                cfg = {'domain': self.dns_domain}
-                if dns_label_cfg:
-                    cfg['dns_label'] = dns_label_cfg
-
-                self._dns_transport = DNSTransport(
-                    self.beacon, self.host, self.dns_port,
-                    config=cfg)
-                if self._dns_transport.start():
-                    print(f"{self.colors['green']}[BEACON] DNS "
-                          f"transport on {self.host}:{self.dns_port} "
-                          f"zone={self.dns_domain}"
-                          f"{self.colors['end']}\n")
-                else:
-                    print(f"{self.colors['yellow']}[BEACON] DNS "
-                          f"transport failed to start — is the port "
-                          f"in use, and is dnslib installed?"
-                          f"{self.colors['end']}")
-                    self._dns_transport = None
-            except Exception as exc:
-                print(f"{self.colors['yellow']}[BEACON] DNS "
-                      f"transport error: {exc}{self.colors['end']}")
-                self._dns_transport = None
-
-        if self.icmp_enabled:
-            try:
-                from .beacon.transport.icmp import ICMPTransport
-                self._icmp_transport = ICMPTransport(
-                    self.beacon, self.host, 0, config={})
-                if self._icmp_transport.start():
-                    print(f"{self.colors['green']}[BEACON] ICMP "
-                          f"transport active (raw socket)"
-                          f"{self.colors['end']}\n")
-                else:
-                    print(f"{self.colors['yellow']}[BEACON] ICMP "
-                          f"transport failed to start — run with "
-                          f"sudo, or setcap cap_net_raw on the "
-                          f"python binary"
-                          f"{self.colors['end']}")
-                    self._icmp_transport = None
-            except Exception as exc:
-                print(f"{self.colors['yellow']}[BEACON] ICMP "
-                      f"transport error: {exc}"
-                      f"{self.colors['end']}")
-                self._icmp_transport = None
-
-        if self.quic_port:
-            try:
-                from .beacon.transport.quic import QUICListener
-                self._quic_listener = QUICListener(
-                    self.beacon, self.host, self.quic_port,
-                    server_cert, server_key,
-                    client_ca=beacon_ca,
-                    profile_filter=self.beacon_c2_profile,
-                )
-                if self._quic_listener.start():
-                    print(f"{self.colors['green']}[BEACON] QUIC "
-                          f"listener on {self.host}:{self.quic_port} "
-                          f"(HTTP/3){self.colors['end']}\n")
-                else:
-                    print(f"{self.colors['yellow']}[BEACON] QUIC "
-                          f"listener failed to start — is the port "
-                          f"in use, and is aioquic installed? "
-                          f"(pip install aioquic)"
-                          f"{self.colors['end']}")
-                    self._quic_listener = None
-            except Exception as exc:
-                print(f"{self.colors['yellow']}[BEACON] QUIC "
-                      f"transport error: {exc}"
-                      f"{self.colors['end']}")
-                self._quic_listener = None
-
-        if self.ws_port:
-            try:
-                from .beacon.transport.websocket import (
-                    WebSocketListener, WebSocketServer,
-                )
-                ws_bind = self.ws_host or self.host
-                self._ws_listener = WebSocketListener(
-                    self.beacon, ws_bind, self.ws_port,
-                    server_cert, server_key,
-                    client_ca=beacon_ca,
-                    profile_filter=self.beacon_c2_profile,
-                )
-
-                self._ws_server = WebSocketServer(self._ws_listener)
-                if self._ws_server.start():
-                    print(f"{self.colors['green']}[BEACON] "
-                          f"WebSocket listener on {ws_bind}:"
-                          f"{self.ws_port}{self.colors['end']}\n")
-                else:
-                    print(f"{self.colors['yellow']}[BEACON] "
-                          f"WebSocket listener failed to start — "
-                          f"is simple-websocket installed? "
-                          f"(pip install simple-websocket)"
-                          f"{self.colors['end']}")
-                    self._ws_listener = None
-                    self._ws_server = None
-            except Exception as exc:
-                print(f"{self.colors['yellow']}[BEACON] WebSocket "
-                      f"transport error: {exc}"
-                      f"{self.colors['end']}")
-                self._ws_listener = None
-                self._ws_server = None
-
-        if self.wireguard_enabled:
-            try:
-                from .beacon.transport.wireguard import (
-                    WireGuardTransport,
-                )
-                self._wireguard_transport = WireGuardTransport(
-                    self.beacon, self.host, self.beacon_port,
-                    config={
-                        'port': self.wireguard_port,
-                        'subnet': self.wireguard_subnet,
-                        'server_ip': self.wireguard_server_ip,
-                    })
-                if self._wireguard_transport.start():
-                    pub = self._wireguard_transport.server_pubkey()
-                    print(f"{self.colors['green']}[BEACON] "
-                          f"WireGuard listener on UDP "
-                          f"{self.wireguard_port}"
-                          f"{self.colors['end']}")
-                    print(f"{self.colors['cyan']}[BEACON] server "
-                          f"pubkey: {pub}{self.colors['end']}")
-                    print(f"{self.colors['yellow']}Pin each agent "
-                          f"with `wireguard add-peer <pubkey> "
-                          f"<tunnel-ip>` after deployment."
-                          f"{self.colors['end']}\n")
-                else:
-                    print(f"{self.colors['yellow']}[BEACON] "
-                          f"WireGuard listener failed to start — "
-                          f"requires root or CAP_NET_ADMIN, and "
-                          f"pyroute2 (pip install pyroute2)"
-                          f"{self.colors['end']}")
-                    self._wireguard_transport = None
-            except Exception as exc:
-                print(f"{self.colors['yellow']}[BEACON] WireGuard "
-                      f"transport error: {exc}"
-                      f"{self.colors['end']}")
-                self._wireguard_transport = None
 
         # ---- Team server (opt-in) -----------------------------------
         if self.operator_port:
@@ -5420,9 +5364,6 @@ def main():
         '-H', '--host', default='0.0.0.0',
         help='Bind address (default 0.0.0.0)')
     parser.add_argument(
-        '--beacon-port', type=int, default=8881,
-        help='Beacon listener port (default 8881)')
-    parser.add_argument(
         '--beacon-quic-port', type=int, default=None,
         help='Enable the QUIC / HTTP/3 transport on this UDP port. '
              'Requires aioquic (pip install aioquic). Runs alongside '
@@ -5579,6 +5520,45 @@ def main():
              'password and must be given it out of band.')
     args = parser.parse_args()
 
+    legacy = []
+    if args.dns_port is not None:
+        legacy.append('--dns-port')
+    if args.dns_domain is not None:
+        legacy.append('--dns-domain')
+    if args.beacon_quic_port is not None:
+        legacy.append('--beacon-quic-port')
+    if args.ws_port is not None:
+        legacy.append('--ws-port')
+    if args.ws_host is not None:
+        legacy.append('--ws-host')
+    if args.icmp:
+        legacy.append('--icmp')
+    if args.wireguard:
+        legacy.append('--wireguard')
+    if args.wireguard_port != 51820:
+        legacy.append('--wireguard-port')
+    if args.wireguard_subnet != '10.99.0.0/24':
+        legacy.append('--wireguard-subnet')
+    if args.wireguard_server_ip != '10.99.0.1':
+        legacy.append('--wireguard-server-ip')
+    if args.beacon_mtls_ca is not None:
+        legacy.append('--beacon-mtls-ca')
+    if args.beacon_mtls_dir is not None:
+        legacy.append('--beacon-mtls-dir')
+    if args.beacon_mtls_server_cert is not None:
+        legacy.append('--beacon-mtls-server-cert')
+    if args.beacon_mtls_server_key is not None:
+        legacy.append('--beacon-mtls-server-key')
+    if args.beacon_profile is not None:
+        legacy.append('--beacon-profile')
+    if legacy:
+        print(
+            '[LISTENERS] legacy listener flags detected: '
+            + ', '.join(legacy)
+            + '. Nothing is bound from them. Manage listeners in '
+              'the console with `listeners create`; see README.md '
+              '> Listener Management.')
+
     # ---- Early dispatch: console-attach and bootstrap ------------
     # Both bypass BeaconHandler entirely; they only need the socket
     # a running daemon is listening on.
@@ -5614,7 +5594,6 @@ def main():
 
     h = BeaconHandler(
         host=args.host,
-        beacon_port=args.beacon_port,
         certfile=args.cert,
         keyfile=args.key,
         mtls_ca_cert=args.mtls_ca_cert,
@@ -5625,11 +5604,6 @@ def main():
         mtls_client_key=args.mtls_client_key,
     )
 
-    h.beacon_mtls_ca = args.beacon_mtls_ca
-    h.beacon_mtls_dir = args.beacon_mtls_dir
-    h.beacon_mtls_server_cert = args.beacon_mtls_server_cert
-    h.beacon_mtls_server_key = args.beacon_mtls_server_key
-    h.beacon_c2_profile = args.beacon_profile
     h.no_audit_verify = args.no_audit_verify
     h.operator_port = args.operator_port
     h.multiplayer_off = args.multiplayer_off
@@ -5638,21 +5612,6 @@ def main():
             '0.0.0.0' if args.operator_port else '127.0.0.1')
     else:
         h.operator_host = args.operator_host
-    h.dns_port = args.dns_port
-    h.dns_domain = args.dns_domain
-    h.icmp_enabled = args.icmp
-    h.ws_port = args.ws_port
-    h.ws_host = args.ws_host
-    h.wireguard_enabled = args.wireguard
-    h.wireguard_port = args.wireguard_port
-    h.wireguard_subnet = args.wireguard_subnet
-    h.wireguard_server_ip = args.wireguard_server_ip
-
-    if args.beacon_quic_port is None or args.beacon_quic_port == 0:
-        h.quic_port = None
-    else:
-        h.quic_port = args.beacon_quic_port
-
     h._daemon_mode = bool(args._daemon_child)
     h._console_socket_path = (
         args.console_socket

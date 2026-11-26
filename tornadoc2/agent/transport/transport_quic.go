@@ -96,6 +96,7 @@ func (t *quicTransport) applyHeaders(req *http.Request) {
 	if t.profile.UserAgent != "" {
 		req.Header.Set("User-Agent", t.profile.UserAgent)
 	}
+	applyBrowserDefaults(req)
 }
 
 func (t *quicTransport) CheckIn(identity Identity,

@@ -150,9 +150,7 @@ def request_approval(name: str, args: dict,
         # comes from the AI's own reasoning, so a typo in the
         # scope cannot be confirmed blindly.
         try:
-            sys.stdout.write('  type "yes" to proceed: ')
-            sys.stdout.flush()
-            answer = sys.stdin.readline().strip().lower()
+            answer = input('  type "yes" to proceed: ').strip().lower()
             if answer != 'yes':
                 print('  ✗ declined')
                 return False
@@ -160,11 +158,9 @@ def request_approval(name: str, args: dict,
                 print('  ✗ cannot confirm: match count is '
                       'unknown')
                 return False
-            sys.stdout.write(
+            count = input(
                 f'  type the match count ({match_count}) '
-                f'to confirm: ')
-            sys.stdout.flush()
-            count = sys.stdin.readline().strip()
+                f'to confirm: ').strip()
             if count != str(match_count):
                 print('  ✗ count mismatch — declined')
                 return False
@@ -174,11 +170,9 @@ def request_approval(name: str, args: dict,
             return False
     else:
         try:
-            sys.stdout.write(
+            answer = input(
                 f'  type {expected!r} to confirm, anything '
-                f'else to decline: ')
-            sys.stdout.flush()
-            answer = sys.stdin.readline().strip()
+                f'else to decline: ').strip()
         except (EOFError, KeyboardInterrupt):
             print()
             print('  ✗ aborted')

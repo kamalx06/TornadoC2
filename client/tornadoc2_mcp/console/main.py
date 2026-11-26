@@ -5,7 +5,7 @@ Two callers, two conventions:
   main_ai(argv)
     Called from beacon-client.py's `_run_ai()`. `argv` is
     what follows `ai` on the command line — e.g.
-    `['-c', 'alice.cfg', '--ai-config', '~/.tornadoc2/ai.json']`.
+    `['-c', 'alice.cfg', '--ai-config', 'client/.tornadoc2/ai.json']`.
     argparse handles the flags; `load_ai_config` validates
     the ai.json; `run_console_from_path` loads the .cfg,
     authenticates, and enters the interactive loop.
@@ -69,7 +69,8 @@ def main_ai(argv) -> int:
     # hint so the operator has an actionable next step instead
     # of just the error line.
     try:
-        cfg = load_ai_config(args.ai_config)
+        cfg = load_ai_config(args.ai_config,
+                             require_provider=True)
     except errors.McpError as exc:
         print(f'[ai] {exc}', file=sys.stderr)
         hint = getattr(exc, 'hint', '') or ''

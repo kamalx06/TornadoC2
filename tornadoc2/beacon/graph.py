@@ -61,6 +61,31 @@ def _subnet(s) -> str:
     return str(net)
 
 
+def _identity_by_id(sessions, sid):
+    for x in sessions:
+        if x.id == sid:
+            return _identity(x)
+    return {}
+
+
+def _priv(s) -> str:
+    return (_identity(s).get('privilege') or 'user').lower()
+
+
+def _pid(s) -> int:
+    try:
+        return int(_identity(s).get('pid') or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _parent_pid(s) -> int:
+    try:
+        return int(_identity(s).get('parent_pid') or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _ports(s) -> str:
     """Listening ports the beacon has reported, if any. Empty when
     the identity does not carry them."""
@@ -110,9 +135,45 @@ class Graph:
                 'age':         s.age,
                 'checkins':    s.checkins,
                 'fingerprint': s.fingerprint,
+                'pid':         _pid(s),
+                'parent_pid':  _parent_pid(s),
+                'parent_name': _identity(s).get('parent_name', ''),
+                'parent_id':   getattr(s, 'parent_id', None),
+                'session':     _identity(s).get('session_id', 0),
+                'privilege':   _priv(s),
+                'elevated':    bool(_identity(s).get('elevated')),
+                'integrity':   _identity(s).get('integrity', ''),
+                'groups':      list(_identity(s).get('groups') or [])[:12],
             })
 
+        by_id = {n['id']: n for n in nodes}
         edges: List[dict] = []
+
+        # Explicit relay parent recorded at check-in.
+        for n in nodes:
+            pid = n.get('parent_id')
+            if pid and pid in by_id:
+                edges.append({'from': pid, 'to': n['id'],
+                              'shared': ['relay-parent']})
+
+        # Same-host process parent: a child started by another
+        # beacon (spawn/migrate) shares machine id.
+        for a in nodes:
+            for b in nodes:
+                if a is b or a['pid'] == 0:
+                    continue
+                if a['parent_pid'] == b['pid'] and \
+                        _identity_by_id(sessions, a['id']).get(
+                            'machine_id') == \
+                        _identity_by_id(sessions, b['id']).get(
+                            'machine_id'):
+                    pair = {a['id'], b['id']}
+                    if not any({e['from'], e['to']} == pair and
+                               'process-parent' in e['shared']
+                               for e in edges):
+                        edges.append({'from': b['id'], 'to': a['id'],
+                                      'shared': ['process-parent']})
+
         for i in range(len(nodes)):
             for j in range(i + 1, len(nodes)):
                 a, b = nodes[i], nodes[j]
@@ -129,7 +190,17 @@ class Graph:
                         'shared': shared,
                     })
 
-        groups = {'user': {}, 'domain': {}, 'subnet': {}}
+        merged = {}
+        for e in edges:
+            key = tuple(sorted((e['from'], e['to'])))
+            merged.setdefault(key, set()).update(e['shared'])
+        edges = [
+            {'from': a, 'to': b, 'shared': sorted(v)}
+            for (a, b), v in merged.items()
+        ]
+
+        groups = {'user': {}, 'domain': {}, 'subnet': {},
+                  'privilege': {}}
         for n in nodes:
             for key in groups:
                 v = n.get(key) or ''
@@ -213,10 +284,15 @@ class Graph:
                             else f"{c['red']}○{c['end']}")
                     ports = (f" {c['dim']}ports={n['ports']}{c['end']}"
                              if n['ports'] else '')
+                    priv = n.get('privilege') or 'user'
+                    tag = priv.upper()
+                    if n.get('elevated'):
+                        tag += "!"
                     out.append(
                         f"      {mark} "
                         f"{c['cyan']}#{n['id']}{c['end']} "
                         f"{n['name']} "
+                        f"{c['magenta']}[{tag}]{c['end']} "
                         f"{c['dim']}[{n['os']}/{n['arch']}] "
                         f"{n['subnet']} "
                         f"age={n['age']}s"
@@ -236,7 +312,7 @@ class Graph:
         """One beacon per line, pipe-separated, for grep / awk.
 
         Format:
-          <id> | <name> | <os>/<arch> | <user>@<domain> | <subnet> | <alive> | <age>s
+          <id> | <name> | <os>/<arch> | <user>@<domain> | <subnet> | <privilege> | <alive> | <age>s
         """
         g = self.build()
         if not g['nodes']:
@@ -254,6 +330,7 @@ class Graph:
                 f"{n['os']}/{n['arch']:<8} "
                 f"{user}@{dom:<16} "
                 f"{subnet:<18} "
+                f"{(n.get('privilege') or 'user'):<8} "
                 f"{n['age']}s"
             )
         return '\n'.join(out)

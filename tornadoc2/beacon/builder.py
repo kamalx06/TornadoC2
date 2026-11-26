@@ -401,6 +401,7 @@ class BeaconBuilder:
         """Compile the beacon. Returns the output path."""
 
         os.makedirs(self.output_dir, exist_ok=True)
+        self._agent_subdir(config.target_os)
 
         if getattr(config, 'wasm_extensions', False) and \
                 config.output_format == 'stager':
@@ -533,10 +534,22 @@ class BeaconBuilder:
 
         return env
 
+    _AGENT_SUBDIRS = {'windows': 'windows', 'linux': 'linux'}
+
+    def _agent_subdir(self, target_os: str) -> str:
+        sub = self._AGENT_SUBDIRS.get(target_os)
+        if sub is None:
+            raise RuntimeError(
+                f"no agent tree for target_os={target_os!r}; "
+                f"supported: {', '.join(sorted(self._AGENT_SUBDIRS))}")
+        return sub
+
     def _build_command(self, cfg: BeaconBuildConfig,
                        ldflags: List[str], out: str) -> List[str]:
         all_flags = ['-s', '-w'] + list(ldflags)
-        target = './stager' if cfg.output_format == 'stager' else './stageless'
+        subdir = self._agent_subdir(cfg.target_os)
+        target = (f'./{subdir}/stager'
+                  if cfg.output_format == 'stager' else f'./{subdir}')
         buildmode: List[str] = []
         if cfg.output_format == 'dll':
             if cfg.target_os != 'windows':
@@ -1075,7 +1088,7 @@ class BeaconBuilder:
         # <pid>` when the operator does not supply --method. It is
         # emitted unconditionally, including on a build with
         # inject=False, so the linker default in
-        # agent/stageless/ldflags.go is always overridden by the
+        # the OS ldflags.go files are always overridden by the
         # explicit build config. The runtime refuses `migrate <pid>`
         # on a non-injecting build with the "no injector shellcode"
         # message regardless of which method the flag named.
@@ -1495,7 +1508,7 @@ class BeaconBuilder:
                   f'{stub_path}. The built agent will support '
                   f'`migrate --self` only; `migrate <pid>` will '
                   f'refuse at runtime. See the note in '
-                  f'agent/core/inject_linux.go for how to build '
+                  f'agent/linux/core/inject_linux.go for how to build '
                   f'the stub.')
             return out
 

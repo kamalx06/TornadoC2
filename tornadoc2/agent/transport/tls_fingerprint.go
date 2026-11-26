@@ -72,7 +72,7 @@ func utlsDialTLS(cfg *tls.Config, profile string) func(
 			Certificates:       toUtlsCertificates(cfg.Certificates),
 			MinVersion:         cfg.MinVersion,
 			MaxVersion:         cfg.MaxVersion,
-			NextProtos: []string{"http/1.1"},
+			NextProtos:         []string{"http/1.1"},
 		}
 
 		conn := utls.UClient(raw, uCfg, helloID)

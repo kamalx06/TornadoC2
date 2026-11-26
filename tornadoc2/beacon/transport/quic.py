@@ -163,12 +163,13 @@ class QUICListener(BeaconListener):
 
     name = 'quic'
 
-    def __init__(self, engine, host: str, port: int,
-                 certfile: str, keyfile: str,
+    def __init__(self, engine, host: str = None, port: int = None,
+                 certfile: str = None, keyfile: str = None,
                  client_ca: str = None,
                  extra_paths: dict = None,
                  c2_profile_dir: str = None,
                  profile_filter: str = None,
+                 config: dict = None,
                  **kwargs):
 
         super().__init__(
@@ -176,12 +177,16 @@ class QUICListener(BeaconListener):
             client_ca=client_ca,
             extra_paths=extra_paths,
             c2_profile_dir=c2_profile_dir,
-            profile_filter=profile_filter)
+            profile_filter=profile_filter,
+            config=config)
 
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._thread: Optional[threading.Thread] = None
         self._server = None
         self._stop_event = threading.Event()
+        self._ready = threading.Event()
+        self._bind_ok = False
+        self._last_error = None
 
     # ------------------------------------------------------------------
     # HTTP/3 dispatch into the Flask app
@@ -220,15 +225,32 @@ class QUICListener(BeaconListener):
 
     def start(self) -> bool:
         if not _AIOQUIC:
+            self._last_error = 'aioquic not installed'
             log.error("quic: aioquic not installed "
                       "(pip install aioquic)")
             return False
 
         self._stop_event.clear()
+        self._ready.clear()
+        self._bind_ok = False
         self._thread = threading.Thread(
             target=self._run, daemon=True)
         self._running = True
         self._thread.start()
+
+        # Wait for the serve() coroutine to either bind or fail.
+        # aioquic's serve() is an async context manager, so the
+        # bind completes inside the event loop after the thread
+        # starts. Without this wait the caller (the manager) sees
+        # True on a port collision and the listener dies three
+        # seconds later.
+        self._ready.wait(timeout=10.0)
+        if not self._bind_ok:
+            self._running = False
+            if self._thread is not None:
+                self._thread.join(timeout=2.0)
+                self._thread = None
+            return False
         return True
 
     def stop(self) -> None:
@@ -263,10 +285,20 @@ class QUICListener(BeaconListener):
             is_client=False,
             alpn_protocols=H3_ALPN,
         )
+        certfile, keyfile = self._tls_material()
+        if not certfile or not keyfile:
+            self._last_error = 'no certificate material for QUIC'
+            log.error("quic: %s", self._last_error)
+            self._bind_ok = False
+            self._ready.set()
+            return
         try:
-            cfg.load_cert_chain(self.certfile, self.keyfile)
+            cfg.load_cert_chain(certfile, keyfile)
         except Exception as exc:
-            log.error("quic: load_cert_chain: %s", exc)
+            self._last_error = f'load_cert_chain: {exc}'
+            log.error("quic: %s", self._last_error)
+            self._bind_ok = False
+            self._ready.set()
             return
 
         if self.client_ca:
@@ -274,7 +306,10 @@ class QUICListener(BeaconListener):
             try:
                 cfg.load_verify_locations(self.client_ca)
             except Exception as exc:
-                log.error("quic: client CA: %s", exc)
+                self._last_error = f'client CA: {exc}'
+                log.error("quic: %s", self._last_error)
+                self._bind_ok = False
+                self._ready.set()
                 return
 
         listener = self
@@ -290,9 +325,14 @@ class QUICListener(BeaconListener):
                 create_protocol=_factory,
             )
         except Exception as exc:
-            log.error("quic: bind %s:%d: %s",
-                      self.host, self.port, exc)
+            self._last_error = (
+                f'bind {self.host}:{self.port}: {exc}')
+            log.error("quic: %s", self._last_error)
+            self._bind_ok = False
+            self._ready.set()
             return
+        self._bind_ok = True
+        self._ready.set()
 
         log.info("quic: listening on %s:%d", self.host, self.port)
 

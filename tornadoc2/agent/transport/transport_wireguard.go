@@ -26,12 +26,12 @@ type wgTransport struct {
 	agentPrivKey string
 	tunnelIP     netip.Addr
 	serverIP     netip.Addr
-	serverPort string
-	profile protocol.Profile
-	shaping *features.ShapingSpec
-	tlsCfg  *tls.Config
-	cookie  string
-	dev *wgnet.Device
+	serverPort   string
+	profile      protocol.Profile
+	shaping      *features.ShapingSpec
+	tlsCfg       *tls.Config
+	cookie       string
+	dev          *wgnet.Device
 }
 
 func NewWireGuardTransport(serverPubKey, serverAddr,
@@ -132,6 +132,7 @@ func (t *wgTransport) buildHeaders(req *http.Request) {
 	if t.profile.UserAgent != "" {
 		req.Header.Set("User-Agent", t.profile.UserAgent)
 	}
+	applyBrowserDefaults(req)
 }
 
 func (t *wgTransport) CheckIn(identity protocol.Identity,

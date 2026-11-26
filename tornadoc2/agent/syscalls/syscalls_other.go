@@ -8,9 +8,9 @@ package syscalls
 // userland stub layer to bypass.
 
 import (
-    "errors"
-    "syscall"
-    "unsafe"
+	"errors"
+	"syscall"
+	"unsafe"
 )
 
 var errNotWindows = errors.New("indirect syscalls require Windows")
@@ -19,60 +19,66 @@ var errNotWindows = errors.New("indirect syscalls require Windows")
 // For the in-process use (own process), this is functionally
 // equivalent to the Windows call.
 func NtAllocateVirtualMemory(processHandle uintptr,
-    baseAddress *uintptr, zeroBits uintptr,
-    regionSize *uintptr, allocationType, protect uint32) error {
+	baseAddress *uintptr, zeroBits uintptr,
+	regionSize *uintptr, allocationType, protect uint32) error {
 
-    if processHandle != ^uintptr(0) {
-        return errors.New(
-            "NtAllocateVirtualMemory: only self-process is supported")
-    }
-    addr, _, errno := syscall.Syscall6(
-        syscall.SYS_MMAP,
-        *baseAddress,
-        *regionSize,
-        uintptr(protect),
-        uintptr(allocationType),
-        ^uintptr(0),
-        0)
-    if errno != 0 {
-        return errno
-    }
-    *baseAddress = addr
-    return nil
+	if processHandle != ^uintptr(0) {
+		return errors.New(
+			"NtAllocateVirtualMemory: only self-process is supported")
+	}
+	// Translate the Windows PAGE_* bits to mmap protection.
+	prot := uintptr(syscall.PROT_READ | syscall.PROT_WRITE)
+	if protect&0x10 != 0 || protect&0x20 != 0 ||
+		protect&0x40 != 0 || protect&0x80 != 0 {
+		prot = uintptr(syscall.PROT_READ | syscall.PROT_WRITE |
+			syscall.PROT_EXEC)
+	}
+	addr, _, errno := syscall.Syscall6(
+		syscall.SYS_MMAP,
+		*baseAddress,
+		*regionSize,
+		prot,
+		uintptr(syscall.MAP_PRIVATE|syscall.MAP_ANON),
+		^uintptr(0),
+		0)
+	if errno != 0 {
+		return errno
+	}
+	*baseAddress = addr
+	return nil
 }
 
 // NtWriteVirtualMemory is memcpy in-process.
 func NtWriteVirtualMemory(processHandle uintptr,
-    baseAddress uintptr, buffer unsafe.Pointer,
-    size uintptr, bytesWritten *uintptr) error {
+	baseAddress uintptr, buffer unsafe.Pointer,
+	size uintptr, bytesWritten *uintptr) error {
 
-    if processHandle != ^uintptr(0) {
-        return errors.New(
-            "NtWriteVirtualMemory: only self-process is supported")
-    }
-    dst := unsafe.Pointer(baseAddress)
-    for i := uintptr(0); i < size; i++ {
-        *(*byte)(unsafe.Pointer(uintptr(dst) + i)) =
-            *(*byte)(unsafe.Pointer(uintptr(buffer) + i))
-    }
-    if bytesWritten != nil {
-        *bytesWritten = size
-    }
-    return nil
+	if processHandle != ^uintptr(0) {
+		return errors.New(
+			"NtWriteVirtualMemory: only self-process is supported")
+	}
+	dst := unsafe.Pointer(baseAddress)
+	src := unsafe.Slice((*byte)(buffer), size)
+	out := unsafe.Slice((*byte)(dst), size)
+	copy(out, src)
+	if bytesWritten != nil {
+		*bytesWritten = size
+	}
+	return nil
 }
 
 // NtCreateThreadEx is not portable. On Linux, use a goroutine or
 // clone(2) directly.
 func NtCreateThreadEx(threadHandle *uintptr,
-    desiredAccess uintptr,
-    objectAttributes uintptr,
-    processHandle uintptr,
-    startRoutine uintptr,
-    argument uintptr,
-    createFlags uintptr,
-    zeroBits uintptr,
-    stackSize uintptr,
-    maximumStackSize uintptr,
-    attributeList uintptr) error {
-    return errNotWindows
+	desiredAccess uintptr,
+	objectAttributes uintptr,
+	processHandle uintptr,
+	startRoutine uintptr,
+	argument uintptr,
+	createFlags uintptr,
+	zeroBits uintptr,
+	stackSize uintptr,
+	maximumStackSize uintptr,
+	attributeList uintptr) error {
+	return errNotWindows
 }

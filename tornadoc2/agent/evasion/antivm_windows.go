@@ -11,9 +11,9 @@ import (
 var (
 	vmAdvapi32 = syscall.NewLazyDLL("advapi32.dll")
 
-	vmProcRegOpenKeyExW = vmAdvapi32.NewProc("RegOpenKeyExW")
-	vmProcRegCloseKey   = vmAdvapi32.NewProc("RegCloseKey")
-	vmProcRegEnumKeyExW = vmAdvapi32.NewProc("RegEnumKeyExW")
+	vmProcRegOpenKeyExW    = vmAdvapi32.NewProc("RegOpenKeyExW")
+	vmProcRegCloseKey      = vmAdvapi32.NewProc("RegCloseKey")
+	vmProcRegEnumKeyExW    = vmAdvapi32.NewProc("RegEnumKeyExW")
 	vmProcRegQueryValueExW = vmAdvapi32.NewProc("RegQueryValueExW")
 )
 
@@ -198,16 +198,16 @@ func vmGuestProcesses() bool {
 	defer closeHandle.Call(snap)
 
 	type processEntry32 struct {
-		Size              uint32
-		CntUsage          uint32
-		ProcessID         uint32
-		DefaultHeapID     uintptr
-		ModuleID          uint32
-		CntThreads        uint32
-		ParentProcessID   uint32
-		PriClassBase      int32
-		Flags             uint32
-		ExeFile           [260]uint16
+		Size            uint32
+		CntUsage        uint32
+		ProcessID       uint32
+		DefaultHeapID   uintptr
+		ModuleID        uint32
+		CntThreads      uint32
+		ParentProcessID uint32
+		PriClassBase    int32
+		Flags           uint32
+		ExeFile         [260]uint16
 	}
 	var entry processEntry32
 	entry.Size = uint32(unsafe.Sizeof(entry))
@@ -274,7 +274,7 @@ func queryStringValue(hKey uintptr, name string) (string, bool) {
 	if r != 0 {
 		return "", false
 	}
-	
+
 	if dataType != 1 && dataType != 2 {
 		return "", false
 	}
