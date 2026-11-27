@@ -52,21 +52,21 @@ describe('workspace', () => {
     await connect()
     expect(document.querySelector('[data-workspace]')).toBeTruthy()
     expect(screen.queryByRole('navigation', { name: 'Sections' })).toBeNull()
-    expect(document.querySelectorAll('[role="tab"][data-tab]')).toHaveLength(7)
+    expect(document.querySelectorAll('[role="tab"][data-tab]')).toHaveLength(8)
     expect(screen.getByLabelText('Filter targets')).toBeTruthy()
   })
 
-  it('filters group menus by capability', async () => {
+  it('filters the panels menu by capability', async () => {
     await connect()
-    fireEvent.click(screen.getByRole('button', { name: 'Assets' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'View' }))
     expect(screen.getByRole('menuitem', { name: 'Listeners' })).toBeTruthy()
     expect(screen.queryByRole('menuitem', { name: 'Armory' })).toBeNull()
     fireEvent.keyDown(document, { key: 'Escape' })
   })
 
-  it('opens a panel from the rail', async () => {
+  it('opens a panel from the View menu', async () => {
     await connect()
-    fireEvent.click(screen.getByRole('button', { name: 'Assets' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'View' }))
     fireEvent.click(screen.getByRole('menuitem', { name: 'Listeners' }))
     await waitFor(() => expect(
       document.querySelector('[data-tab-id="listeners"]')
@@ -78,7 +78,7 @@ describe('workspace', () => {
     const targets = screen.getByRole('tab', { name: /Targets/ })
     fireEvent.click(targets)
     fireEvent.keyDown(targets, { key: '3', altKey: true })
-    expect(document.querySelector('[data-tabset-id="dock-right"]')
+    expect(document.querySelector('[data-tabset-id="ws-right"]')
       ?.textContent).toContain('Targets')
   })
 
@@ -87,6 +87,19 @@ describe('workspace', () => {
     fireEvent.click(document.querySelector('[data-tab-id="graph"]')!)
     fireEvent.click(screen.getByRole('button', { name: 'Detach active panel' }))
     expect(window.t2.detach).toHaveBeenCalledWith('graph')
+    await waitFor(() => expect(document.querySelector('[data-tab-id="graph"]')).toBeNull())
+    await waitFor(() => expect(JSON.parse(
+      localStorage.getItem('t2.workspace.v1.w1') ?? '{}')
+      .hidden).toContain('graph'))
+  })
+
+  it('floats the active tab', async () => {
+    await connect()
+    fireEvent.click(document.querySelector('[data-tab-id="graph"]')!)
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Tabs' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: /Float active tab/ }))
+    await waitFor(() => expect(
+      document.querySelector('[data-floating-tabset]')).toBeTruthy())
   })
 
   it('auto-attaches to an existing bridge session', async () => {
@@ -96,21 +109,43 @@ describe('workspace', () => {
     })
     render(<App />)
     await waitFor(() => expect(
-      document.querySelectorAll('[role="tab"][data-tab]')).toHaveLength(7))
+      document.querySelectorAll('[role="tab"][data-tab]')).toHaveLength(8))
     expect(screen.queryByRole('button', { name: /^connect$/i })).toBeNull()
     expect(screen.getByText('op')).toBeTruthy()
   })
 
-  it('applies and persists a profile, then marks custom', async () => {
+  it('applies and persists a workspace, then marks custom', async () => {
     await connect()
-    fireEvent.click(screen.getByRole('tab', { name: /Investigation/ }))
+    fireEvent.click(screen.getByRole('button', { name: /Workspace:/ }))
+    fireEvent.click(screen.getByRole('option', { name: /Workspace 3/ }))
     await waitFor(() => expect(
-      document.querySelector('[data-tabset-id="dock-center"] [data-tab-id="audit"]')
+      document.querySelector('[data-tabset-id="ws-center"] [data-tab-id="events"]')
         ?.getAttribute('data-tab-selected')).toBe('true'))
-    expect(localStorage.getItem('t2.dock.profile')).toBe('investigation')
-    fireEvent.click(document.querySelector('[data-tabset-id="dock-center"] [data-tab-id="audit"]')!)
+    expect(localStorage.getItem('t2.workspace.active')).toBe('w3')
+    fireEvent.click(document.querySelector('[data-tabset-id="ws-center"] [data-tab-id="chat"]')!)
     fireEvent.keyDown(document.querySelector('.dock')!, { key: 'Delete' })
     await waitFor(() => expect(screen.getByText('custom')).toBeTruthy())
+    await waitFor(() => expect(JSON.parse(
+      localStorage.getItem('t2.workspace.v1.w3') ?? '{}')
+      .hidden).toContain('chat'))
+  })
+
+  it('keeps each workspace layout independent', async () => {
+    await connect()
+    fireEvent.click(document.querySelector('[data-tab-id="screen"]')!)
+    fireEvent.keyDown(document.querySelector('.dock')!, { key: 'Delete' })
+    await waitFor(() => expect(document.querySelector('[data-tab-id="screen"]')).toBeNull())
+    await waitFor(() => expect(JSON.parse(
+      localStorage.getItem('t2.workspace.v1.w1') ?? '{}')
+      .hidden).toContain('screen'))
+    fireEvent.click(screen.getByRole('button', { name: /Workspace:/ }))
+    fireEvent.click(screen.getByRole('option', { name: /Workspace 2/ }))
+    await waitFor(() => expect(document.querySelector('[data-tab-id="listeners"]')).toBeTruthy())
+    expect(document.querySelector('[data-tab-id="terminal"]')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: /Workspace:/ }))
+    fireEvent.click(screen.getByRole('option', { name: /Workspace 1/ }))
+    await waitFor(() => expect(document.querySelector('[data-tab-id="terminal"]')).toBeTruthy())
+    expect(document.querySelector('[data-tab-id="screen"]')).toBeNull()
   })
 
   it('opens build and jump from the titlebar', async () => {

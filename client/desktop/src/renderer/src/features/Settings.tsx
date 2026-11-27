@@ -44,8 +44,10 @@ export default function Settings(props: {
         </label>
         <dl className="keys">
           <dt>⌘/Ctrl + {props.paletteKey.toUpperCase()}</dt><dd>Command palette</dd>
+          <dt>Alt + P</dt><dd>Open the Panels menu</dd>
+          <dt>Alt + W</dt><dd>Focus the workspace selector</dd>
           <dt>Enter</dt><dd>Attach to selection</dd>
-          <dt>Esc</dt><dd>Close dialog / restore pane</dd>
+          <dt>Esc</dt><dd>Close menu / dialog</dd>
           <dt>Alt + ←/→</dt><dd>Move active tab between panes</dd>
           <dt>Alt + 1–4</dt><dd>Move active tab to pane 1–4</dd>
           <dt>Alt + Shift + M</dt><dd>Maximise / restore pane</dd>

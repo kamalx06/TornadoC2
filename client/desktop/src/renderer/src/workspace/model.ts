@@ -106,8 +106,12 @@ export function findTab(model: DockModel, id: PanelId): DockTabset | undefined {
 
 function asModel(value: unknown): DockModel | null {
   if (!value || typeof value !== 'object') return null
-  const raw = value as { version?: unknown }
+  const raw = value as { version?: unknown; hidden?: unknown }
   if (raw.version !== DOCK_VERSION) return null
+  const hidden = new Set(
+    Array.isArray(raw.hidden)
+      ? raw.hidden.filter((id): id is PanelId => isPanelId(id))
+      : [])
   const model = normalizeWorkspaceModel<PanelData, TabsetData>(value, {
     mapTab: (tab) => {
       if (!isPanelId(tab.id)) return null
@@ -127,7 +131,7 @@ function asModel(value: unknown): DockModel | null {
     }
     if (ts.tabs.length === 0) ts.keepWhenEmpty = true
   }
-  const missing = PANEL_IDS.filter((id) => !seen.has(id))
+  const missing = PANEL_IDS.filter((id) => !seen.has(id) && !hidden.has(id))
   if (missing.length) {
     const tabsets = walkTabsets(model.root)
     for (const id of missing) {
@@ -138,6 +142,14 @@ function asModel(value: unknown): DockModel | null {
     }
   }
   return model
+}
+
+export function parseStoredModel(raw: string): DockModel | null {
+  try {
+    return asModel(JSON.parse(raw))
+  } catch {
+    return null
+  }
 }
 
 export function loadModel(
@@ -176,8 +188,13 @@ export function loadModel(
 
 export function saveModel(model: DockModel, key = DOCK_KEY): boolean {
   if (countTabs(model.root) === 0) return true
+  const present = new Set<string>()
+  for (const ts of walkTabsets(model.root)) {
+    for (const tab of ts.tabs) present.add(tab.id)
+  }
+  const hidden = PANEL_IDS.filter((id) => !present.has(id))
   try {
-    localStorage.setItem(key, JSON.stringify(model))
+    localStorage.setItem(key, JSON.stringify({ ...model, hidden }))
     return true
   } catch {
     return false

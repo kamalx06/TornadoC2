@@ -18,7 +18,7 @@ describe('CSP', () => {
       expect(policy).toContain("default-src 'none'")
       expect(policy).toContain("script-src 'self'")
       expect(policy).toContain("style-src 'self' 'unsafe-inline'")
-      expect(policy).toContain("img-src 'self' data:")
+      expect(policy).toContain("img-src 'self' data: https:")
       expect(policy).toContain("connect-src 'self'")
       expect(policy).toContain("base-uri 'none'")
       expect(policy).not.toContain("'unsafe-eval'")

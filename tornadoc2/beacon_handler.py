@@ -28,7 +28,6 @@ Everything else in ``beacon/`` is self-contained.
 
 import argparse
 import os
-import signal
 import socket
 import subprocess
 import sys
@@ -37,6 +36,7 @@ import time
 
 
 from .constants import BEACON_COMMANDS, MAIN_COMMANDS
+from . import daemon as _daemon
 from .session_log import SessionLogger           # noqa: F401  (beacon engine)
 from .session_registry import SessionRegistry
 from .updater import Updater
@@ -2064,6 +2064,25 @@ class BeaconHandler:
             return None, (
                 "transport_mode 'wireguard' cannot be combined "
                 "with other transports in this version.")
+
+        from .beacon.build_spec import validate as _validate
+        _check = dict(raw)
+        _check['transport_mode'] = ','.join(modes)
+        _check.update(evasion)
+        _mtls = raw.get('mtls') or {}
+        _check['use_mtls'] = bool(
+            isinstance(_mtls, dict) and (
+                _mtls.get('enabled') or _mtls.get('cert')
+                or _mtls.get('key') or _mtls.get('ca')))
+        if any(m in modes for m in ('http', 'quic', 'websocket')) \
+                and not str(_check.get('url') or '').strip():
+            _check['url'] = self._beacon_build_default_url(
+                for_quic=('quic' in modes))
+        _errors = _validate(_check, remote=remote)
+        if _errors:
+            return None, '\n'.join(
+                f"{e['field']}: {e['message']}" for e in _errors)
+
         if 'websocket' in modes and not (raw.get('url') or '').strip():
             return None, (
                 "transport_mode 'websocket' requires url "
@@ -3653,34 +3672,76 @@ class BeaconHandler:
     # ------------------------------------------------------------------
 
     def _daemon_loop(self) -> None:
-        """Daemon-mode event loop.
+        """Run the detached child until SIGTERM.
 
-        Spawns the console-socket thread, installs SIGTERM /
-        SIGINT / SIGHUP handlers, writes the pidfile once the
-        socket is listening, then blocks until shutdown. The
-        listeners started by start() keep running on their own
-        threads. A console client that attaches and detaches does
-        not affect the daemon; only SIGTERM (or `halt` typed at
-        an attached console) stops it.
+        The parent has already opened the log and passed the instance
+        lock and readiness pipe. The child adopts the lock, starts the
+        console socket, writes the pidfile only after the socket is
+        listening, then reports READY on the pipe.
         """
         rt = _runtime_dir()
         socket_path = self._console_socket_path or os.path.join(
-            rt, _SOCKET_NAME)
+            rt, _daemon.SOCKET_NAME)
+        pidfile = _daemon.pid_path(rt)
+        ready = _daemon.ready_fd()
         self._shutdown_event = threading.Event()
 
-        console_thread = threading.Thread(
-            target=self._serve_console_socket,
-            args=(socket_path, self._shutdown_event),
-            daemon=True,
-            name='console-socket',
-        )
-        console_thread.start()
+        os.umask(0o077)
 
-        print(f'[daemon] running; pid={os.getpid()}', flush=True)
-        print(f'[daemon] listeners active; SIGTERM to stop', flush=True)
+        lock = _daemon.InstanceLock(_daemon.lock_path(rt))
+        inherited = _daemon.adopted_lock_fd()
+        try:
+            if inherited is not None:
+                lock.adopt(inherited)
+            elif not lock.acquire():
+                _daemon.notify_error(ready, 'instance lock held')
+                print('[daemon] instance lock is held', flush=True)
+                return
+        except OSError as exc:
+            _daemon.notify_error(ready, f'lock failed: {exc}')
+            print(f'[daemon] lock failed: {exc}', flush=True)
+            return
 
-        def _on_sigterm(signum, frame):
-            print(f'[daemon] SIGTERM received; shutting down',
+        if _daemon.socket_is_live(socket_path):
+            print(f'[daemon] stale live socket at {socket_path}; '
+                  f'replacing', flush=True)
+
+        console_error = []
+
+        def _console():
+            try:
+                self._serve_console_socket(
+                    socket_path, self._shutdown_event)
+            except Exception as exc:
+                console_error.append(exc)
+                print(f'[daemon] console socket failed: {exc}',
+                      flush=True)
+
+        threading.Thread(target=_console, daemon=True,
+                         name='console-socket').start()
+
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            if os.path.exists(socket_path) or console_error:
+                break
+            time.sleep(0.1)
+        if not os.path.exists(socket_path):
+            _daemon.notify_error(
+                ready, 'console socket did not bind')
+            print('[daemon] console socket did not bind', flush=True)
+            lock.release()
+            return
+
+        try:
+            _daemon.write_pid(pidfile, os.getpid())
+        except OSError as exc:
+            print(f'[daemon] could not write pidfile: {exc}',
+                  flush=True)
+
+        heartbeat = _daemon.Heartbeat(_daemon.status_path(rt), self)
+
+        def _term():
+            print('[daemon] SIGTERM received; shutting down',
                   flush=True)
             self._shutdown_event.set()
             conn = getattr(self, '_console_conn', None)
@@ -3690,24 +3751,17 @@ class BeaconHandler:
                 except OSError:
                     pass
 
-        signal.signal(signal.SIGTERM, _on_sigterm)
-        signal.signal(signal.SIGINT, signal.SIG_IGN)
-        signal.signal(signal.SIGHUP, signal.SIG_IGN)
-
-        for _ in range(100):
-            if os.path.exists(socket_path):
-                break
-            time.sleep(0.1)
-
-        pidfile = os.path.join(rt, _PIDFILE_NAME)
-        try:
-            with open(pidfile, 'w') as fh:
-                fh.write(f'{os.getpid()}\n')
-                fh.flush()
-                os.fsync(fh.fileno())
-        except OSError as exc:
-            print(f'[daemon] could not write pidfile: {exc}',
+        def _hup():
+            print('[daemon] SIGHUP; reloading listener store',
                   flush=True)
+            self.listener_reload_store()
+
+        _daemon.install_signals(_term, _hup)
+        heartbeat.start()
+        _daemon.notify_ready(ready, os.getpid())
+
+        print(f'[daemon] running; pid={os.getpid()}', flush=True)
+        print('[daemon] listeners active; SIGTERM to stop', flush=True)
 
         try:
             while not self._shutdown_event.is_set():
@@ -3717,11 +3771,10 @@ class BeaconHandler:
                 self.shutdown_for_restart()
             except Exception:
                 pass
-            try:
-                os.remove(pidfile)
-            except OSError:
-                pass
-
+            heartbeat.close()
+            _daemon.remove_file(pidfile)
+            _daemon.remove_file(socket_path)
+            lock.release()
     def _serve_console_socket(self, socket_path: str,
                               shutdown_event: 'threading.Event') -> None:
         """Accept console clients on a Unix domain socket.
@@ -3732,6 +3785,9 @@ class BeaconHandler:
         socket file does not break the next start.
         """
         if os.path.exists(socket_path):
+            if _daemon.socket_is_live(socket_path):
+                print(f'[daemon] socket {socket_path} already '
+                      f'accepts; replacing', flush=True)
             try:
                 os.remove(socket_path)
             except OSError:
@@ -4254,6 +4310,160 @@ class BeaconHandler:
 
         return problems
 
+    def _export_operator_config(self, name, out_path=None, *,
+                                interactive=True, auto=False,
+                                print_body=False):
+        """Build, verify and write an operator config.
+
+        Used by `operator export` and automatically after
+        `operator add`. The summary is safe to leave in a terminal
+        or daemon log; the PEM-bearing body is only printed with
+        ``--print``.
+        """
+        c = self.colors
+        from .team import operators as _opcfg
+        import hashlib
+        import json
+        import ssl
+
+        reg = self.operator_registry
+        if reg is None:
+            print(f"{c['yellow']}[TEAM] team server not running"
+                  f"{c['end']}")
+            return False
+        try:
+            entry = reg.get(name)
+        except Exception:
+            entry = None
+        if entry is None:
+            print(f"{c['red']}operator {name} not found{c['end']}")
+            return False
+        if entry.get('revoked'):
+            print(f"{c['red']}{name} is revoked — refusing to "
+                  f"export a config for a revoked operator"
+                  f"{c['end']}")
+            return False
+
+        paths = reg.paths_for(name)
+        if out_path is None:
+            out_path = os.path.join(paths['dir'], f'{name}.cfg')
+
+        if self.host in ('0.0.0.0', '::'):
+            host = _opcfg.advertised_host('')
+            print(f"{c['cyan']}listener is bound to 0.0.0.0 — "
+                  f"config will use autodetected server_host={host}. "
+                  f"If not reachable from the operator's machine, "
+                  f"edit server_host in the config.{c['end']}")
+
+        signer, desc = _opcfg.find_config_signer(self)
+        listener_fp = None
+        if self.operator_listener is not None:
+            listener_fp = getattr(
+                self.operator_listener, 'ca_fingerprint_loaded',
+                None)
+        blob, err = _opcfg.build_config(
+            reg, name, host=self.host, port=self.operator_port,
+            signer=signer, signer_desc=desc,
+            listener_ca_fp=listener_fp, handler=self)
+        if blob is None:
+            print(f"{c['red']}export failed: {err}{c['end']}")
+            return False
+
+        try:
+            cfg = json.loads(blob)
+        except ValueError as exc:
+            print(f"{c['red']}config serialization failed: {exc}"
+                  f"{c['end']}")
+            return False
+
+        problems = self._verify_export_bundle(
+            name, cfg['ca_pem'], cfg['client_cert'])
+        if problems:
+            print()
+            print(f"{c['red']}{c['bold']}[TEAM] this config will "
+                  f"not authenticate against the running server:"
+                  f"{c['end']}")
+            for p in problems:
+                print(f"  {c['red']}✗{c['end']} {p}")
+            print()
+            if interactive:
+                if not sys.stdin.isatty():
+                    print(f"{c['red']}stdin is not a terminal; "
+                          f"refusing to write a broken config."
+                          f"{c['end']}")
+                    return False
+                try:
+                    ans = input(
+                        f"  {c['yellow']}Write the config anyway? "
+                        f"[y/N]{c['end']} ").strip().lower()
+                except (EOFError, KeyboardInterrupt):
+                    print()
+                    return False
+                if ans not in ('y', 'yes'):
+                    print(f"{c['dim']}cancelled — no file written"
+                          f"{c['end']}")
+                    return False
+                print()
+            else:
+                print(f"{c['yellow']}auto-export writing anyway; "
+                      f"re-run `operator export {name}` after the "
+                      f"fix.{c['end']}")
+                print()
+
+        try:
+            _opcfg.write_config(out_path, blob)
+        except OSError as exc:
+            print(f"{c['red']}write failed: {exc}{c['end']}")
+            return False
+
+        raw = blob.encode('utf-8')
+        digest = hashlib.sha256(raw).hexdigest()
+        ca_fp = hashlib.sha256(
+            ssl.PEM_cert_to_DER_cert(cfg['ca_pem'])).hexdigest()
+        cert_fp = hashlib.sha256(
+            ssl.PEM_cert_to_DER_cert(cfg['client_cert'])).hexdigest()
+
+        if self.audit_log is not None:
+            self.audit_log.write(
+                operator='__local__', role='local',
+                source_ip='local', action='operator.export',
+                target=name,
+                detail=(f'{"auto=1 " if auto else ""}'
+                        f'sha256={digest} path={out_path}'))
+        if self.operator_listener is not None:
+            try:
+                self.operator_listener.events.emit(
+                    'info', 'operator',
+                    f'local exported config for {name} '
+                    f'sha256={digest[:16]}…',
+                    meta={'operator': name, 'sha256': digest,
+                          'auto': auto})
+            except Exception:
+                pass
+
+        print(f"{c['green']}✓{c['end']} exported config for "
+              f"{c['cyan']}{name}{c['end']} ({len(raw)} bytes)")
+        print(f"  {c['dim']}path: {c['end']}{out_path}")
+        print(f"  {c['dim']}role: {c['end']}"
+              f"{entry.get('role', 'operator')}")
+        print(f"  {c['dim']}config sha256 : {c['end']}{digest}")
+        print(f"  {c['dim']}ca fingerprint: {c['end']}{ca_fp}")
+        print(f"  {c['dim']}cert fingerprint: {c['end']}{cert_fp}")
+        print(f"  {c['dim']}signed: {c['end']}"
+              f"{'yes' if cfg.get('config_signature_b64') else 'no'}")
+        print(f"{c['yellow']}⚠  This is a credential for another "
+              f"operator. Anyone who reads this file can act as "
+              f"{name}.{c['end']}")
+        print(f"{c['yellow']}   Hand it off out of band — never "
+              f"over the C2 channel, chat, or plain email."
+              f"{c['end']}")
+        if print_body:
+            print()
+            print(f"{c['dim']}--- {out_path} (0600) ---{c['end']}")
+            print(blob)
+            print(f"{c['dim']}--- end config ---{c['end']}")
+        return True
+
     def _cmd_multiplayer(self, parts):
         c = self.colors
         if self._multiplayer is None:
@@ -4357,6 +4567,14 @@ class BeaconHandler:
                 print(f"  {c['yellow']}Hand the password to {name} "
                       f"out of band — never in the config file, "
                       f"never over the C2 channel.{c['end']}")
+            print()
+            print(f"{c['dim']}auto-exporting the operator "
+                  f"config…{c['end']}")
+            if not self._export_operator_config(
+                    name, auto=True, interactive=False):
+                print(f"  {c['yellow']}auto-export failed; the "
+                      f"account exists. Run `operator export "
+                      f"{name}` after fixing the cause.{c['end']}")
             return
 
         if sub in ('remove', 'rm'):
@@ -4470,245 +4688,20 @@ class BeaconHandler:
         if sub in ('export', 'config'):
             if len(parts) < 3:
                 print(f"{c['red']}Usage: operator export <name> "
-                      f"[<output_path>]{c['end']}")
+                      f"[<output_path>] [--print]{c['end']}")
                 return
             name = parts[2]
-            try:
-                entry = reg.get(name)
-            except Exception:
-                entry = None
-            if entry is None:
-                print(f"{c['red']}operator {name} not found"
-                      f"{c['end']}")
-                return
-            if entry.get('revoked'):
-                print(f"{c['red']}{name} is revoked — refusing to "
-                      f"export a config for a revoked operator"
-                      f"{c['end']}")
-                return
-
-            try:
-                paths = reg.paths_for(name)
-            except AttributeError:
-                print(f"{c['red']}registry has no paths_for() — "
-                      f"cannot locate certs{c['end']}")
-                return
-
-            op_dir = paths['dir']
-            cert_path = paths['cert']
-            key_path = paths['key']
-            ca_path = paths['ca']
-
-            missing = [p for p in (cert_path, key_path, ca_path)
-                       if not p or not os.path.isfile(p)]
-            if missing:
-                print(f"{c['red']}missing files:{c['end']}")
-                for p in missing:
-                    print(f"  {c['red']}{p}{c['end']}")
-                return
-
-            if len(parts) > 3:
-                out_path = parts[3]
-            else:
-                out_path = os.path.join(op_dir, f'{name}.cfg')
-
-            host = self.host
-            if host in ('0.0.0.0', '::'):
-                detected = None
-                try:
-                    _probe = socket.socket(socket.AF_INET,
-                                           socket.SOCK_DGRAM)
-                    _probe.settimeout(1.0)
-                    _probe.connect(('8.8.8.8', 1))
-                    detected = _probe.getsockname()[0]
-                    _probe.close()
-                except Exception:
-                    detected = None
-                if detected and detected != '127.0.0.1':
-                    host = detected
-                    print(f"{c['cyan']}listener is bound to 0.0.0.0 "
-                          f"— config will use autodetected "
-                          f"server_host={host}. If not reachable "
-                          f"from the operator's machine, edit "
-                          f"server_host in the config."
-                          f"{c['end']}")
-                else:
-                    host = 'localhost'
-                    print(f"{c['yellow']}listener is bound to 0.0.0.0 "
-                          f"and no outbound interface could be "
-                          f"detected — config will use "
-                          f"server_host=localhost. Edit the config "
-                          f"before handing it to a remote operator."
-                          f"{c['end']}")
-
-            try:
-                with open(ca_path, 'rb') as fh:
-                    ca_pem = fh.read().decode('utf-8')
-                with open(cert_path, 'rb') as fh:
-                    client_cert = fh.read().decode('utf-8')
-                with open(key_path, 'rb') as fh:
-                    client_key = fh.read().decode('utf-8')
-            except OSError as exc:
-                print(f"{c['red']}read failed: {exc}{c['end']}")
-                return
-
-            problems = self._verify_export_bundle(
-                name, ca_pem, client_cert)
-            if problems:
-                print()
-                print(f"{c['red']}{c['bold']}[TEAM] this config "
-                      f"will not authenticate against the running "
-                      f"server:{c['end']}")
-                for p in problems:
-                    print(f"  {c['red']}✗{c['end']} {p}")
-                print()
-                print(f"  {c['yellow']}Fix the problems above and "
-                      f"re-run `operator export {name}`. Writing "
-                      f"the file anyway will produce a config that "
-                      f"fails at the client with "
-                      f"TLSV1_ALERT_UNKNOWN_CA.{c['end']}")
-                print()
-                if not sys.stdin.isatty():
-                    print(f"{c['red']}stdin is not a terminal; "
-                          f"refusing to write a broken config."
-                          f"{c['end']}")
-                    return
-                try:
-                    ans = input(
-                        f"  {c['yellow']}Write the config anyway? "
-                        f"[y/N]{c['end']} "
-                    ).strip().lower()
-                except (EOFError, KeyboardInterrupt):
-                    print()
-                    return
-                if ans not in ('y', 'yes'):
-                    print(f"{c['dim']}cancelled — no file written"
-                          f"{c['end']}")
-                    return
-                print()
-
-            import json as _json
-            import hashlib as _hl
-            import ssl as _ssl
-
-            cfg = {
-                'name': name,
-                'role': entry.get('role', 'operator'),
-                'server_host': host,
-                'server_port': self.operator_port,
-                'ca_pem': ca_pem,
-                'client_cert': client_cert,
-                'client_key': client_key,
-            }
-
-            try:
-                with open(self.operator_registry.server_cert,
-                          'rb') as fh:
-                    _server_pem = fh.read().decode('utf-8')
-                import ssl as _ssl_pin
-                _der = _ssl_pin.PEM_cert_to_DER_cert(_server_pem)
-                cfg['server_cert_sha256'] = _hl.sha256(
-                    _der).hexdigest()
-            except Exception:
-                cfg['server_cert_sha256'] = ''
-            if entry.get('auth_hash'):
-                cfg['password_required'] = True
-                cfg['auth_algo'] = entry.get(
-                    'auth_algo', 'pbkdf2-sha256')
-                cfg['auth_params'] = entry.get(
-                    'auth_params', {'iters': 200_000})
-                cfg['auth_salt'] = entry.get('auth_salt', '')
-
-            signer = getattr(self, 'signer', None)
-            if signer is not None:
-                try:
-                    import base64 as _b64cfg
-                    canonical = _json.dumps(
-                        cfg, sort_keys=True,
-                        separators=(',', ':')).encode('utf-8')
-                    cfg['config_signature_b64'] = (
-                        _b64cfg.b64encode(signer.sign(canonical))
-                        .decode('ascii'))
-                    cfg['config_signer_pubkey_pem'] = signer.public_pem
-                except Exception as exc:
-                    print(f"{c['yellow']}[TEAM] config signing "
-                          f"failed: {exc}{c['end']}")
-            else:
-                print(f"{c['yellow']}[TEAM] config signing "
-                      f"skipped: no signer{c['end']}")
-
-            blob = _json.dumps(cfg, indent=2)
-            raw_bytes = blob.encode('utf-8')
-            digest = _hl.sha256(raw_bytes).hexdigest()
-            size = len(raw_bytes)
-
-            def _cert_fp(pem_text):
-                try:
-                    return _hl.sha256(
-                        _ssl.PEM_cert_to_DER_cert(pem_text)
-                    ).hexdigest()
-                except Exception:
-                    return '?'
-
-            cfg_ca_fp = _cert_fp(ca_pem)
-            cert_fp = _cert_fp(client_cert)
-            listener_fp = None
-            if self.operator_listener is not None:
-                listener_fp = getattr(
-                    self.operator_listener,
-                    'ca_fingerprint_loaded', None)
-
-            print()
-            print(f"  {c['dim']}server ca (this session):{c['end']} "
-                  f"{listener_fp or '?'}")
-            print(f"  {c['dim']}config ca (new file)    :{c['end']} "
-                  f"{cfg_ca_fp}")
-            if (cfg_ca_fp != '?' and listener_fp
-                    and cfg_ca_fp == listener_fp):
-                print(f"  {c['green']}✓ match{c['end']}")
-            elif cfg_ca_fp != '?' and listener_fp:
-                print(f"  {c['red']}✗ mismatch — the new config "
-                      f"will not authenticate against the running "
-                      f"server{c['end']}")
-            print()
-
-            try:
-                parent = os.path.dirname(os.path.abspath(out_path))
-                if parent:
-                    os.makedirs(parent, exist_ok=True)
-                with open(out_path, 'w', encoding='utf-8') as fh:
-                    fh.write(blob)
-                os.chmod(out_path, 0o600)
-            except OSError as exc:
-                print(f"{c['red']}write failed: {exc}{c['end']}")
-                return
-
-            if self.audit_log is not None:
-                self.audit_log.write(
-                    operator='__local__', role='local',
-                    source_ip='local', action='operator.export',
-                    target=name,
-                    detail=f'sha256={digest} path={out_path}')
-
-            role_str = entry.get('role', 'operator')
-            print(f"{c['green']}✓{c['end']} exported config for "
-                  f"{c['cyan']}{name}{c['end']} ({size} bytes)")
-            print(f"  {c['dim']}path: {c['end']}{out_path}")
-            print(f"  {c['dim']}role: {c['end']}{role_str}")
-            print(f"  {c['dim']}config sha256 : {c['end']}"
-                  f"{digest}")
-            print(f"  {c['dim']}ca fingerprint: {c['end']}"
-                  f"{cfg_ca_fp}")
-            print(f"  {c['dim']}cert fingerprint: {c['end']}"
-                  f"{cert_fp}")
-            print(f"{c['yellow']}⚠  This is a credential for "
-                  f"another operator. Anyone who reads this file "
-                  f"can act as {name}.{c['end']}")
-            print(f"{c['yellow']}   Hand it off out of band — "
-                  f"never over the C2 channel, chat, or plain "
-                  f"email.{c['end']}")
+            out_path = None
+            print_body = False
+            for arg in parts[3:]:
+                if arg == '--print':
+                    print_body = True
+                elif out_path is None:
+                    out_path = arg
+            self._export_operator_config(
+                name, out_path, interactive=True,
+                print_body=print_body)
             return
-
         print(f"{c['red']}Usage: operator "
               f"list|add|remove|set-role|passwd|export{c['end']}")
 
@@ -5119,117 +5112,16 @@ def _runtime_dir() -> str:
 
 
 def _pid_is_tornadoc2(pid: int):
-    """Best-effort check that ``pid`` is a TornadoC2 process.
-
-    Returns True if it clearly is, False if it clearly is not, and
-    None when the platform cannot tell. The caller treats None as
-    "assume ours" so a portable detection miss never causes a
-    double-start.
-    """
-    try:
-        proc_cmdline = f'/proc/{pid}/cmdline'
-        if os.path.exists(proc_cmdline):
-            with open(proc_cmdline, 'rb') as fh:
-                cmdline = fh.read().replace(
-                    b'\x00', b' ').decode('utf-8', 'replace')
-            return 'tornadoc2' in cmdline
-    except OSError:
-        pass
-    try:
-        import subprocess as _sp
-        out = _sp.run(
-            ['ps', '-o', 'command=', '-p', str(pid)],
-            capture_output=True, text=True, timeout=2.0)
-        if out.returncode != 0:
-            return None
-        return 'tornadoc2' in out.stdout
-    except Exception:
-        return None
+    """Compatibility wrapper around daemon.pid_is_tornadoc2."""
+    return _daemon.pid_is_tornadoc2(pid)
 
 
-def _daemonize() -> None:
-    """Re-launch as a detached subprocess and exit the parent.
-
-    The child is a fresh interpreter running the same argv with a
-    hidden ``--_daemon-child`` marker; nothing in this process is
-    inherited across the boundary. The child writes the pidfile
-    once its console socket is bound — the parent polls for it,
-    so a child that dies during startup is reported as a startup
-    failure instead of a false success.
-
-    Unix only. ``main()`` refuses ``--daemon`` on Windows before
-    this function is called.
-    """
+def _daemonize() -> int:
+    """Re-launch as a detached subprocess and return the parent code."""
     rt = _runtime_dir()
-    pidfile = os.path.join(rt, _PIDFILE_NAME)
-    logfile = os.path.join(rt, _LOG_NAME)
-
-    # Refuse if another daemon is already running.
-    if os.path.isfile(pidfile):
-        try:
-            with open(pidfile, 'r') as fh:
-                existing = int(fh.read().strip())
-            os.kill(existing, 0)
-        except (OSError, ValueError):
-            # Stale pidfile (process gone, or garbage contents).
-            try:
-                os.remove(pidfile)
-            except OSError:
-                pass
-        else:
-            is_ours = _pid_is_tornadoc2(existing)
-            if is_ours is False:
-                # Recycled PID; the pidfile is stale.
-                try:
-                    os.remove(pidfile)
-                except OSError:
-                    pass
-            else:
-                print(f'[daemon] a daemon is already running '
-                      f'(pid {existing}); pidfile={pidfile}')
-                raise SystemExit(1)
-
-    import subprocess
-
-    argv = [a for a in sys.argv if a != '--daemon']
-    child_argv = [sys.executable] + argv + ['--_daemon-child']
-
-    log_fh = open(logfile, 'ab', buffering=0)
-    try:
-        proc = subprocess.Popen(
-            child_argv,
-            stdin=subprocess.DEVNULL,
-            stdout=log_fh,
-            stderr=log_fh,
-            close_fds=True,
-            start_new_session=True,
-        )
-    finally:
-        log_fh.close()
-
-    print(f'[daemon] starting pid={proc.pid}')
-    print(f'[daemon] logfile {logfile}')
-    print(f'[daemon] console socket {os.path.join(rt, _SOCKET_NAME)}')
-    print(f'[daemon] attach with: {sys.executable} {sys.argv[0]} console')
-    print(f'[daemon] stop with:   kill $(cat {pidfile})')
-
-    # Poll for the child's readiness signal (the pidfile it writes
-    # after its console socket is bound).
-    deadline = time.time() + 15.0
-    while time.time() < deadline:
-        if os.path.exists(pidfile):
-            print(f'[daemon] ready')
-            return
-        if proc.poll() is not None:
-            print(f'[daemon] child exited (code {proc.returncode}) '
-                  f'before writing pidfile; see {logfile}')
-            raise SystemExit(1)
-        time.sleep(0.1)
-    print(f'[daemon] child did not write pidfile within 15s; '
-          f'see {logfile}')
-    raise SystemExit(1)
-
-
+    socket_path = os.path.join(rt, _daemon.SOCKET_NAME)
+    return _daemon.daemonize(
+        sys.argv, socket_path=socket_path, rt=rt)
 def _attach_console(socket_path: str) -> int:
     """Relay between the local terminal and the daemon console socket.
 
@@ -5602,8 +5494,7 @@ def main():
         # (.keys/, mtls_certs/, logs/) resolves to the same place
         # regardless of where the operator typed the command.
         os.chdir(_repo_root())
-        _daemonize()
-        return 0
+        return _daemonize()
 
     if args._daemon_child:
         # The parent has already chdir'd before re-exec, but a

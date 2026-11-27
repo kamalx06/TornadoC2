@@ -9,16 +9,23 @@ import {
 } from 'react-resizable-panels'
 import EmptyState from '../ui/EmptyState'
 import {
-  defaultModel, findTab, loadModel, makeTab, saveModel, singleModel, tabsetBySlot,
-  tabsetOrder, walkTabsets, type DockModel, type PanelData, type TabsetData
+  DOCK_KEY, countTabs, defaultModel, findTab, loadModel, makeTab, saveModel,
+  singleModel, tabsetBySlot, tabsetOrder, walkTabsets,
+  type DockModel, type PanelData, type TabsetData
 } from './model'
 import { PANELS, isPanelId, type PanelId } from './panels'
+import { defaultModelFor, workspaceKey, type WorkspaceId } from './workspaces'
 
 export interface DockHandle {
   open: (id: PanelId) => boolean
   reset: () => void
   active: () => PanelId | null
   apply: (model: DockModel) => void
+  closeActive: () => void
+  moveActive: (to: 'prev' | 'next' | number) => void
+  toggleMax: () => void
+  floatActive: () => void
+  closeTab: (id: PanelId) => void
 }
 
 type Notice = (text: string, kind?: 'ok' | 'err' | 'info') => void
@@ -29,12 +36,18 @@ const Dock = forwardRef<DockHandle, {
   onNotice: Notice
   single?: PanelId
   storageKey?: string
+  workspaceId?: WorkspaceId
+  dragGroup?: string
   onCustom?: () => void
+  onEmpty?: () => void
 }>(function Dock(props, ref) {
-  const key = props.storageKey ?? 't2.dock.v1'
+  const key = props.storageKey ?? (
+    props.workspaceId ? workspaceKey(props.workspaceId) : DOCK_KEY)
   const fallback = useCallback(
-    () => (props.single ? singleModel(props.single) : defaultModel()),
-    [props.single])
+    () => (props.single ? singleModel(props.single)
+      : props.workspaceId ? defaultModelFor(props.workspaceId)
+        : defaultModel()),
+    [props.single, props.workspaceId])
   const [initial] = useState(() => loadModel(key, fallback))
   const workspace = useWorkspaceRef<PanelData, TabsetData>()
   const activeTab = useRef<PanelId | null>('targets')
@@ -54,7 +67,24 @@ const Dock = forwardRef<DockHandle, {
       /* ignore */
     }
     props.onNotice('saved layout was corrupt — restored the default', 'err')
-  }, [initial.recovered, props])
+  }, [initial.recovered, props, key])
+
+  const loadedKey = useRef(key)
+  useEffect(() => {
+    if (loadedKey.current === key) return
+    loadedKey.current = key
+    const next = loadModel(key, fallback)
+    workspace.current?.setModel(next.model)
+    const first = walkTabsets(next.model.root)[0]?.tabs[0]?.id
+    if (first && isPanelId(first)) {
+      activeTab.current = first
+      props.onActive(first)
+    }
+    if (next.recovered) {
+      try { localStorage.removeItem(key) } catch { /* ignore */ }
+      props.onNotice('saved layout was corrupt — restored the default', 'err')
+    }
+  }, [key, fallback, props, workspace])
 
   useEffect(() => () => {
     if (saveTimer.current) clearTimeout(saveTimer.current)
@@ -119,6 +149,7 @@ const Dock = forwardRef<DockHandle, {
       activeTab.current = null
       props.onActive(null)
     }
+    if (props.onEmpty && countTabs(model.root) === 0) props.onEmpty()
   }, [persist, props, workspace, focusTab])
 
   const close = useCallback((id: PanelId) => {
@@ -137,7 +168,8 @@ const Dock = forwardRef<DockHandle, {
     }
     pendingFocus.current = next && isPanelId(next) ? next : null
     ws.closeTab(id)
-  }, [workspace])
+    props.onCustom?.()
+  }, [workspace, props])
 
   const closeActive = useCallback(() => {
     if (activeTab.current) close(activeTab.current)
@@ -197,13 +229,6 @@ const Dock = forwardRef<DockHandle, {
     }
   }, [focusTab, props, workspace])
 
-  useImperativeHandle(ref, () => ({
-    open,
-    reset,
-    active: () => activeTab.current,
-    apply
-  }), [open, reset, apply])
-
   const moveActive = useCallback((to: 'prev' | 'next' | number) => {
     const ws = workspace.current
     if (!ws) return
@@ -222,6 +247,44 @@ const Dock = forwardRef<DockHandle, {
     activeTab.current = id
     focusTab(id)
   }, [focusTab, workspace])
+
+  const toggleMax = useCallback(() => {
+    const ws = workspace.current
+    const model = ws?.getModel()
+    if (!ws || !model) return
+    if (model.maximizedTabsetId) {
+      ws.restoreTabset()
+      return
+    }
+    const ts = walkTabsets(model.root).find((t) =>
+      t.tabs.some((tab) => tab.id === activeTab.current))
+    if (ts) ws.maximizeTabset(ts.id)
+  }, [workspace])
+
+  const floatActive = useCallback(() => {
+    const ws = workspace.current
+    const id = activeTab.current
+    if (!ws || !id) return
+    const model = ws.getModel()
+    const ts = findTab(model, id)
+    if (!ts) return
+    if (model.floating?.some((f) => f.id === ts.id)) return
+    ws.floatTab(id)
+    focusTab(id)
+  }, [focusTab, workspace])
+
+  useImperativeHandle(ref, () => ({
+    open,
+    reset,
+    active: () => activeTab.current,
+    apply,
+    closeActive,
+    moveActive: (to) => moveActive(to),
+    toggleMax,
+    floatActive,
+    closeTab: close
+  }), [open, reset, apply, closeActive, moveActive, toggleMax,
+    floatActive, close])
 
   const onKeyDown = useCallback((e: React.KeyboardEvent<HTMLDivElement>) => {
     const typing = e.target instanceof HTMLElement &&
@@ -243,19 +306,16 @@ const Dock = forwardRef<DockHandle, {
       moveActive(digit - 1)
       return
     }
+    if (e.key.toLowerCase() === 'f' && e.shiftKey) {
+      e.preventDefault()
+      floatActive()
+      return
+    }
     if (e.key.toLowerCase() === 'm' && e.shiftKey) {
       e.preventDefault()
-      const ws = workspace.current
-      const model = ws?.getModel()
-      if (!ws || !model) return
-      if (model.maximizedTabsetId) ws.restoreTabset()
-      else {
-        const ts = walkTabsets(model.root).find((t) =>
-          t.tabs.some((tab) => tab.id === activeTab.current))
-        if (ts) ws.maximizeTabset(ts.id)
-      }
+      toggleMax()
     }
-  }, [moveActive, workspace, closeActive])
+  }, [moveActive, workspace, closeActive, toggleMax, floatActive])
 
   const renderTab = useCallback((tab: { id: string; title?: string }, p: TabRenderProps) => {
     const panel = isPanelId(tab.id) ? tab.id : null
@@ -318,6 +378,7 @@ const Dock = forwardRef<DockHandle, {
         )}
         hiddenTabBehavior="keep-mounted"
         lazyTabContent
+        dragGroup={props.dragGroup ?? 't2'}
         tabsetMinWidth="170px"
         tabsetMinHeight="120px"
         classNames={{

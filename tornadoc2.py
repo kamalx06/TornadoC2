@@ -18,7 +18,7 @@ from tornadoc2.beacon_handler import BeaconHandler, main
 
 if __name__ == '__main__':
     try:
-        main()
+        sys.exit(main())
     except KeyboardInterrupt:
         print()
         sys.exit(130)

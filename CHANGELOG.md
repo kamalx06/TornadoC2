@@ -1,5 +1,33 @@
 # Changelog
 
+## Unreleased
+- Overhaul Phase 0: baseline record, frozen 18-panel no-loss inventory
+  with a registry test, workspace architecture, GUI ↔ CLI parity
+  matrix and locked armory repository contract.
+- Overhaul Phase 1.1: HTTP/auth/task/listener/build events stream to
+  the desktop Events pane; the CLI and daemon log stay quiet.
+- Overhaul Phase 1.2: bridge event poller and `server` event source.
+- Overhaul Phase 1.3: operator add auto-exports a verified 0600 config;
+  daemon gains an instance lock, readiness pipe, rotated 0600 log,
+  heartbeat, SIGHUP listener reload and atomic cleanup.
+- Overhaul Phase 1.4: armory is pinned to the project repository,
+  signature verification removed, safe archive reader, SHA-256
+  integrity, install/remove/update and a locked-source GUI.
+- Overhaul Phase 1.5: shared `build_spec` descriptor and validator
+  drive the builder, server, CLI wizard and GUI; build errors are
+  field-addressed.
+- Overhaul Phase 2.1: pitch-black token palette, high-density defaults,
+  square data grids, mono data typography and audited contrast.
+- Overhaul Phase 2.2: File/View/Tabs/Help menubar, grouped panel menu,
+  status cluster, workspace selector, rail removal and shell keyboard
+  model.
+- Overhaul Phase 2.3: four independent versioned workspace models,
+  one-shot legacy migration with backup, hidden-tab persistence,
+  corrupt fallback, float/detach coordination and `dragGroup` transfer.
+- Overhaul Phase 2.4: side sheet, context menu, status cluster,
+  progress, skeleton, sanitized markdown, copy button, state presets
+  and grouped/tree data grids.
+
 ## 0.9.0
 - Feature-pruned agent builds; unused transports, evasion, WASM and Jump code excluded.
 - Versioned WASM ABI with limits and timeout isolation.

@@ -418,6 +418,14 @@ class BeaconBuilder:
               profile: Optional[dict] = None) -> str:
         """Compile the beacon. Returns the output path."""
 
+        from .build_spec import validate
+        import dataclasses as _dc
+        errors = validate(_dc.asdict(config))
+        if errors:
+            raise RuntimeError(
+                'build config is invalid:\n  ' + '\n  '.join(
+                    f"{e['field']}: {e['message']}" for e in errors))
+
         os.makedirs(self.output_dir, exist_ok=True)
         self._agent_subdir(config.target_os)
 

@@ -4,7 +4,7 @@ const CSP = [
   "default-src 'none'",
   "script-src 'self' 'unsafe-inline'",
   "style-src 'self' 'unsafe-inline'",
-  "img-src 'self' data:",
+  "img-src 'self' data: https:",
   "font-src 'self'",
   "connect-src 'self'",
   "base-uri 'none'",

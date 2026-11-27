@@ -45,8 +45,13 @@ describe('event log', () => {
 
   it('filters by level, source and text', () => {
     seed()
+    act(() => push('info', 'server', 'POST /api/v1/beacons 200'))
     render(<EventLog onToast={() => undefined} />)
     expect(screen.getByText('bridge lost')).toBeTruthy()
+    fireEvent.change(screen.getByLabelText('Source filter'), { target: { value: 'server' } })
+    expect(screen.getByText(/api\/v1\/beacons/)).toBeTruthy()
+    expect(screen.queryByText('bridge lost')).toBeNull()
+    fireEvent.change(screen.getByLabelText('Source filter'), { target: { value: 'all' } })
     fireEvent.change(screen.getByLabelText('Level filter'), { target: { value: 'err' } })
     expect(screen.queryByText('connected')).toBeNull()
     expect(screen.getByText('bridge lost')).toBeTruthy()

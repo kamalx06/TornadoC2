@@ -17,7 +17,6 @@ audited.
 import hashlib
 import json
 import os as _os
-import socket
 import ssl
 import threading
 from collections import OrderedDict as _OrderedDict
@@ -37,15 +36,20 @@ from .creds import CredStore
 from .lootstore import LootStore
 from .notes import NotesStore
 from .operators import OperatorRegistry
+from . import operators as _operators
 from .webhooks import WebhookStore
 from .engagement import Engagement, SchemaError
 from .listener_health import HealthProber
+from .events import EventRing
 from . import atrest as _atrest
 
 try:
-    from ..quiet_werkzeug import QuietWSGIRequestHandler
+    from ..quiet_werkzeug import (
+        QuietWSGIRequestHandler, make_request_handler,
+    )
 except ImportError:
     QuietWSGIRequestHandler = None
+    make_request_handler = None
 
 
 class MultiplayerState:
@@ -421,6 +425,10 @@ class OperatorListener:
         self.health = HealthProber(self._lman, fire=self._fire_health)
         self.health.start()
 
+        # Bounded operator-visible events. The HTTP handler writes
+        # here instead of the CLI; API readers poll it.
+        self.events = EventRing()
+
         self._app = self._build_app()
         self._thread: Optional[threading.Thread] = None
         self._running = False
@@ -515,6 +523,12 @@ class OperatorListener:
         @app.route('/api/v1/identify', methods=['POST'])
         def identify():
             return self._identify()
+
+        @app.route('/api/v1/events', methods=['POST'])
+        def events_read():
+            return self._with_cap(
+                'audit.read.own', self._events_read,
+                skip_rate_limit=True)
 
         @app.route('/api/v1/beacons', methods=['POST'])
         def beacons_list():
@@ -1520,8 +1534,29 @@ class OperatorListener:
             action='operator.add', target=new_name,
             detail=(f'role={new_role} '
                     f'password={"yes" if new_password else "no"}'))
-        resp = jsonify({'ok': True, 'name': new_name,
-                        'role': new_role, 'audit_id': audit_id})
+        export, export_err = self._auto_export_operator(
+            name, new_name, role, ip)
+        body = {
+            'ok': True,
+            'name': new_name,
+            'role': new_role,
+            'audit_id': audit_id,
+            'export': export,
+            'export_error': export_err,
+        }
+        if export and constants.has_capability(
+                role, 'operator.export.other', is_local=False):
+            paths = self.registry.paths_for(new_name)
+            try:
+                with open(_os.path.join(
+                        paths['dir'], f'{new_name}.cfg'), 'r',
+                        encoding='utf-8') as fh:
+                    import base64 as _b64
+                    body['config_b64'] = _b64.b64encode(
+                        fh.read().encode('utf-8')).decode('ascii')
+            except OSError:
+                pass
+        resp = jsonify(body)
         resp.headers['X-Audit-Id'] = audit_id
         return resp
 
@@ -3400,241 +3435,86 @@ class OperatorListener:
     def _build_operator_config(self, target, entry):
         """Assemble the client config JSON for `target`.
 
-        Returns (blob_str, None) on success, (None, error_message)
-        on failure. Caller must have already authorised the
-        export — this helper assumes `target` exists and may be
-        exported.
-
-        Shared by _operators_export and _operators_passwd, so an
-        operator who changes their own password does not need an
-        admin to re-mint their config.
+        Shared by the local console and the API. Returns
+        ``(blob, None)`` or ``(None, error)``; authorisation is the
+        caller's job.
         """
+        handler = getattr(self.engine, 'handler', None)
+        signer, desc = _operators.find_config_signer(handler)
+        host = (request.host.split(':', 1)[0]
+                if request.host else '')
+        blob, err = _operators.build_config(
+            self.registry, target, host=host, port=self.port,
+            signer=signer, signer_desc=desc,
+            listener_ca_fp=getattr(
+                self, 'ca_fingerprint_loaded', None),
+            handler=handler)
+        if blob is None:
+            return None, err
+        try:
+            import json as _json
+            meta = _json.loads(blob)
+            signed = bool(meta.get('config_signature_b64'))
+            print(
+                f"[TEAM] config {'signed with ' + str(meta.get('_signer_desc')) if signed else 'left unsigned'}"
+                f" for {target}", flush=True)
+            if not signed and meta.get('_signer_error'):
+                print(f"[TEAM]   {meta['_signer_error']}", flush=True)
+        except Exception:
+            pass
+        return blob, None
+
+    def _auto_export_operator(self, caller, target, role, ip):
+        """Write a fresh config for a just-added operator.
+
+        Failure is non-fatal: the account stays and the caller gets
+        an actionable error.
+        """
+        entry = self.registry.get(target)
+        if entry is None:
+            return None, 'operator disappeared before export'
+        blob, err = self._build_operator_config(target, entry)
+        if blob is None:
+            return None, err or 'could not build config'
         try:
             paths = self.registry.paths_for(target)
-        except Exception as exc:
-            return None, f'registry does not expose paths: {exc}'
-
-        cert_path = paths.get('cert')
-        key_path  = paths.get('key')
-        ca_path   = paths.get('ca')
-        missing = [p for p in (cert_path, key_path, ca_path)
-                   if not p or not _os.path.isfile(p)]
-        if missing:
-            return None, ('credential files missing on the server: '
-                          + ', '.join(missing))
-
-        try:
-            with open(ca_path, 'rb') as fh:
-                ca_pem = fh.read().decode('utf-8')
-            with open(cert_path, 'rb') as fh:
-                client_cert = fh.read().decode('utf-8')
-            with open(key_path, 'rb') as fh:
-                client_key = fh.read().decode('utf-8')
+            out_path = _os.path.join(
+                paths['dir'], f'{target}.cfg')
+            _operators.write_config(out_path, blob)
         except OSError as exc:
-            return None, f'read failed: {exc}'
-
-        listener_fp = getattr(self, 'ca_fingerprint_loaded', None)
-        if listener_fp:
-            try:
-                import ssl as _ssl
-                cfg_ca_fp = hashlib.sha256(
-                    _ssl.PEM_cert_to_DER_cert(ca_pem)).hexdigest()
-            except Exception:
-                cfg_ca_fp = None
-            if cfg_ca_fp and cfg_ca_fp != listener_fp:
-                return None, ('team CA was regenerated while the '
-                              'server was running; restart the '
-                              'handler, then re-run the command')
-
-        host = request.host.split(':', 1)[0] if request.host else ''
-        if not host or host in ('0.0.0.0', '::', 'localhost'):
-            try:
-                _probe = socket.socket(socket.AF_INET,
-                                       socket.SOCK_DGRAM)
-                _probe.settimeout(1.0)
-                _probe.connect(('8.8.8.8', 1))
-                host = _probe.getsockname()[0]
-                _probe.close()
-            except Exception:
-                host = 'localhost'
-
-        cfg_out = {
-            'name':        target,
-            'role':        entry.get('role', 'operator'),
-            'server_host': host,
-            'server_port': self.port,
-            'ca_pem':      ca_pem,
-            'client_cert': client_cert,
-            'client_key':  client_key,
+            return None, f'write failed: {exc}'
+        raw = blob.encode('utf-8')
+        digest = hashlib.sha256(raw).hexdigest()
+        audit_id = self.audit.write(
+            operator=caller, role=role, source_ip=ip,
+            action='operator.export', target=target,
+            detail=f'auto=1 sha256={digest} path={out_path}')
+        summary = {
+            'path': out_path,
+            'sha256': digest,
+            'bytes': len(raw),
+            'role': entry.get('role', 'operator'),
+            'signed': False,
+            'audit_id': audit_id,
         }
-
         try:
-            with open(self.registry.server_cert, 'rb') as fh:
-                _server_pem = fh.read().decode('utf-8')
-            import ssl as _ssl_fp
-            _der = _ssl_fp.PEM_cert_to_DER_cert(_server_pem)
-            cfg_out['server_cert_sha256'] = hashlib.sha256(
-                _der).hexdigest()
+            cfg = json.loads(blob)
+            summary['ca_sha256'] = hashlib.sha256(
+                ssl.PEM_cert_to_DER_cert(
+                    cfg['ca_pem'])).hexdigest()
+            summary['cert_sha256'] = hashlib.sha256(
+                ssl.PEM_cert_to_DER_cert(
+                    cfg['client_cert'])).hexdigest()
+            summary['signed'] = bool(cfg.get('config_signature_b64'))
         except Exception:
-            cfg_out['server_cert_sha256'] = ''
-
-        if entry.get('auth_hash'):
-            cfg_out['password_required'] = True
-            cfg_out['auth_algo'] = entry.get(
-                'auth_algo', 'pbkdf2-sha256')
-            cfg_out['auth_params'] = entry.get(
-                'auth_params', {'iters': 200_000})
-            cfg_out['auth_salt'] = entry.get('auth_salt', '')
-
-        try:
-            import base64 as _b64_sig
-
-            handler_obj = getattr(self.engine, 'handler', None)
-            canonical = json.dumps(
-                cfg_out, sort_keys=True,
-                separators=(',', ':')).encode('utf-8')
-
-            def _try_sign(candidate, data):
-                """Return (bytes, None) on success, or (None, why)."""
-                if candidate is None:
-                    return None, 'candidate is None'
-                for name in ('sign', 'sign_bytes', 'sign_data',
-                             'sign_payload', 'sign_der'):
-                    fn = getattr(candidate, name, None)
-                    if fn is None:
-                        continue
-                    if not callable(fn):
-                        continue
-                    try:
-                        out = fn(data)
-                    except Exception as exc:
-                        return None, f"{name}() raised {type(exc).__name__}: {exc}"
-                    if isinstance(out, bytes):
-                        return out, None
-                    if isinstance(out, str):
-                        # Some signers return base64 directly.
-                        return out.encode('ascii'), None
-                    return None, f"{name}() returned {type(out).__name__}"
-                return None, 'no callable sign method'
-
-            def _try_public(candidate):
-                """Return (PEM bytes, None) on success, or (None, why)."""
-                if candidate is None:
-                    return None, 'candidate is None'
-                for name in ('public_pem', 'public_key_pem',
-                             'get_public_pem', 'export_public_pem',
-                             'public_key_spki_pem'):
-                    fn = getattr(candidate, name, None)
-                    if fn is None or not callable(fn):
-                        continue
-                    try:
-                        out = fn()
-                    except Exception as exc:
-                        return None, f"{name}() raised {type(exc).__name__}: {exc}"
-                    if isinstance(out, bytes):
-                        return out, None
-                    if isinstance(out, str):
-                        return out.encode('utf-8'), None
-                    return None, f"{name}() returned {type(out).__name__}"
-                return None, 'no callable public-key method'
-
-            sig_bytes = None
-            pub_pem = None
-            signer_desc = None
-            last_err = ''
-
-            # Shape 1 — a signer sub-object on the handler.
-            if handler_obj is not None:
-                for attr in ('signer', '_signer', 'handler_signer',
-                             '_handler_signer', 'task_signer',
-                             '_task_signer', 'ecdsa_signer',
-                             '_ecdsa_signer'):
-                    candidate = getattr(handler_obj, attr, None)
-                    if candidate is None:
-                        continue
-                    s, s_err = _try_sign(candidate, canonical)
-                    if s is None:
-                        last_err = f"handler.{attr}: {s_err}"
-                        continue
-                    p, p_err = _try_public(candidate)
-                    if p is None:
-                        last_err = f"handler.{attr}: {p_err}"
-                        continue
-                    sig_bytes, pub_pem = s, p
-                    signer_desc = f"handler.{attr}"
-                    break
-
-            # Shape 2 — sign/verify methods directly on the handler.
-            if sig_bytes is None and handler_obj is not None:
-                s, s_err = _try_sign(handler_obj, canonical)
-                if s is not None:
-                    p, p_err = _try_public(handler_obj)
-                    if p is not None:
-                        sig_bytes, pub_pem = s, p
-                        signer_desc = "handler (direct)"
-                    else:
-                        last_err = f"handler (direct): {p_err}"
-                else:
-                    last_err = f"handler (direct): {s_err}"
-
-            # Shape 3 — a bare `cryptography` ECDSA private key.
-            if sig_bytes is None and handler_obj is not None:
-                for attr in ('signing_key', '_signing_key',
-                             'handler_key', '_handler_key',
-                             'private_key', '_private_key'):
-                    key = getattr(handler_obj, attr, None)
-                    if key is None:
-                        continue
-                    try:
-                        from cryptography.hazmat.primitives import (
-                            hashes as _hashes, serialization as _ser,
-                        )
-                        from cryptography.hazmat.primitives.asymmetric \
-                            import ec as _ec
-                        sig_bytes = key.sign(
-                            canonical, _ec.ECDSA(_hashes.SHA256()))
-                        pub_pem = key.public_key().public_bytes(
-                            encoding=_ser.Encoding.PEM,
-                            format=_ser.PublicFormat.SubjectPublicKeyInfo,
-                        )
-                        signer_desc = f"handler.{attr} (cryptography key)"
-                        break
-                    except Exception as exc:
-                        last_err = (f"handler.{attr} (cryptography key): "
-                                    f"{type(exc).__name__}: {exc}")
-                        continue
-
-            if sig_bytes is not None and pub_pem is not None:
-                cfg_out['config_signature_b64'] = (
-                    _b64_sig.b64encode(sig_bytes).decode('ascii'))
-                if isinstance(pub_pem, bytes):
-                    pub_pem = pub_pem.decode('utf-8')
-                cfg_out['config_signer_pubkey_pem'] = pub_pem
-                try:
-                    print(f"[TEAM] config signed with {signer_desc}",
-                          flush=True)
-                except Exception:
-                    pass
-            else:
-                try:
-                    print("[TEAM] config signing skipped: no usable "
-                          "signer found on the handler — the "
-                          "exported config will load unsigned on "
-                          "the client", flush=True)
-                    if last_err:
-                        print(f"[TEAM]   last probe: {last_err}",
-                              flush=True)
-                except Exception:
-                    pass
-
-        except Exception as exc:
-            try:
-                print(f"[TEAM] config signing skipped: "
-                      f"{type(exc).__name__}: {exc}", flush=True)
-            except Exception:
-                pass
-
-        return json.dumps(cfg_out, indent=2), None
+            pass
+        self.events.emit(
+            'info', 'operator',
+            f'{caller} added {target} ({entry.get("role", "?")}); '
+            f'config auto-exported sha256={digest[:16]}…',
+            cn=caller, ip=ip,
+            meta={'operator': target, 'sha256': digest})
+        return summary, None
 
     def _operators_export(self, name, role, ip):
         """Return another operator's client config as a base64 blob.
@@ -3773,6 +3653,12 @@ class OperatorListener:
             operator=name, role=role, source_ip=ip,
             action='operator.export', target=target,
             detail=audit_detail)
+        self.events.emit(
+            'info', 'operator',
+            f'{name} exported config for {target} '
+            f'sha256={digest[:16]}…',
+            cn=name, ip=ip,
+            meta={'operator': target, 'sha256': digest})
 
         import base64 as _b64
         resp = jsonify({
@@ -3912,6 +3798,12 @@ class OperatorListener:
 
         ip_hint = request.remote_addr or '?'
         if not skip_rate_limit and not _preauth_rate_allowed(ip_hint):
+            self.events.emit(
+                'warn', 'auth',
+                f'429 pre-auth rate limit {request.method} '
+                f'{request.path} from {ip_hint}',
+                ip=ip_hint, meta={'status': 429,
+                                  'path': request.path})
             return Response(status=429)
 
         name, role, ip = self._extract_peer()
@@ -3923,6 +3815,10 @@ class OperatorListener:
                 operator=name, role=role, source_ip=ip,
                 action=capability, outcome='throttled',
                 detail='general API rate limit')
+            self.events.emit(
+                'warn', 'auth', f'429 rate limit {name} {capability}',
+                cn=name, ip=ip, meta={'status': 429,
+                                      'capability': capability})
             resp = jsonify({
                 'error': 'general API rate limit exceeded',
                 'hint': (f'{constants.RATE_PER_SEC}/sec sustained, '
@@ -3937,6 +3833,11 @@ class OperatorListener:
                 action=capability, outcome='throttled',
                 detail=f'>{MAX_CONCURRENT_PER_OPERATOR} in-flight '
                        f'requests')
+            self.events.emit(
+                'warn', 'auth',
+                f'429 concurrency {name} {capability}',
+                cn=name, ip=ip, meta={'status': 429,
+                                      'capability': capability})
             resp = jsonify({
                 'error': 'too many concurrent requests',
                 'hint': (f'limit is {MAX_CONCURRENT_PER_OPERATOR} '
@@ -3953,6 +3854,11 @@ class OperatorListener:
                     action=capability, outcome='denied',
                     detail='role lacks capability or capability is '
                            'local-only')
+                self.events.emit(
+                    'warn', 'auth',
+                    f'403 {name} lacks {capability}',
+                    cn=name, ip=ip, meta={'status': 403,
+                                          'capability': capability})
                 resp = jsonify({
                     'error': (f'role {role!r} lacks capability '
                               f'{capability!r}'),
@@ -3968,6 +3874,9 @@ class OperatorListener:
                     action='session.open',
                     detail=f'first request from this cert in this '
                            f'process (capability={capability})')
+                self.events.emit(
+                    'info', 'auth', f'{name} opened a session',
+                    cn=name, ip=ip)
 
             try:
                 return handler(name, role, ip)
@@ -3980,6 +3889,11 @@ class OperatorListener:
                           flush=True)
                 except Exception:
                     pass
+                self.events.emit(
+                    'err', 'system',
+                    f'{capability} raised '
+                    f'{type(exc).__name__}: {exc}',
+                    cn=name, ip=ip, meta={'capability': capability})
                 try:
                     audit_id = self.audit.write(
                         operator=name, role=role, source_ip=ip,
@@ -4002,8 +3916,7 @@ class OperatorListener:
         finally:
             _concurrent_release(name)
 
-    @staticmethod
-    def _auth_failed_response():
+    def _auth_failed_response(self):
         """Return a 401 with a body that says which check failed.
 
         The client's connection-error classifier reads the JSON
@@ -4036,6 +3949,13 @@ class OperatorListener:
                 'for it again.'),
         }
         msg = messages.get(reason, 'authentication failed')
+        self.events.emit(
+            'warn', 'auth',
+            f'401 {reason} {request.method} '
+            f'{request.path} from {request.remote_addr or "?"}',
+            meta={'auth_error': reason,
+                  'method': request.method,
+                  'path': request.path})
         resp = jsonify({'error': msg, 'auth_error': reason})
         resp.status_code = 401
         return resp
@@ -4106,22 +4026,59 @@ class OperatorListener:
         finally:
             _concurrent_release(name)
 
+    def _events_read(self, name, role, ip):
+        """Return events after a sequence, optionally long-polling.
+
+        ``since`` is absent on the first call: the reader starts at
+        the current sequence so it does not receive the whole ring.
+        Readers with ``audit.read.all`` see every source; everyone
+        else sees their own events plus pre-auth failures from their
+        own address.
+        """
+        payload = request.get_json(force=True, silent=True) or {}
+        raw_since = payload.get('since')
+        if raw_since is None:
+            since = self.events.latest()
+        else:
+            try:
+                since = max(0, int(raw_since))
+            except (TypeError, ValueError):
+                since = 0
+        try:
+            wait = max(0.0, min(float(payload.get('wait') or 0), 5.0))
+        except (TypeError, ValueError):
+            wait = 0.0
+        if wait:
+            self.events.wait(since, wait)
+        try:
+            limit = int(payload.get('limit') or 200)
+        except (TypeError, ValueError):
+            limit = 200
+        all_scope = constants.has_capability(
+            role, 'audit.read.all', is_local=False)
+        rows, next_seq = self.events.read(
+            since, limit, cn=name, ip=ip, all_scope=all_scope)
+        return jsonify({
+            'events': rows,
+            'next': next_seq,
+            'scope': 'all' if all_scope else 'own',
+        })
+
     def _beacons_list(self, name, role, ip):
         payload = request.get_json(force=True, silent=True) or {}
-        if 'current' in payload:
-            raw = payload.get('current')
-            if raw is None:
-                with _viewer_lock:
-                    for key in [k for k in _viewers
-                                if k[1] == name]:
-                        _viewers.pop(key, None)
-            else:
-                try:
-                    bid = int(raw)
-                except (TypeError, ValueError):
-                    bid = None
-                if bid is not None:
-                    _viewer_record(bid, name)
+        raw = payload.get('current')
+        if raw is None:
+            with _viewer_lock:
+                for key in [k for k in _viewers
+                            if k[1] == name]:
+                    _viewers.pop(key, None)
+        else:
+            try:
+                bid = int(raw)
+            except (TypeError, ValueError):
+                bid = None
+            if bid is not None:
+                _viewer_record(bid, name)
 
         aliases = (self.aliases.all()
                    if self.aliases is not None else {})
@@ -4277,6 +4234,9 @@ class OperatorListener:
                 operator=name, role=role, source_ip=ip,
                 action=f'beacon.{verb}', target=f'#{bid}',
                 detail=detail)
+            self.events.emit(
+                'info', 'task', f'{name}: {detail} → #{bid}',
+                cn=name, ip=ip, meta={'beacon': bid, 'verb': verb})
             import base64 as _b64
             resp = jsonify({
                 'task_id': None,
@@ -4319,6 +4279,10 @@ class OperatorListener:
             operator=name, role=role, source_ip=ip,
             action='beacon.use', target=f'#{bid}',
             detail=detail[:512])
+        self.events.emit(
+            'info', 'task', f'{name}: {detail[:300]} → #{bid}',
+            cn=name, ip=ip, meta={'beacon': bid, 'verb': verb,
+                                  'task': task_id})
         resp = jsonify({'task_id': task_id, 'queued': True,
                         'audit_id': audit_id})
         resp.headers['X-Audit-Id'] = audit_id
@@ -4881,6 +4845,11 @@ class OperatorListener:
                 f"{created['host']}:{created['port']}", name)
         except Exception:
             pass
+        self.events.emit(
+            'info', 'listener',
+            f"{name} created listener {created['name']} "
+            f"({created['type']} {created['host']}:{created['port']})",
+            cn=name, ip=ip, meta={'listener': created['id']})
         resp = jsonify({'ok': True, 'listener': created,
                         'audit_id': audit_id})
         resp.headers['X-Audit-Id'] = audit_id
@@ -4900,6 +4869,10 @@ class OperatorListener:
             action='listener.start', target=lid,
             detail=(f"{cfg.get('type')} "
                     f"{cfg.get('host')}:{cfg.get('port')}"))
+        self.events.emit(
+            'info', 'listener',
+            f"{name} started {cfg.get('name')} ({lid})",
+            cn=name, ip=ip, meta={'listener': lid})
         resp = jsonify({'ok': True, 'listener': cfg,
                         'audit_id': audit_id})
         resp.headers['X-Audit-Id'] = audit_id
@@ -4919,6 +4892,10 @@ class OperatorListener:
             action='listener.stop', target=lid,
             detail=(f"{cfg.get('type')} "
                     f"{cfg.get('host')}:{cfg.get('port')}"))
+        self.events.emit(
+            'warn', 'listener',
+            f"{name} stopped {cfg.get('name')} ({lid})",
+            cn=name, ip=ip, meta={'listener': lid})
         resp = jsonify({'ok': True, 'listener': cfg,
                         'audit_id': audit_id})
         resp.headers['X-Audit-Id'] = audit_id
@@ -4956,6 +4933,9 @@ class OperatorListener:
             operator=name, role=role, source_ip=ip,
             action='listener.delete', target=lid,
             detail='deleted')
+        self.events.emit(
+            'warn', 'listener', f'{name} deleted listener {lid}',
+            cn=name, ip=ip, meta={'listener': lid})
         resp = jsonify({'ok': True, 'id': lid,
                         'audit_id': audit_id})
         resp.headers['X-Audit-Id'] = audit_id
@@ -5784,11 +5764,18 @@ class OperatorListener:
         params, err = handler._load_build_config(
             raw=payload, remote=True)
         if err:
+            fields = []
+            try:
+                from ..beacon.build_spec import validate, normalize
+                fields = validate(normalize(payload), remote=True)
+            except Exception:
+                pass
             audit_id = self.audit.write(
                 operator=name, role=role, source_ip=ip,
                 action='beacon.build', outcome='error',
                 detail=f'invalid config: {err[:200]}')
-            resp = jsonify({'error': err, 'audit_id': audit_id})
+            resp = jsonify({'error': err, 'fields': fields,
+                            'audit_id': audit_id})
             resp.status_code = 400
             resp.headers['X-Audit-Id'] = audit_id
             return resp
@@ -5829,6 +5816,9 @@ class OperatorListener:
                 operator=name, role=role, source_ip=ip,
                 action='beacon.build', outcome='error',
                 detail=msg[:200])
+            self.events.emit(
+                'err', 'build', f'{name} build failed: {msg[:300]}',
+                cn=name, ip=ip)
             resp = jsonify({'error': msg, 'audit_id': audit_id})
             resp.status_code = status
             resp.headers['X-Audit-Id'] = audit_id
@@ -5838,6 +5828,10 @@ class OperatorListener:
                 operator=name, role=role, source_ip=ip,
                 action='beacon.build', outcome='error',
                 detail=f'build failed: {exc}'[:200])
+            self.events.emit(
+                'err', 'build',
+                f'{name} build failed: {type(exc).__name__}',
+                cn=name, ip=ip)
             resp = jsonify({
                 'error': f'build failed: {exc}',
                 'audit_id': audit_id})
@@ -5854,6 +5848,10 @@ class OperatorListener:
         audit_id = self.audit.write(
             operator=name, role=role, source_ip=ip,
             action='beacon.build', detail=summary)
+        self.events.emit(
+            'info', 'build', f'{name} built {summary}', cn=name, ip=ip,
+            meta={'build': result.get('build_id'),
+                  'sha256': result.get('sha256')})
 
         result['audit_id'] = audit_id
         resp = jsonify(result)
@@ -5894,6 +5892,11 @@ class OperatorListener:
             outcome='ok' if ok else 'error',
             detail='build delivered and cleaned'
                    if ok else 'unknown build_id')
+        self.events.emit(
+            'info' if ok else 'warn', 'build',
+            f'{name} finished build {build_id}' if ok
+            else f'{name} build {build_id} not found',
+            cn=name, ip=ip, meta={'build': build_id})
         resp = jsonify({'ok': bool(ok)})
         resp.headers['X-Audit-Id'] = audit_id
         return resp
@@ -6440,7 +6443,12 @@ class OperatorListener:
             'ssl_context': ctx,
             'threaded': True,
         }
-        if QuietWSGIRequestHandler is not None:
+        handler_cls = None
+        if make_request_handler is not None:
+            handler_cls = make_request_handler(self.events.record_http)
+        if handler_cls is not None:
+            kwargs['request_handler'] = handler_cls
+        elif QuietWSGIRequestHandler is not None:
             kwargs['request_handler'] = QuietWSGIRequestHandler
         self._srv = make_server(
             self.host, self.port, self._app, **kwargs)

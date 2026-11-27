@@ -953,14 +953,15 @@ column.
 
 ### Armory
 
-`armory` installs BOFs into operator-local storage from
-`github.com/kamalx06/tornadoc2-armory`:
+`armory` installs BOFs into operator-local storage from the pinned
+`github.com/kamalx06/tornadoc2-armory` repository. The URL is a
+backend constant and cannot be changed from the GUI:
 
 ```
 armory list-all | list-installed | show <name>
-armory install <name...> | all
+armory install <name...> | all [--replace]
 armory uninstall <name...>
-armory update
+armory update [<name...>|all]
 ```
 
 One `armory` line appears in `help`; the BOF list does not. Files live
@@ -1017,18 +1018,16 @@ not executed. `viewer` and `guardian` have no access.
 - `VERSION`, `CHANGELOG.md`, `.github/workflows/release.yml` and
   `scripts/sbom.sh` provide tag-driven, checksummed releases with an
   SBOM.
-- The armory index is signed with Ed25519. `scripts/armory-sign.py`
-  generates keys and signatures; the public key is compiled in
-  (`deploy/armory.pub`, private key `deploy/armory.key`). A missing or
-  tampered signature is refused. Forks set `TORNADOC2_ARMORY_KEYS`;
-  `off` restores the old advisory behaviour.
-- **Armory key rotation.** `scripts/armory-sign.py keygen` a new pair,
-  re-sign the index with the new key, publish both the index and
-  signature, then replace the tuple in `armory_verify.py` in the same
-  commit as the re-signed index. Keep the old key until every client
-  release in support has the new one. The private key in the repo is
-  for the public index only; a separate signer repo is better for
-  forks.
+- The armory is pinned to `github.com/kamalx06/tornadoc2-armory`
+  (branch `main`) by a module constant; no URL is accepted from the
+  GUI. The index and every payload are SHA-256 checked and the
+  archive is read member-by-member. Ed25519 signing and
+  `TORNADOC2_ARMORY_KEYS` are gone; the contract is in
+  [`docs/armory-contract.md`](docs/armory-contract.md).
+- **Armory changes.** Publish a new `index.json` and archive member,
+  bump `version`, and run the fixture/security tests. Clients refresh
+  the index and compare versions; `update` only rewrites entries whose
+  digest or version changed.
 
 ### Feature-pruned builds
 
@@ -3863,14 +3862,14 @@ beacon> listeners create http primary --port 8881 --tls server
 beacon> listeners start primary
 
 # 3. Create the operator account
+#    The config is exported automatically, 0600, and the path,
+#    digest and fingerprints are printed.
 beacon> operator add alice operator
-  # prompts for an optional password — leave blank for cert-only
-  # for an automated workflow, set one for an interactive operator
-
-# 4. Export the client config
-beacon> operator export alice
   ✓ exported config for alice (…)
     path: team_ca/operators/alice/alice.cfg
+
+# 4. (optional) re-export after a fix or to a chosen path
+beacon> operator export alice
 
 # 5. Copy alice.cfg to the operator's machine out of band
 
@@ -4026,7 +4025,7 @@ python3 tornadoc2.py --daemon \
 [daemon] starting pid=48271
 [daemon] logfile /opt/TornadoC2/logs/console.log
 [daemon] console socket /opt/TornadoC2/logs/tornadoc2.sock
-[daemon] attach with: /usr/bin/python3 tornadoc2.py console
+[daemon] attach with: /usr/bin/python3 tornadoc2.py --console
 [daemon] stop with:   kill $(cat /opt/TornadoC2/logs/tornadoc2.pid)
 [daemon] ready
 ```
@@ -4036,6 +4035,18 @@ the terminal (its own session via `start_new_session=True`, so a
 terminal close does not deliver SIGHUP, and Ctrl+C never reaches
 it). Stdout and stderr are redirected to `logs/console.log`, which
 is what `tail -f` should follow for startup output:
+
+HTTP request lines no longer go to this file. They are kept in a
+bounded in-memory ring and streamed to the desktop Events pane
+(`http` source); `logs/console.log` holds lifecycle and
+subsystem output only.
+
+The daemon holds an `flock` on `logs/tornadoc2.lock` for its whole
+life, so two launches cannot race. The pidfile is written atomically
+after the console socket binds, and readiness travels over an
+inherited pipe — the parent never guesses from the pidfile. The log
+rotates at 5 MB with three backups, and `logs/tornadoc2.status`
+carries a 0600 heartbeat (pid, timestamp, listener count).
 
 ```bash
 tail -f logs/console.log
@@ -4061,7 +4072,7 @@ is at a terminal.
 **Attach a console to a running daemon.**
 
 ```bash
-python3 tornadoc2.py console
+python3 tornadoc2.py --console
 [console] attached to daemon (pid 48271). Detach with Ctrl+D.
 [console] type `help` for commands.
 
@@ -4107,20 +4118,20 @@ prompts for confirmation unless `--force` is given.
 
 SIGTERM triggers the same shutdown path as `stop`: every listener
 stops, the pidfile and console socket are removed, and the process
-exits. SIGINT and SIGHUP are ignored — a terminal close or a
-stray Ctrl+C does not stop the daemon.
+exits. SIGINT is ignored. SIGHUP reloads `listeners.json` and
+reconciles running listeners without dropping the daemon.
 
-**Startup failure is reported, not silent.** `--daemon` waits for
-the child to write its pidfile before returning. A child that dies
-during startup — port in use, missing mTLS material, audit chain
-corrupt — is reported on the parent's stderr, and the daemon
+**Startup failure is reported, not silent.** `--daemon` blocks on
+a readiness pipe from the child, not a pidfile guess. A child that
+dies during startup — port in use, missing mTLS material, audit
+chain corrupt — is reported on the parent's stderr, and the daemon
 logfile has the specific cause. The parent never claims success
 for a daemon that did not come up.
 
 **`update` while a console is attached.** `update` calls
 `os.execv` on the daemon process. The attached console sees the
 socket drop, prints `[console] detached; daemon continues
-running`, and exits. Reconnect with `console` — the pidfile has
+running`, and exits. Reconnect with `--console` — the pidfile has
 the new pid.
 
 **Unix only.** `--daemon` is refused on Windows. The correct
@@ -5214,7 +5225,7 @@ not attach to beacons — interactive work on a beacon runs from the
 remote client (see the next section).
 
 When the handler was started with `--daemon`, the console is
-reached with `python3 tornadoc2.py console` instead of dropping
+reached with `python3 tornadoc2.py --console` instead of dropping
 into it from the foreground process. Ctrl+D detaches the console
 without stopping the daemon. See [Deployment Playbook › Running
 in daemon mode](#running-in-daemon-mode).

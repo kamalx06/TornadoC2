@@ -2,7 +2,7 @@
 // producers all write here; the pane only filters and renders.
 
 export type Level = 'info' | 'warn' | 'err' | 'task'
-export type Source = 'bridge' | 'task' | 'audit' | 'operator' | 'system'
+export type Source = 'bridge' | 'task' | 'audit' | 'operator' | 'system' | 'server'
 
 export type Event = {
   id: number
@@ -45,6 +45,11 @@ export function classify(line: string): Level {
 export function pushBridge(line: string): void {
   const clean = line.replace(/\n$/, '')
   if (!clean) return
+  const server = /^\[srv:(info|warn|err)\]\s(.*)$/s.exec(clean)
+  if (server) {
+    push(server[1] as Level, 'server', server[2]!)
+    return
+  }
   push(classify(clean), 'bridge', clean)
 }
 

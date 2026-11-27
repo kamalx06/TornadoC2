@@ -695,3 +695,259 @@ class OperatorRegistry:
             os.chmod(key, 0o600)
         except OSError:
             pass
+
+# ---------------------------------------------------------------------
+# Client config assembly
+#
+# Shared by the local console and the operator API so an add can
+# auto-export exactly the same blob a manual `operator export` writes.
+
+def advertised_host(candidate: str = '') -> str:
+    """Return a host another machine can reach.
+
+    A wildcard or loopback candidate is replaced with the first
+    outbound interface address. Falls back to ``localhost``.
+    """
+    host = (candidate or '').strip()
+    if host in ('::1', '[::1]'):
+        return '::1'
+    if host and host not in ('0.0.0.0', '::', 'localhost',
+                             '[::]'):
+        return host.split(':', 1)[0]
+    try:
+        import socket as _socket
+        probe = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+        probe.settimeout(1.0)
+        try:
+            probe.connect(('8.8.8.8', 1))
+            found = probe.getsockname()[0]
+        finally:
+            probe.close()
+        if found and found != '127.0.0.1':
+            return found
+    except Exception:
+        pass
+    return 'localhost'
+
+
+def _try_sign(candidate, data):
+    if candidate is None:
+        return None, 'candidate is None'
+    for name in ('sign', 'sign_bytes', 'sign_data', 'sign_payload',
+                 'sign_der'):
+        fn = getattr(candidate, name, None)
+        if fn is None or not callable(fn):
+            continue
+        try:
+            if name == 'sign':
+                try:
+                    out = fn(data)
+                except TypeError:
+                    from cryptography.hazmat.primitives import (
+                        hashes as _hashes,
+                    )
+                    from cryptography.hazmat.primitives.asymmetric \
+                        import ec as _ec
+                    out = fn(data, _ec.ECDSA(_hashes.SHA256()))
+            else:
+                out = fn(data)
+        except Exception as exc:
+            return None, f'{name}() raised {type(exc).__name__}: {exc}'
+        if isinstance(out, bytes):
+            return out, None
+        if isinstance(out, str):
+            return out.encode('ascii'), None
+        return None, f'{name}() returned {type(out).__name__}'
+    return None, 'no callable sign method'
+
+
+def _try_public(candidate):
+    if candidate is None:
+        return None, 'candidate is None'
+    for name in ('public_pem', 'public_key_pem', 'get_public_pem',
+                 'export_public_pem', 'public_key_spki_pem'):
+        fn = getattr(candidate, name, None)
+        if fn is None or not callable(fn):
+            continue
+        try:
+            out = fn()
+        except Exception as exc:
+            return None, f'{name}() raised {type(exc).__name__}: {exc}'
+        if isinstance(out, bytes):
+            return out, None
+        if isinstance(out, str):
+            return out.encode('utf-8'), None
+        return None, f'{name}() returned {type(out).__name__}'
+    # A bare cryptography private key is not callable; derive the
+    # public half from the attribute instead.
+    for name in ('public_key',):
+        fn = getattr(candidate, name, None)
+        if fn is None or not callable(fn):
+            continue
+        try:
+            from cryptography.hazmat.primitives import serialization \
+                as _ser
+            pub = fn().public_bytes(
+                encoding=_ser.Encoding.PEM,
+                format=_ser.PublicFormat.SubjectPublicKeyInfo)
+            return pub, None
+        except Exception as exc:
+            return None, f'{name}() raised {type(exc).__name__}: {exc}'
+    return None, 'no callable public-key method'
+
+
+def find_config_signer(handler):
+    """Locate a usable config signer on the handler.
+
+    Returns ``(candidate, description)``. ``candidate`` may be None.
+    The shapes are the ones the handler has carried historically:
+    an attribute holding a signer object, sign methods on the
+    handler itself, or a bare cryptography ECDSA key.
+    """
+    if handler is None:
+        return None, 'no handler'
+    for attr in ('signer', '_signer', 'handler_signer',
+                 '_handler_signer', 'task_signer', '_task_signer',
+                 'ecdsa_signer', '_ecdsa_signer',
+                 'signing_key', '_signing_key', 'handler_key',
+                 '_handler_key', 'private_key', '_private_key'):
+        candidate = getattr(handler, attr, None)
+        if candidate is not None:
+            return candidate, f'handler.{attr}'
+    return None, 'no signer on handler'
+
+
+def build_config(registry, target, *, host='', port=0,
+                 signer=None, signer_desc='', listener_ca_fp=None,
+                 handler=None):
+    """Assemble the client config JSON for ``target``.
+
+    Returns ``(blob, None)`` on success, ``(None, error)`` on
+    failure. Authorisation is the caller's job.
+    """
+    try:
+        entry = registry.get(target)
+    except Exception:
+        entry = None
+    if entry is None:
+        return None, f'operator {target} not found'
+    if entry.get('revoked'):
+        return None, f'{target} is revoked'
+
+    paths = registry.paths_for(target)
+    cert_path = paths.get('cert')
+    key_path = paths.get('key')
+    ca_path = paths.get('ca')
+    missing = [p for p in (cert_path, key_path, ca_path)
+               if not p or not os.path.isfile(p)]
+    if missing:
+        return None, ('credential files missing on the server: '
+                      + ', '.join(missing))
+
+    try:
+        with open(ca_path, 'rb') as fh:
+            ca_pem = fh.read().decode('utf-8')
+        with open(cert_path, 'rb') as fh:
+            client_cert = fh.read().decode('utf-8')
+        with open(key_path, 'rb') as fh:
+            client_key = fh.read().decode('utf-8')
+    except OSError as exc:
+        return None, f'read failed: {exc}'
+
+    if listener_ca_fp:
+        try:
+            import hashlib as _hl
+            import ssl as _ssl
+            cfg_ca_fp = _hl.sha256(
+                _ssl.PEM_cert_to_DER_cert(ca_pem)).hexdigest()
+        except Exception:
+            cfg_ca_fp = None
+        if cfg_ca_fp and cfg_ca_fp != listener_ca_fp:
+            return None, ('team CA was regenerated while the server '
+                          'was running; restart the handler, then '
+                          're-run the command')
+
+    cfg_out = {
+        'name':        target,
+        'role':        entry.get('role', 'operator'),
+        'server_host': advertised_host(host),
+        'server_port': int(port or 0),
+        'ca_pem':      ca_pem,
+        'client_cert': client_cert,
+        'client_key':  client_key,
+    }
+
+    try:
+        import hashlib as _hl
+        import ssl as _ssl_fp
+        with open(registry.server_cert, 'rb') as fh:
+            server_pem = fh.read().decode('utf-8')
+        cfg_out['server_cert_sha256'] = _hl.sha256(
+            _ssl_fp.PEM_cert_to_DER_cert(server_pem)).hexdigest()
+    except Exception:
+        cfg_out['server_cert_sha256'] = ''
+
+    if entry.get('auth_hash'):
+        cfg_out['password_required'] = True
+        cfg_out['auth_algo'] = entry.get('auth_algo', 'pbkdf2-sha256')
+        cfg_out['auth_params'] = entry.get(
+            'auth_params', {'iters': 200_000})
+        cfg_out['auth_salt'] = entry.get('auth_salt', '')
+
+    candidate = signer
+    desc = signer_desc or 'signer'
+    if candidate is None:
+        candidate, desc = find_config_signer(handler)
+    cfg_out['_signer_desc'] = desc
+
+    canonical = json.dumps(
+        cfg_out, sort_keys=True,
+        separators=(',', ':')).encode('utf-8')
+
+    try:
+        if candidate is None:
+            raise RuntimeError(desc or 'no signer')
+        sig, err = _try_sign(candidate, canonical)
+        if sig is None:
+            raise RuntimeError(err or 'sign failed')
+        pub, err = _try_public(candidate)
+        if pub is None:
+            raise RuntimeError(err or 'public key unavailable')
+        import base64 as _b64
+        cfg_out['config_signature_b64'] = _b64.b64encode(
+            sig).decode('ascii')
+        if isinstance(pub, bytes):
+            pub = pub.decode('utf-8')
+        cfg_out['config_signer_pubkey_pem'] = pub
+    except Exception as exc:
+        cfg_out['_signer_error'] = (f'{type(exc).__name__}: {exc}'
+                                    if str(exc) else
+                                    type(exc).__name__)
+
+    return json.dumps(cfg_out, indent=2), None
+
+
+def write_config(path: str, blob: str) -> None:
+    """Atomically write an operator config with 0600 permissions."""
+    import tempfile as _tempfile
+    parent = os.path.dirname(os.path.abspath(path))
+    if parent:
+        os.makedirs(parent, mode=0o700, exist_ok=True)
+        try:
+            os.chmod(parent, 0o700)
+        except OSError:
+            pass
+    fd, tmp = _tempfile.mkstemp(prefix='.cfg-', dir=parent)
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as fh:
+            fh.write(blob)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise

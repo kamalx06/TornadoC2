@@ -46,7 +46,7 @@ extra flag; every feature is off unless its tag is compiled.
 | Listener health | on | Server-side TLS handshakes + `/health` every 60 s |
 | At-rest encryption | on | `T2ENC1` header and high-entropy `logs/*.json` |
 | Audit chain | on | Append-only hash chain; checkpoints preserve order |
-| Armory | opt-in | `raw.githubusercontent.com` fetches, `client/.tornadoc2/armory` writes |
+| Armory | opt-in | pinned GitHub/codeload fetches, `client/.tornadoc2/armory` writes |
 
 ## Gaps
 
@@ -60,5 +60,6 @@ extra flag; every feature is off unless its tag is compiled.
   prefix; rename before copying if the target watches those paths.
 - Linux persistence is user-level only; root methods (system unit,
   `ld.so.preload`) are not implemented.
-- The armory signature keys are empty by default: an unsigned index
-  prints a warning instead of refusing.
+- The armory has no signature. Trust rests on TLS, the pinned host
+  and per-payload SHA-256. A compromised upstream account can replace
+  the catalogue; compare the displayed snapshot id if that matters.

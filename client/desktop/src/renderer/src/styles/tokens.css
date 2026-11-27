@@ -6,34 +6,34 @@
   color-scheme: dark;
 
   /* surfaces — near-black, one step of separation per layer */
-  --bg: #04060a;
-  --bg-sunken: #020406;
-  --bg-panel: #080c12;
-  --bg-raised: #0d131b;
-  --bg-hover: #121a24;
+  --bg: #0a0a0a;
+  --bg-sunken: #050505;
+  --bg-panel: #121212;
+  --bg-raised: #1e1e1e;
+  --bg-hover: #242424;
   --overlay: rgb(0 0 0 / 62%);
 
   /* structure */
-  --line: #141d28;
-  --line-strong: #24313f;
+  --line: #1f1f1f;
+  --line-strong: #303030;
 
   /* text */
-  --text: #e9f1f8;
-  --text-2: #93a4b5;
-  --text-3: #6f8093;
+  --text: #f5f5f5;
+  --text-2: #b8b8b8;
+  --text-3: #8a8a8a;
 
   /* signal — neon only for marks, values and state */
-  --cyan: #22e0ff;
-  --cyan-soft: #0a2b36;
-  --green: #35ff9e;
-  --green-soft: #06291b;
+  --cyan: #00e5ff;
+  --cyan-soft: #002a33;
+  --green: #00ff00;
+  --green-soft: #002b00;
   --red: #ff3b5c;
-  --red-soft: #2c0a10;
+  --red-soft: #33000a;
   --amber: #ffb020;
   --amber-soft: #2a1c04;
   --violet: #b18cff;
   --violet-soft: #1d1433;
-  --on-accent: #04060a;
+  --on-accent: #050505;
 
   /* aliases kept until the dock migration finishes */
   --bg-soft: var(--bg-panel);
@@ -63,18 +63,19 @@
   --track: 0.12em;
 
   /* density — compact is the operator default, cozy the comfortable one */
-  --row: 24px;
-  --gap: 6px;
-  --pad: 10px;
-  --pad-y: 6px;
-  --control-h: 24px;
-  --pane-head: 30px;
+  --row: 22px;
+  --gap: 5px;
+  --pad: 8px;
+  --pad-y: 5px;
+  --control-h: 22px;
+  --pane-head: 28px;
 
   /* shape and motion */
-  --r-1: 3px;
-  --r-2: 5px;
-  --r-3: 8px;
+  --r-1: 2px;
+  --r-2: 4px;
+  --r-3: 6px;
   --r: var(--r-1);
+  --r-grid: 0px;
   --sp: var(--gap);
   --dur-1: 90ms;
   --dur-2: 150ms;
@@ -87,20 +88,20 @@
 }
 
 html[data-density='cozy'] {
-  --row: 28px;
-  --gap: 8px;
-  --pad: 12px;
-  --pad-y: 8px;
-  --control-h: 28px;
-  --pane-head: 34px;
+  --row: 26px;
+  --gap: 7px;
+  --pad: 10px;
+  --pad-y: 6px;
+  --control-h: 24px;
+  --pane-head: 32px;
 }
 
 html[data-density='dense'] {
-  --row: 21px;
+  --row: 20px;
   --gap: 4px;
-  --pad: 8px;
+  --pad: 6px;
   --pad-y: 4px;
-  --control-h: 22px;
+  --control-h: 20px;
   --pane-head: 26px;
 }
 

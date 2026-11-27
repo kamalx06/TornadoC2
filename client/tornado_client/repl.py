@@ -3752,130 +3752,43 @@ class Client:
 
     # ------------------------------------------------------------------
     # Operator-local armory
-
-    ARMORY_BASE = (
-        'https://raw.githubusercontent.com/kamalx06/'
-        'tornadoc2-armory/main')
+    #
+    # All network, cache and install work lives in armory.py. The
+    # repository URL is a module constant; nothing here can change it.
 
     def _armory_state(self):
-        from tornadoc2_mcp import paths
-        paths.ensure_state_dir()
-        d = paths.ARMORY_DIR
-        (d / 'installed').mkdir(parents=True, exist_ok=True)
-        return d
+        from tornado_client import armory as _arm
+        from pathlib import Path
+        return Path(_arm.state_dir())
 
     def _armory_installed(self):
-        import json
-        f = self._armory_state() / 'installed.json'
-        try:
-            raw = json.loads(f.read_text(encoding='utf-8'))
-            return raw if isinstance(raw, dict) else {}
-        except Exception:
-            return {}
+        from tornado_client import armory as _arm
+        return _arm.installed()
 
     def _armory_save_installed(self, data):
-        import json, os
-        f = self._armory_state() / 'installed.json'
-        tmp = f.with_suffix('.tmp')
-        tmp.write_text(json.dumps(data, indent=2, sort_keys=True),
-                       encoding='utf-8')
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, f)
-
-    def _armory_verify(self, body, sig):
-        """Verify the index signature against trusted keys.
-
-        Returns True when signed by a trusted key, False when a
-        signature is present but does not verify, None when the repo
-        has no signature and no key is configured.
-        """
-        from tornado_client import armory_verify as av
-        if sig is not None:
-            return av.verify(body, sig)
-        return None if not av.trusted_keys() else False
-
-    def _armory_index(self, refresh=False):
-        import json, os, urllib.request
-        from tornado_client import armory_verify as av
-        d = self._armory_state()
-        cache = d / 'index.json'
-        sig_cache = d / 'index.json.sig'
-        body = None
-        if refresh or not cache.is_file():
-            req = urllib.request.Request(
-                self.ARMORY_BASE + '/index.json',
-                headers={'User-Agent': 'TornadoC2-armory'})
-            with urllib.request.urlopen(req, timeout=20) as r:
-                body = r.read(4 * 1024 * 1024)
-            sig = None
-            if av.trusted_keys():
-                try:
-                    sq = urllib.request.Request(
-                        self.ARMORY_BASE + '/index.json.sig',
-                        headers={'User-Agent': 'TornadoC2-armory'})
-                    with urllib.request.urlopen(sq, timeout=20) as r:
-                        sig = r.read(4096).decode('ascii', 'replace')
-                except Exception:
-                    sig = None
-            if self._armory_verify(body, sig) is not True:
-                if not av.trusted_keys():
-                    print('[armory] index is not signed by a trusted key')
-                else:
-                    raise RuntimeError(
-                        'armory index signature is missing or invalid')
-            tmp = cache.with_suffix('.tmp')
-            tmp.write_bytes(body)
-            os.chmod(tmp, 0o600)
-            os.replace(tmp, cache)
-            st = sig_cache.with_suffix('.tmp')
-            st.write_text(sig or '', encoding='utf-8')
-            os.chmod(st, 0o600)
-            os.replace(st, sig_cache)
-        try:
-            body = cache.read_bytes()
-            data = json.loads(body.decode('utf-8'))
-        except Exception as exc:
-            raise RuntimeError(f'armory index unreadable: {exc}')
-        if av.trusted_keys():
-            sig = ''
-            try:
-                sig = sig_cache.read_text(encoding='utf-8')
-            except Exception:
-                pass
-            if self._armory_verify(body, sig) is not True:
-                raise RuntimeError('cached armory index failed '
-                                   'signature verification')
-        if not isinstance(data, dict) or data.get('version') != 1:
-            raise RuntimeError('unsupported armory index')
-        rows = data.get('bofs') or []
-        return [r for r in rows if isinstance(r, dict) and r.get('name')]
+        from tornado_client import armory as _arm
+        _arm._save_installed(data)
 
     def _armory_log(self, action, name, detail=''):
-        import json, time
-        try:
-            f = self._armory_state() / 'armory.log'
-            with open(f, 'a', encoding='utf-8') as fh:
-                fh.write(json.dumps({
-                    'ts': time.time(), 'action': action,
-                    'name': name, 'detail': detail}) + '\n')
-        except Exception:
-            pass
+        from tornado_client import armory as _arm
+        _arm.log(action, name, detail)
+
+    def _armory_index(self, refresh=False):
+        from tornado_client import armory as _arm
+        return _arm.catalogue(refresh=refresh)['extensions']
 
     def _armory_fetch(self, rel, cap=4 * 1024 * 1024):
-        import urllib.request
-        if not rel or '..' in rel or rel.startswith('/'):
-            raise RuntimeError(f'bad armory path {rel!r}')
-        req = urllib.request.Request(
-            self.ARMORY_BASE + '/' + rel,
-            headers={'User-Agent': 'TornadoC2-armory'})
-        with urllib.request.urlopen(req, timeout=30) as r:
-            data = r.read(cap + 1)
-        if len(data) > cap:
-            raise RuntimeError(f'{rel} exceeds {cap} bytes')
-        return data
+        from tornado_client import armory as _arm
+        return _arm._read_url(
+            _arm.ARMORY_RAW_BASE + '/' + _arm._rel(rel), cap, 30)
+
+    def _armory_lookup(self, name):
+        from tornado_client import armory as _arm
+        return _arm.lookup(name)
 
     def _cmd_armory(self, parts):
         c = CLR
+        from tornado_client import armory as _arm
         if 'armory.view' not in self.caps:
             print(f"{c['red']}your role does not include "
                   f"armory.view{c['reset']}")
@@ -3884,30 +3797,38 @@ class Client:
 
         if sub == 'list-all':
             try:
-                rows = self._armory_index()
+                cat = _arm.catalogue(refresh=(sub == 'update'))
             except Exception as exc:
                 print(f"{c['red']}armory: {exc}{c['reset']}")
                 return
-            ins = self._armory_installed()
+            print(f"  {c['dim']}source: {_arm.ARMORY_REPO} "
+                  f"({_arm.ARMORY_BRANCH}){c['reset']}")
+            if cat.get('stale'):
+                print(f"  {c['yellow']}cached index is stale: "
+                      f"{cat.get('error') or 'age'}{c['reset']}")
+            rows = cat['extensions']
+            ins = cat['installed']
             if not rows:
-                print(f"{c['dim']}armory is empty{c['reset']}")
+                print(f"  {c['dim']}armory is empty{c['reset']}")
                 return
             for r in sorted(rows, key=lambda x: x['name']):
                 mark = '✓' if r['name'] in ins else ' '
                 print(f"  {mark} {r['name']:<28} "
                       f"{r.get('format','?'):<9} "
-                      f"{(r.get('description') or '')[:70]}")
+                      f"{r.get('version',''):<8} "
+                      f"{(r.get('description') or '')[:60]}")
             print(f"  {c['dim']}install: armory install <name> | all"
                   f"{c['reset']}")
             return
 
         if sub == 'list-installed':
-            ins = self._armory_installed()
+            ins = _arm.installed()
             if not ins:
                 print(f"  {c['dim']}(nothing installed){c['reset']}")
                 return
             for name, meta in sorted(ins.items()):
                 print(f"  {name:<28} {meta.get('format','?'):<9} "
+                      f"{meta.get('version',''):<8} "
                       f"{meta.get('sha256','')[:16]}…")
             return
 
@@ -3915,18 +3836,14 @@ class Client:
             if len(parts) < 3:
                 print(f"{c['red']}usage: armory show <name>{c['reset']}")
                 return
-            name = parts[2]
-            ins = self._armory_installed()
-            meta = ins.get(name)
+            try:
+                meta = _arm.info(parts[2])
+            except Exception as exc:
+                print(f"{c['red']}{exc}{c['reset']}")
+                return
             if meta is None:
-                try:
-                    meta = next((r for r in self._armory_index()
-                                 if r['name'] == name), None)
-                except Exception as exc:
-                    print(f"{c['red']}{exc}{c['reset']}")
-                    return
-            if meta is None:
-                print(f"{c['red']}unknown BOF: {name}{c['reset']}")
+                print(f"{c['red']}unknown extension: {parts[2]}"
+                      f"{c['reset']}")
                 return
             import json
             print(json.dumps(meta, indent=2, sort_keys=True))
@@ -3934,12 +3851,28 @@ class Client:
 
         if sub == 'update':
             try:
-                rows = self._armory_index(refresh=True)
+                if len(parts) > 2:
+                    names = parts[2:]
+                    r = _arm.update(
+                        [] if names[0].lower() == 'all' else names,
+                        all_names=names[0].lower() == 'all')
+                    for n in r['done']:
+                        print(f"{c['green']}✓{c['reset']} updated "
+                              f"{n['name']}")
+                    for n in r['skipped']:
+                        print(f"  {c['dim']}up to date: {n['name']}"
+                              f"{c['reset']}")
+                    for n in r['failed']:
+                        print(f"{c['red']}{n['name']}: "
+                              f"{n['error']}{c['reset']}")
+                    return
+                res = _arm.update_index()
+                print(f"{c['green']}✓{c['reset']} index updated "
+                      f"({res['count']} entries)")
+                if res.get('error'):
+                    print(f"  {c['yellow']}{res['error']}{c['reset']}")
             except Exception as exc:
                 print(f"{c['red']}armory update: {exc}{c['reset']}")
-                return
-            print(f"{c['green']}✓{c['reset']} index updated "
-                  f"({len(rows)} entries)")
             return
 
         if 'armory.manage' not in self.caps:
@@ -3952,18 +3885,13 @@ class Client:
                 print(f"{c['red']}usage: armory uninstall <name...>"
                       f"{c['reset']}")
                 return
-            import shutil
-            ins = self._armory_installed()
-            d = self._armory_state() / 'installed'
-            for name in parts[2:]:
-                if name not in ins:
-                    print(f"{c['red']}not installed: {name}{c['reset']}")
-                    continue
-                shutil.rmtree(d / name, ignore_errors=True)
-                ins.pop(name, None)
-                self._armory_log('uninstall', name)
+            try:
+                r = _arm.remove(parts[2:])
+            except Exception as exc:
+                print(f"{c['red']}armory uninstall: {exc}{c['reset']}")
+                return
+            for name in r['done']:
                 print(f"{c['green']}✓{c['reset']} uninstalled {name}")
-            self._armory_save_installed(ins)
             return
 
         if sub != 'install':
@@ -3975,78 +3903,24 @@ class Client:
             print(f"{c['red']}usage: armory install <name...>|all"
                   f"{c['reset']}")
             return
+        all_names = parts[2].lower() == 'all'
+        replace = '--replace' in parts
+        names = [p for p in parts[2:] if not p.startswith('--')]
         try:
-            rows = self._armory_index()
+            r = _arm.install(
+                [] if all_names else names,
+                replace=replace, all_names=all_names)
         except Exception as exc:
-            print(f"{c['red']}armory: {exc}{c['reset']}")
+            print(f"{c['red']}armory install: {exc}{c['reset']}")
             return
-        by_name = {r['name']: r for r in rows}
-        targets = (list(by_name) if parts[2].lower() == 'all'
-                   else parts[2:])
-        ins = self._armory_installed()
-        d = self._armory_state() / 'installed'
-        import hashlib, json, os, shutil
-
-        for name in targets:
-            meta = by_name.get(name)
-            if meta is None:
-                print(f"{c['red']}not in armory: {name}{c['reset']}")
-                continue
-            if name in ins and '--replace' not in parts:
-                print(f"{c['yellow']}already installed: {name} "
+        for n in r['done']:
+            if n.get('skipped'):
+                print(f"{c['yellow']}already installed: {n['name']} "
                       f"(use --replace){c['reset']}")
-                continue
-            fmt = meta.get('format', '')
-            if fmt not in ('coff-x64', 'coff-x86', 'coff-arm64'):
-                print(f"{c['red']}{name}: unsupported format {fmt!r}"
-                      f"{c['reset']}")
-                continue
-            rel = meta.get('path') or (
-                f"bofs/{name}/{meta.get('file') or name + '.o'}")
-            try:
-                body = self._armory_fetch(rel)
-                digest = hashlib.sha256(body).hexdigest()
-                want = (meta.get('sha256') or '').lower()
-                if want and digest != want:
-                    print(f"{c['red']}{name}: sha256 mismatch"
-                          f"{c['reset']}")
-                    continue
-                dst = d / name
-                if dst.exists():
-                    shutil.rmtree(dst)
-                dst.mkdir(parents=True, mode=0o700)
-                fname = meta.get('file') or (name + '.o')
-                (dst / fname).write_bytes(body)
-                os.chmod(dst / fname, 0o600)
-                if meta.get('cna'):
-                    try:
-                        cna = self._armory_fetch(meta['cna'])
-                        (dst / 'script.cna').write_bytes(cna)
-                        os.chmod(dst / 'script.cna', 0o600)
-                    except Exception:
-                        pass
-                saved = dict(meta)
-                saved.update({'sha256': digest, 'size': len(body),
-                              'file': fname, 'installed_at':
-                              __import__('time').time()})
-                ins[name] = saved
-                self._armory_log('install', name, digest)
-                print(f"{c['green']}✓{c['reset']} installed {name}")
-            except Exception as exc:
-                print(f"{c['red']}{name}: {exc}{c['reset']}")
-        self._armory_save_installed(ins)
-
-    def _armory_lookup(self, name):
-        """Return (bytes, format) for an installed BOF, or None."""
-        meta = self._armory_installed().get(name)
-        if not meta:
-            return None
-        f = self._armory_state() / 'installed' / name / (
-            meta.get('file') or name + '.o')
-        try:
-            return f.read_bytes(), meta.get('format', '')
-        except OSError:
-            return None
+            else:
+                print(f"{c['green']}✓{c['reset']} installed {n['name']}")
+        for n in r['failed']:
+            print(f"{c['red']}{n['name']}: {n['error']}{c['reset']}")
 
     def _cmd_bofs(self, parts):
         """bofs list
@@ -5897,57 +5771,20 @@ class Client:
         # blocks; it does not touch the transport implementation.
 
         def section_transport(state):
-            opts = [
-                ('http', 'http',
-                'HTTPS + JSON — default; needs a reachable URL'),
-                ('quic', 'quic',
-                'QUIC / HTTP/3 over UDP — same JSON protocol '
-                'as HTTP, different carriage. Reaches networks '
-                'that permit HTTP/3 but block or proxy direct '
-                'TCP. Needs a reachable URL.'),
-                ('websocket', 'websocket',
-                'WebSocket over TLS (wss://) — one connection '
-                'per check-in cycle. Blends with modern browser '
-                'and SaaS traffic. Needs a reachable URL; the '
-                'https:// scheme is converted to wss:// at dial '
-                'time.'),
-                ('dns', 'dns',
-                'UDP DNS TXT — needs an authoritative zone'),
-                ('doh', 'doh',
-                'DNS over HTTPS — blends with browser DoH; '
-                'escapes UDP/53 filters'),
-                ('wireguard', 'wireguard',
-                'WireGuard UDP tunnel — C2 runs over a userspace '
-                'WireGuard device. Needs the server\'s WireGuard '
-                'public key and a pre-generated agent keypair. '
-                'Reaches networks that permit UDP/51820 but '
-                'filter TCP.'),
+            from tornadoc2.beacon.build_spec import TRANSPORTS
+            opts = []
+            for t in TRANSPORTS:
+                if state.get('os') not in t['platforms']:
+                    continue
+                opts.append((t['id'], t['label'], t['description']))
+            opts.extend([
                 ('http,dns', 'http + dns',
-                'HTTPS primary, rotate to UDP DNS after N failures'),
+                 'HTTPS primary, rotate to UDP DNS after N failures'),
                 ('http,doh', 'http + doh',
-                'HTTPS primary, rotate to DoH after N failures'),
+                 'HTTPS primary, rotate to DoH after N failures'),
                 ('dns,doh', 'dns + doh',
-                'UDP DNS primary, rotate to DoH after N failures'),
-            ]
-            if state.get('os') == 'windows':
-                opts.append(
-                    ('smb', 'smb',
-                    'Windows named pipe; a parent beacon relays it'))
-            if state.get('os') == 'linux':
-                opts.append(
-                    ('icmp', 'icmp',
-                    'ICMP echo — Linux only; requires CAP_NET_RAW on '
-                    'the C2 host'))
-            opts.append(
-                ('tcp', 'tcp',
-                'TCP listener; a parent beacon dials in'))
-            opts.append(
-                ('tcprev', 'tcp-reverse',
-                'TCP reverse — the child dials out to a parent '
-                'that is listening on a TCP port. Inverse of tcp: '
-                'the parent listens, the child connects. Use when '
-                'the child can reach the parent\'s network but the '
-                'parent cannot reach the child.'))
+                 'UDP DNS primary, rotate to DoH after N failures'),
+            ])
             return choose('Transport', opts, 0)
 
         def section_transport_opts(state):
@@ -6976,6 +6813,18 @@ class Client:
                 if state.get(k):
                     mtls[k[5:]] = state[k]
             payload['mtls'] = mtls
+
+        from tornadoc2.beacon.build_spec import validate
+        errors = validate(payload)
+        if errors:
+            print(f"\n  {c['red']}the build config is invalid:"
+                  f"{c['reset']}")
+            for e in errors:
+                print(f"    {c['red']}{e['field']}: "
+                      f"{e['message']}{c['reset']}")
+            print(f"  {c['dim']}re-run `build` after fixing the "
+                  f"values above.{c['reset']}")
+            return None
 
         return payload
 

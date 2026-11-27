@@ -66,8 +66,10 @@ describe('populated workspace accessibility', () => {
   it('axe passes with rows, inspector and listeners', async () => {
     await connect()
     fireEvent.click(document.querySelector('[data-row-id="1"]')!)
+    fireEvent.click(document.querySelector('[data-tab-id="inspector"]')!)
     await waitFor(() => expect(screen.getByText('Fingerprint')).toBeTruthy())
-    fireEvent.click(document.querySelector('[data-tab-id="listeners"]')!)
+    fireEvent.click(screen.getByRole('menuitem', { name: 'View' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Listeners' }))
     await waitFor(() => expect(screen.getByText('0.0.0.0:443')).toBeTruthy())
     const res = await axe.run(document.body, {
       rules: { 'color-contrast': { enabled: false } }

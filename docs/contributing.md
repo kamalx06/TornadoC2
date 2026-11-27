@@ -16,8 +16,10 @@ docs/                   Handbook, detection notes, ABI policy
 1. **Feature work is tag-gated.** A new transport, evasion method,
    sleep mask, persistence method or Jump method carries its own
    `t_*`, `ev_*`, `sleep_*`, `persist_*` or `jump_*` file tag and a
-   no-op fallback for the untagged build. Add the tag to
-   `all_tags` in `tornadoc2/beacon/builder.py`.
+   no-op fallback for the untagged build. Add the tag to `all_tags` in
+   `tornadoc2/beacon/builder.py` and the transport/field rule to
+   `tornadoc2/beacon/build_spec.py`; the CLI and GUI both read that
+   descriptor. See [`build-contract.md`](build-contract.md).
 2. **Nothing Windows-only ships untested.** Add a Go test or extend
    the Windows CI job. Live-host proof beats a compile.
 3. **State writes are atomic.** Temp file, `fsync`, `chmod 0600`,
@@ -51,5 +53,10 @@ commit; the changelog entry is written in the same commit.
 ## New armory entries
 
 The armory index is `github.com/kamalx06/tornadoc2-armory`. A BOF
-needs `manifest.json`, a `.o` and a README. Sign the index with
-`scripts/armory-sign.py sign` and publish the signature next to it.
+needs `meta.json`, a `.o` and a README. The source URL is locked in
+the client; the repository layout, digest rules and publishing
+checklist are in [`armory-contract.md`](armory-contract.md).
+
+Signing is being removed in the overhaul: the index is trusted through
+TLS plus the pinned host and every payload is SHA-256 checked. Until
+the Phase 1 change lands, the old signature step still applies.

@@ -3,12 +3,18 @@ import { flushSync } from 'react-dom'
 import type { Beacon, HealthRow } from '../../shared/ipc'
 import { invoke } from './hooks'
 import Dialog from './ui/Dialog'
-import { EmptyState, Field, IconButton, KeyHint, MenuButton, StatusPill } from './ui'
+import MenuBar, { type Menu } from './ui/MenuBar'
+import WorkspaceSwitcher from './ui/WorkspaceSwitcher'
+import {
+  WORKSPACES, WORKSPACE_IDS, WORKSPACE_ACTIVE_KEY, ensureMigrated,
+  loadActiveWorkspace, workspaceKey, type WorkspaceId
+} from './workspace/workspaces'
+import { EmptyState, Field, IconButton, MenuButton, Skeleton, StatusCluster, StatusPill } from './ui'
 import { Confirm } from './ui/Prompt'
 import Dock, { type DockHandle } from './workspace/Dock'
 import { PANELS, PANEL_IDS, canUse, type PanelId } from './workspace/panels'
-import { GROUPS, GROUP_IDS, groupOf } from './workspace/groups'
-import { parseDetached } from './workspace/model'
+import { GROUPS, GROUP_IDS } from './workspace/groups'
+import { parseDetached, saveModel } from './workspace/model'
 import { pushBridge } from './lib/events'
 import { PROFILES, profileModel, type ProfileId } from './workspace/profiles'
 import pkg from '../../../package.json'
@@ -36,6 +42,11 @@ const Network = lazy(() => import('./features/Network'))
 type Conn = 'idle' | 'connecting' | 'ok' | 'down'
 type Toast = { id: number; text: string; kind: 'ok' | 'err' | 'info' }
 type Density = 'cozy' | 'compact' | 'dense'
+type ClassicProfile = Exclude<ProfileId, 'custom'>
+
+const WORKSPACE_PROFILE: Record<WorkspaceId, ClassicProfile> = {
+  w1: 'engagement', w2: 'listeners', w3: 'investigation', w4: 'admin'
+}
 
 const DETACHED = parseDetached(location.hash)
 
@@ -77,7 +88,10 @@ function score(label: string, term: string, recents: string[]): number {
   return recents.includes(label) ? s - 1 : s
 }
 
+ensureMigrated()
+
 export default function App(): JSX.Element {
+  useState(() => { ensureMigrated(); return 0 })
   const [conn, setConn] = useState<Conn>('idle')
   const [safe, setSafe] = useState(false)
   const [platform, setPlatform] = useState('linux')
@@ -85,6 +99,13 @@ export default function App(): JSX.Element {
   const [prefill, setPrefill] = useState<{ text: string; n: number } | null>(null)
   const prefillSeq = useRef(0)
   const [profile, setProfile] = useState<ProfileId>(loadProfile)
+  const [workspace, setWorkspace] = useState<WorkspaceId>(loadActiveWorkspace)
+  const [custom, setCustom] = useState(() =>
+    localStorage.getItem('t2.dock.profile') === 'custom')
+  const [menu, setMenu] = useState<string | null>(null)
+  const [about, setAbout] = useState(false)
+  const [detaching, setDetaching] = useState<PanelId | null>(null)
+  const wsTrigger = useRef<HTMLButtonElement>(null)
   const [clock, setClock] = useState(() => new Date())
   const [recentCfgs, setRecentCfgs] = useState<string[]>(loadRecents)
   const [bridge, setBridge] = useState<'checking' | 'ready' | 'down'>('checking')
@@ -343,20 +364,51 @@ export default function App(): JSX.Element {
     else toast('workspace not ready', 'err')
   }, [caps, toast])
 
-  const applyProfile = useCallback((id: Exclude<ProfileId, 'custom'>) => {
-    dockRef.current?.apply(profileModel(id))
+  const detachPanel = useCallback(async (id: PanelId | null) => {
+    if (!id || DETACHED || detaching) return
+    setDetaching(id)
+    try {
+      const ok = await window.t2.detach(id)
+      if (!ok) { toast('detach failed', 'err'); return }
+      dockRef.current?.closeTab(id)
+      setCustom(true)
+      toast(`${PANELS[id].title} detached`, 'ok')
+    } finally {
+      setDetaching(null)
+    }
+  }, [toast, detaching])
+
+  const applyProfile = useCallback((id: ClassicProfile) => {
+    const model = profileModel(id)
+    dockRef.current?.apply(model)
+    saveModel(model, workspaceKey(workspace))
     setProfile(id)
+    setCustom(false)
     localStorage.setItem('t2.dock.profile', id)
-    toast(`${PROFILES[id].label} profile`, 'ok')
-  }, [toast])
+    toast(`${PROFILES[id].label} layout`, 'ok')
+  }, [toast, workspace])
+
+  const applyWorkspace = useCallback((id: WorkspaceId) => {
+    if (id === workspace) return
+    setWorkspace(id)
+    localStorage.setItem(WORKSPACE_ACTIVE_KEY, id)
+    setProfile(WORKSPACE_PROFILE[id])
+    setCustom(false)
+    localStorage.setItem('t2.dock.profile', WORKSPACE_PROFILE[id])
+    toast(`${WORKSPACES[id].label} — ${WORKSPACES[id].hint}`, 'ok')
+  }, [toast, workspace])
 
   const markCustom = useCallback(() => {
-    setProfile((p) => {
-      if (p === 'custom') return p
-      localStorage.setItem('t2.dock.profile', 'custom')
-      return 'custom'
-    })
+    setCustom(true)
+    localStorage.setItem('t2.dock.profile', 'custom')
   }, [])
+
+  const resetLayout = useCallback(() => {
+    dockRef.current?.reset()
+    setProfile(WORKSPACE_PROFILE[workspace])
+    setCustom(false)
+    localStorage.setItem('t2.dock.profile', WORKSPACE_PROFILE[workspace])
+  }, [workspace])
 
   const select = useCallback((next: number[], focus: number | null) => {
     setSel(new Set(next))
@@ -444,9 +496,13 @@ export default function App(): JSX.Element {
       { id: 'stix', label: 'Export STIX', run: () => void exportAs('stix') },
       { id: 'report', label: 'Export report', run: () => void exportAs('report') },
       { id: 'refresh', label: 'Refresh targets', run: () => void refresh() },
-      { id: 'layout', label: 'Reset layout', run: () => dockRef.current?.reset() },
-      ...(DETACHED ? [] : (Object.keys(PROFILES) as Array<keyof typeof PROFILES>).map((id) => ({
-        id: `profile:${id}`, label: `Profile: ${PROFILES[id].label}`,
+      { id: 'layout', label: 'Reset layout', run: resetLayout },
+      ...(DETACHED ? [] : WORKSPACE_IDS.map((id) => ({
+        id: `ws:${id}`, label: `${WORKSPACES[id].label}: ${WORKSPACES[id].hint}`,
+        run: () => applyWorkspace(id)
+      }))),
+      ...(DETACHED ? [] : (Object.keys(PROFILES) as ClassicProfile[]).map((id) => ({
+        id: `profile:${id}`, label: `Classic layout: ${PROFILES[id].label}`,
         run: () => applyProfile(id)
       }))),
       { id: 'copy', label: 'Copy selected id', run: async () => {
@@ -457,7 +513,8 @@ export default function App(): JSX.Element {
         run: () => openPanel(id)
       }))
     ],
-    [attach, exportAs, primary, refresh, toast, allowed, openPanel, applyProfile]
+    [attach, exportAs, primary, refresh, toast, allowed, openPanel,
+      applyProfile, applyWorkspace, resetLayout]
   )
 
   const recents = useMemo(() => {
@@ -488,10 +545,19 @@ export default function App(): JSX.Element {
         e.preventDefault()
         setPalette((p) => !p)
       }
+      if (e.altKey && e.key.toLowerCase() === 'p') {
+        e.preventDefault()
+        setMenu('view')
+      }
+      if (e.altKey && e.key.toLowerCase() === 'w') {
+        e.preventDefault()
+        wsTrigger.current?.focus()
+      }
       if (e.key === 'Escape') {
         setPalette(false)
         setDialog(null)
         setJumpOpen(false)
+        setMenu(null)
       }
       const typing = e.target instanceof HTMLElement &&
         ['INPUT', 'SELECT', 'TEXTAREA'].includes(e.target.tagName)
@@ -506,6 +572,7 @@ export default function App(): JSX.Element {
   const renderPanel = useCallback((id: PanelId): JSX.Element => {
     switch (id) {
       case 'targets':
+      case 'targets-intel':
         return <Targets rows={rows} total={beacons.length} query={q}
           onQuery={setQ} onRefresh={() => void refresh()} sel={sel}
           primary={primary} density={density} onSelect={select}
@@ -562,6 +629,89 @@ export default function App(): JSX.Element {
     }
   }, [rows, beacons.length, q, sel, primary, density, caps, selected, toast, openPanel, select, ident?.name,
     refresh, attach, exportAs, safe, cfg, theme, paletteKey, setAlias, prefill, openConsole])
+
+  const menus: Menu[] = useMemo(() => {
+    const file = [
+      ...(can('beacon.build')
+        ? [{ kind: 'item' as const, id: 'build', label: 'Build agent…', hint: 'Alt+B', onSelect: () => setBuildOpen(true) }]
+        : []),
+      { kind: 'sep' as const, id: 'f1' },
+      { kind: 'item' as const, id: 'ioc', label: 'Export IOCs…', onSelect: () => void exportAs('ioc') },
+      { kind: 'item' as const, id: 'stix', label: 'Export STIX…', onSelect: () => void exportAs('stix') },
+      { kind: 'item' as const, id: 'report', label: 'Export report…', onSelect: () => void exportAs('report') },
+      { kind: 'sep' as const, id: 'f2' },
+      { kind: 'item' as const, id: 'disconnect', label: 'Disconnect', onSelect: () => void disconnect() },
+      { kind: 'item' as const, id: 'quit', label: 'Quit', hint: '⌘Q', onSelect: () => void window.t2.windowControl('close') }
+    ]
+    const view: Menu['items'] = []
+    for (const gid of GROUP_IDS) {
+      const leaves = GROUPS[gid].panels.filter((id) => canUse(PANELS[id], caps))
+      if (!leaves.length) continue
+      view.push({ kind: 'heading', id: `h:${gid}`, label: GROUPS[gid].label })
+      for (const id of leaves) {
+        view.push({ kind: 'item', id: `p:${id}`, label: PANELS[id].title,
+          onSelect: () => openPanel(id) })
+      }
+    }
+    view.push({ kind: 'sep', id: 'v1' })
+    view.push({ kind: 'heading', id: 'vwh', label: 'Workspace' })
+    for (const wid of WORKSPACE_IDS) {
+      view.push({ kind: 'check', id: `w:${wid}`, label: WORKSPACES[wid].label,
+        checked: workspace === wid, onSelect: () => applyWorkspace(wid) })
+    }
+    view.push({ kind: 'heading', id: 'vch', label: 'Classic layouts' })
+    for (const cid of Object.keys(PROFILES) as ClassicProfile[]) {
+      view.push({ kind: 'item', id: `c:${cid}`, label: `Classic: ${PROFILES[cid].label}`,
+        checked: profile === cid, onSelect: () => applyProfile(cid) })
+    }
+    view.push({ kind: 'sep', id: 'v2' })
+    view.push({ kind: 'item', id: 'reset', label: 'Reset layout',
+      onSelect: resetLayout })
+    view.push({ kind: 'heading', id: 'vdh', label: 'Density' })
+    for (const d of ['cozy', 'compact', 'dense'] as const) {
+      view.push({ kind: 'check', id: `d:${d}`, label: d, checked: density === d,
+        onSelect: () => setDensity(d) })
+    }
+    view.push({ kind: 'heading', id: 'vth', label: 'Theme' })
+    for (const t of ['dark', 'light'] as const) {
+      view.push({ kind: 'check', id: `t:${t}`, label: t, checked: theme === t,
+        onSelect: () => setTheme(t) })
+    }
+    return [
+      { id: 'file', label: 'File', items: file },
+      { id: 'view', label: 'View', items: view },
+      { id: 'tabs', label: 'Tabs', items: [
+        { kind: 'item', id: 'close', label: 'Close active tab', hint: 'Del',
+          onSelect: () => dockRef.current?.closeActive() },
+        { kind: 'item', id: 'prev', label: 'Move tab left', hint: 'Alt+←',
+          onSelect: () => dockRef.current?.moveActive('prev') },
+        { kind: 'item', id: 'next', label: 'Move tab right', hint: 'Alt+→',
+          onSelect: () => dockRef.current?.moveActive('next') },
+        { kind: 'item', id: 'max', label: 'Maximise pane', hint: 'Alt+Shift+M',
+          onSelect: () => dockRef.current?.toggleMax() },
+        { kind: 'item', id: 'float', label: 'Float active tab',
+          hint: 'Alt+Shift+F', onSelect: () => dockRef.current?.floatActive() },
+        { kind: 'sep', id: 't1' },
+        { kind: 'item', id: 'detach', label: 'Detach active tab',
+          disabled: Boolean(DETACHED), onSelect: () => void detachPanel(active) }
+      ] },
+      { id: 'help', label: 'Help', items: [
+        { kind: 'item', id: 'keys', label: 'Keyboard shortcuts',
+          onSelect: () => openPanel('settings') },
+        { kind: 'item', id: 'diag', label: 'Copy diagnostics', onSelect: () => {
+          void window.t2.clipboard(
+            `TornadoC2 ${pkg.version}\n${platform}\n${navigator.userAgent}`,
+            30_000).then(() => toast('diagnostics copied', 'ok'))
+        } },
+        { kind: 'sep', id: 'h1' },
+        { kind: 'item', id: 'about', label: 'About TornadoC2',
+          onSelect: () => setAbout(true) }
+      ] }
+    ]
+  }, [caps, allowed, openPanel, workspace, density, theme, applyWorkspace,
+    applyProfile, profile, exportAs, disconnect, active, toast, platform,
+    detachPanel, resetLayout])
+
 
   if (conn !== 'ok' || !ident) {
     const step = cfg ? (password ? 3 : 2) : 1
@@ -740,12 +890,14 @@ export default function App(): JSX.Element {
     )
   }
 
+
+
   return (
     <div className="shell">
       <a className="skip" href="#main">Skip to content</a>
       <header className="titlebar"
         onDoubleClick={(e) => {
-          if ((e.target as HTMLElement).closest('button')) return
+          if ((e.target as HTMLElement).closest('button, .menubar')) return
           void window.t2.windowControl('max')
         }}>
         <div className={`brand${DETACHED ? ' small' : ''}`}>
@@ -755,29 +907,7 @@ export default function App(): JSX.Element {
         </div>
 
         {!DETACHED && (
-          <nav className="profiles" role="tablist" aria-label="Workspace profile"
-            onKeyDown={(e) => {
-              if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return
-              const ids = Object.keys(PROFILES)
-              const at = ids.indexOf(profile)
-              const next = ids[(at + (e.key === 'ArrowRight' ? 1 : -1) + ids.length) % ids.length]
-              if (next) {
-                e.preventDefault()
-                applyProfile(next as keyof typeof PROFILES)
-              }
-            }}>
-            {(Object.keys(PROFILES) as Array<keyof typeof PROFILES>).map((id) => (
-              <button key={id} role="tab" aria-selected={profile === id}
-                title={PROFILES[id].hint}
-                onClick={() => applyProfile(id)}>
-                <span aria-hidden="true">{PROFILES[id].glyph}</span>
-                <span className="profile-label">{PROFILES[id].label}</span>
-              </button>
-            ))}
-            {profile === 'custom' && (
-              <span className="profile-custom" title="Modified arrangement">custom</span>
-            )}
-          </nav>
+          <MenuBar menus={menus} openId={menu} onOpenId={setMenu} />
         )}
 
         <span className="grow" />
@@ -794,32 +924,50 @@ export default function App(): JSX.Element {
             })),
             { kind: 'sep', id: 's1' },
             { kind: 'item', id: 'reset', label: 'Reset layout',
-              onSelect: () => dockRef.current?.reset() }
+              onSelect: resetLayout }
           ]} />
           {can('beacon.use') && (
             <IconButton label="Jump to host" onClick={() => setJumpOpen(true)}>⇥</IconButton>
           )}
-          <MenuButton label="Export" glyph="⤓" items={[
-            { kind: 'item', id: 'ioc', label: 'IOCs (CSV)', onSelect: () => void exportAs('ioc') },
-            { kind: 'item', id: 'stix', label: 'STIX 2.1', onSelect: () => void exportAs('stix') },
-            { kind: 'sep', id: 's' },
-            { kind: 'item', id: 'report', label: 'Engagement report', onSelect: () => void exportAs('report') }
-          ]} />
           <IconButton label="Command palette (Ctrl+K)" onClick={() => setPalette(true)}>⌘</IconButton>
           <IconButton label="Settings" on={active === 'settings'}
             onClick={() => openPanel('settings')}>⚙</IconButton>
+          <IconButton label="Disconnect" onClick={() => void disconnect()}>⏻</IconButton>
         </div>
 
-        <div className="conn" aria-live="polite">
-          <span className={`dot ${conn === 'ok' ? 'ok' : 'err'}`} aria-hidden="true" />
+        <StatusCluster>
+          <StatusPill tone={conn === 'ok' ? 'ok' : 'err'}>
+            {conn === 'ok' ? 'connected' : 'bridge down'}
+          </StatusPill>
+          <span className="mono ellipsis status-cfg" title={cfg}>
+            {cfg.split('/').pop() || 'no config'}
+          </span>
           <span className="mono conn-who" title={`${ident.name}@${ident.role}`}>
             {ident.name}<span className="muted">@{ident.role}</span>
           </span>
+          <span className="stat"><b>{live}</b> live</span>
+          <span className="stat dead">{beacons.length - live} dead</span>
+          {listeners.length > 0 && (
+            <StatusPill tone={health.down ? 'err' : health.degraded ? 'warn' : 'idle'}
+              title={`${health.ok} healthy, ${health.degraded} degraded, ${health.down} down`}>
+              ◈ {health.ok}/{listeners.length}
+            </StatusPill>
+          )}
+          {safe && <StatusPill tone="warn">safe mode</StatusPill>}
+          <span className="stat">{ids.length || 0} selected</span>
           {!DETACHED && (
             <IconButton label="Detach active panel"
-              onClick={() => void window.t2.detach(active)}>⧉</IconButton>
+              onClick={() => void detachPanel(active)}>⧉</IconButton>
           )}
-          <IconButton label="Disconnect" onClick={() => void disconnect()}>⏻</IconButton>
+          <button type="button" className="btn quiet" aria-label="Reset layout"
+            onClick={resetLayout}>Reset</button>
+          {!DETACHED && (
+            <WorkspaceSwitcher value={workspace} custom={custom}
+              triggerRef={wsTrigger} onChange={applyWorkspace} />
+          )}
+          <time className="mono clock" dateTime={clock.toISOString()}>
+            {clock.toISOString().slice(11, 19)}Z
+          </time>
           {platform !== 'darwin' && (
             <div className="wctl">
               <button aria-label="Minimise" onClick={() => void window.t2.windowControl('min')}>–</button>
@@ -827,34 +975,10 @@ export default function App(): JSX.Element {
               <button aria-label="Close" onClick={() => void window.t2.windowControl('close')}>×</button>
             </div>
           )}
-        </div>
+        </StatusCluster>
       </header>
 
       <div className="body">
-        {!DETACHED && (
-          <nav className="rail" aria-label="Panel groups">
-            {GROUP_IDS.map((gid) => {
-              const leaves = GROUPS[gid].panels.filter((id) => canUse(PANELS[id], caps))
-              if (!leaves.length) return null
-              const bad = gid === 'assets'
-                ? listeners.filter((l) => l.health === 'down' || l.health === 'degraded').length
-                : 0
-              return (
-                <MenuButton key={gid} placement="right" label={GROUPS[gid].label}
-                  glyph={GROUPS[gid].glyph} badge={bad}
-                  on={groupOf(active) === gid}
-                  items={[
-                    { kind: 'heading', id: `h:${gid}`, label: GROUPS[gid].hint },
-                    ...leaves.map((id) => ({
-                      kind: 'item' as const, id, label: PANELS[id].title,
-                      onSelect: () => openPanel(id)
-                    }))
-                  ]} />
-              )
-            })}
-          </nav>
-        )}
-
         <main className="main" id="main" tabIndex={-1}>
           {update && (
             <div className="banner update" role="status">
@@ -872,47 +996,18 @@ export default function App(): JSX.Element {
           )}
           <Dock ref={dockRef}
             renderPanel={(id) => (
-              <Suspense fallback={
-                <div className="pane-loading" role="status">loading pane…</div>
-              }>
+              <Suspense fallback={<Skeleton lines={4} label="loading pane" />}>
                 {renderPanel(id)}
               </Suspense>
             )}
             single={DETACHED ?? undefined}
+            workspaceId={DETACHED ? undefined : workspace}
             storageKey={DETACHED ? `t2.dock.detach.${DETACHED}` : undefined}
             onCustom={markCustom}
+            onEmpty={DETACHED ? () => { void window.t2.windowControl('close') } : undefined}
             onActive={(id) => { if (id) setActive(id) }} onNotice={toast} />
         </main>
       </div>
-
-      <footer className="status">
-        <StatusPill tone={conn === 'ok' ? 'ok' : 'err'}>
-          {conn === 'ok' ? 'connected' : 'bridge down'}
-        </StatusPill>
-        <span className="mono ellipsis status-cfg" title={cfg}>
-          {cfg.split('/').pop() || 'no config'}
-        </span>
-        <span className="stat"><b>{live}</b> live</span>
-        <span className="stat dead">{beacons.length - live} dead</span>
-        {listeners.length > 0 && (
-          <StatusPill tone={health.down ? 'err' : health.degraded ? 'warn' : 'idle'}
-            title={`${health.ok} healthy, ${health.degraded} degraded, ${health.down} down`}>
-            ◈ {health.ok}/{listeners.length}
-          </StatusPill>
-        )}
-        <span className="grow" />
-        {safe && <StatusPill tone="warn">safe mode</StatusPill>}
-        <span className="stat">{ids.length || 0} selected</span>
-        <button className="btn quiet" onClick={() => dockRef.current?.reset()}>
-          Reset layout
-        </button>
-        <span className="muted status-hint">
-          alt+1–4 · <KeyHint keys="⌘K" label="Command palette" />
-        </span>
-        <time className="mono clock" dateTime={clock.toISOString()}>
-          {clock.toISOString().slice(11, 19)}Z
-        </time>
-      </footer>
 
       {palette && (
         <div className="palette" role="dialog" aria-label="Command palette">
@@ -976,6 +1071,22 @@ export default function App(): JSX.Element {
           body={`Queue self-destruct on ${ids.length} beacon(s)?`}
           onClose={() => setConfirmKill(false)}
           onYes={() => { setConfirmKill(false); void bulk('kill', {}) }} />
+      )}
+
+      {about && (
+        <Dialog title="About TornadoC2" onClose={() => setAbout(false)}
+          footer={<button className="btn" onClick={() => setAbout(false)}>Close</button>}>
+          <dl className="about">
+            <dt>version</dt><dd className="mono">{pkg.version}</dd>
+            <dt>platform</dt><dd className="mono">{platform}</dd>
+            <dt>transport</dt><dd>local bridge · mTLS + HMAC</dd>
+            <dt>layout</dt><dd>{WORKSPACES[workspace].label}</dd>
+          </dl>
+          <p className="small muted">
+            Certificates, HTTP and RBAC stay in the Python bridge. The
+            renderer holds no PEM material.
+          </p>
+        </Dialog>
       )}
 
       {buildOpen && (

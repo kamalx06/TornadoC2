@@ -150,10 +150,14 @@ def m_connect(params):
     pw = params.get('password') or ''
     if not isinstance(pw, str):
         raise BridgeError('password must be a string', 'bad_params')
-    return SESSION.connect(params['config'], pw)
+    result = SESSION.connect(params['config'], pw)
+    _stop_event_stream()
+    _start_event_stream()
+    return result
 
 
 def m_disconnect(params):
+    _stop_event_stream()
     return SESSION.disconnect()
 
 
@@ -164,6 +168,71 @@ def m_status(params):
 def m_capabilities(params):
     client = SESSION.require()
     return {'caps': list(getattr(client, 'caps', []) or [])}
+
+
+# ----------------------------------------------------------------------
+# Server event stream
+#
+# The team server no longer prints HTTP requests. It keeps a bounded
+# ring and this poller mirrors it to stderr, where the desktop main
+# process already forwards bridge output to the Events pane.
+
+_EVENTS_LOCK = threading.Lock()
+_EVENTS_GEN = 0
+
+
+def _start_event_stream():
+    global _EVENTS_GEN
+    with _EVENTS_LOCK:
+        _EVENTS_GEN += 1
+        gen = _EVENTS_GEN
+    threading.Thread(target=_event_stream, args=(gen,),
+                     daemon=True, name='server-events').start()
+
+
+def _stop_event_stream():
+    global _EVENTS_GEN
+    with _EVENTS_LOCK:
+        _EVENTS_GEN += 1
+
+
+def _event_stream(gen):
+    since = None
+    failures = 0
+    while True:
+        with _EVENTS_LOCK:
+            if gen != _EVENTS_GEN:
+                return
+        params = {'limit': 200, 'wait': 2}
+        if since is not None:
+            params['since'] = since
+        try:
+            res = SESSION.get('/api/v1/events', params, timeout=10)
+            failures = 0
+        except Exception:
+            failures += 1
+            time.sleep(min(0.5 * failures, 5.0))
+            continue
+        if since is None:
+            since = int(res.get('next') or 0)
+        events = res.get('events') or []
+        for event in events:
+            try:
+                level = str(event.get('level') or 'info')
+                text = str(event.get('text') or '').replace('\n', ' ')
+                print(f'[srv:{level}] {text}',
+                      file=sys.stderr, flush=True)
+                since = max(since, int(event.get('seq') or 0))
+            except Exception:
+                continue
+        try:
+            since = max(since, int(res.get('next') or 0))
+        except Exception:
+            pass
+
+
+def m_events(params):
+    return SESSION.get('/api/v1/events', params, timeout=10)
 
 
 def _beacon_id(params) -> int:
@@ -570,6 +639,29 @@ def _run_download(jid, bid, remote, local, loot):
     asyncio.run(go())
 
 
+def m_build_options(params):
+    from tornadoc2.beacon.build_spec import descriptor
+    try:
+        profiles = SESSION.get('/api/v1/c2-profiles', {}).get(
+            'profiles') or []
+    except Exception:
+        profiles = []
+    return {'options': descriptor(), 'profiles': profiles}
+
+
+def m_build_validate(params):
+    from tornadoc2.beacon.build_spec import validate, normalize
+    cfg = params.get('config')
+    if not isinstance(cfg, dict):
+        raise BridgeError('config must be an object', 'bad_params')
+    try:
+        spec = normalize(cfg)
+    except ValueError as exc:
+        raise BridgeError(str(exc), 'bad_params')
+    errors = validate(spec)
+    return {'ok': not errors, 'errors': errors}
+
+
 def m_build_start(params):
     cfg = params.get('config')
     out = str(params.get('out') or '')
@@ -865,141 +957,96 @@ def m_loot_list(params):
     return SESSION.get('/api/v1/loot/list', {})
 
 
+def _armory_mod():
+    from tornado_client import armory
+    return armory
+
+
+def _armory_names(params):
+    names = params.get('names')
+    if names is None:
+        names = []
+    if not isinstance(names, list):
+        raise BridgeError('names must be a list', 'bad_params')
+    if len(names) > 200:
+        raise BridgeError('too many names', 'bad_params')
+    out = []
+    for n in names:
+        if not isinstance(n, str) or not n.strip():
+            raise BridgeError('names must be strings', 'bad_params')
+        out.append(n.strip())
+    return out
+
+
 def m_armory_list(params):
-    shell = _armory_shell()
-    installed = shell._armory_installed()
     try:
-        rows = shell._armory_index(refresh=bool(params.get('refresh')))
+        cat = _armory_mod().catalogue(refresh=bool(params.get('refresh')))
     except Exception as exc:
         raise BridgeError(str(exc), 'armory')
-    for r in rows:
-        r['installed'] = r['name'] in installed
-    return {'catalogue': rows, 'installed': installed}
+    rows = cat.pop('extensions', [])
+    ins = cat.pop('installed', {})
+    for row in rows:
+        row['installed'] = row['name'] in ins
+        old = ins.get(row['name']) or {}
+        row['installed_version'] = old.get('version', '')
+    cat['catalogue'] = rows
+    cat['installed'] = ins
+    return cat
+
+
+def m_armory_info(params):
+    name = params.get('name')
+    if not isinstance(name, str) or not name.strip():
+        raise BridgeError('name required', 'bad_params')
+    try:
+        return {'entry': _armory_mod().info(name)}
+    except Exception as exc:
+        raise BridgeError(str(exc), 'armory')
 
 
 def m_armory_update(params):
-    shell = _armory_shell()
+    arm = _armory_mod()
     try:
-        rows = shell._armory_index(refresh=True)
+        if params.get('all'):
+            return arm.update(all_names=True)
+        names = _armory_names(params)
+        if names:
+            return arm.update(names)
+        return arm.update_index()
     except Exception as exc:
         raise BridgeError(str(exc), 'armory')
-    return {'catalogue': len(rows)}
 
 
 def m_armory_install(params):
-    names = params.get('names')
-    if not isinstance(names, list) or not names:
-        raise BridgeError('names required', 'bad_params')
-    if len(names) > 200:
-        raise BridgeError('too many names', 'bad_params')
-    replace = bool(params.get('replace'))
-    shell = _armory_shell()
+    names = _armory_names(params)
+    all_names = bool(params.get('all'))
+    if not names and not all_names:
+        raise BridgeError('names or all required', 'bad_params')
     try:
-        rows = shell._armory_index()
+        return _armory_mod().install(
+            names, replace=bool(params.get('replace')),
+            all_names=all_names)
     except Exception as exc:
         raise BridgeError(str(exc), 'armory')
-    by_name = {r['name']: r for r in rows}
-    installed = shell._armory_installed()
-    state = shell._armory_state()
-    d = state / 'installed'
-    import hashlib
-    import os
-    import shutil
-
-    done, failed = [], []
-    for name in names:
-        meta = by_name.get(name)
-        if meta is None:
-            failed.append({'name': name, 'error': 'not in armory'})
-            continue
-        if name in installed and not replace:
-            done.append({'name': name, 'skipped': True})
-            continue
-        if meta.get('format') not in ('coff-x64', 'coff-x86',
-                                      'coff-arm64'):
-            failed.append({'name': name, 'error': 'unsupported format'})
-            continue
-        rel = meta.get('path') or (
-            f"bofs/{name}/{meta.get('file') or name + '.o'}")
-        try:
-            body = shell._armory_fetch(rel)
-            digest = hashlib.sha256(body).hexdigest()
-            want = (meta.get('sha256') or '').lower()
-            if want and digest != want:
-                failed.append({'name': name, 'error': 'sha256 mismatch'})
-                continue
-            dst = d / name
-            if dst.exists():
-                shutil.rmtree(dst)
-            dst.mkdir(parents=True, mode=0o700)
-            fname = meta.get('file') or (name + '.o')
-            (dst / fname).write_bytes(body)
-            os.chmod(dst / fname, 0o600)
-            if meta.get('cna'):
-                try:
-                    cna = shell._armory_fetch(meta['cna'])
-                    (dst / 'script.cna').write_bytes(cna)
-                    os.chmod(dst / 'script.cna', 0o600)
-                except Exception:
-                    pass
-            saved = dict(meta)
-            saved.update({'sha256': digest, 'size': len(body),
-                          'file': fname, 'installed_at': time.time()})
-            installed[name] = saved
-            shell._armory_log('install', name, digest)
-            done.append({'name': name})
-        except Exception as exc:
-            failed.append({'name': name, 'error': str(exc)})
-    shell._armory_save_installed(installed)
-    return {'done': done, 'failed': failed}
 
 
 def m_armory_uninstall(params):
-    names = params.get('names')
-    if not isinstance(names, list) or not names:
+    names = _armory_names(params)
+    if not names:
         raise BridgeError('names required', 'bad_params')
-    import shutil
-    shell = _armory_shell()
-    installed = shell._armory_installed()
-    d = shell._armory_state() / 'installed'
-    done = []
-    for name in names:
-        if name not in installed:
-            continue
-        shutil.rmtree(d / name, ignore_errors=True)
-        installed.pop(name, None)
-        shell._armory_log('uninstall', name)
-        done.append(name)
-    shell._armory_save_installed(installed)
-    return {'done': done}
-
-
-def _armory_shell():
-    from tornado_client.repl import Client
-
-    class _Shell:
-        pass
-
-    sh = _Shell()
-    sh.caps = list(getattr(SESSION.require(), 'caps', []) or [])
-    # Bind by introspection: _armory_index/_armory_fetch also need
-    # ARMORY_BASE and _armory_verify, and new helpers must not be
-    # forgotten here.
-    sh.ARMORY_BASE = Client.ARMORY_BASE
-    for name, member in vars(Client).items():
-        if not name.startswith('_armory_') or name == '_cmd_armory':
-            continue
-        if callable(member):
-            setattr(sh, name, member.__get__(sh, type(sh)))
-    return sh
+    try:
+        return _armory_mod().remove(names)
+    except Exception as exc:
+        raise BridgeError(str(exc), 'armory')
 
 
 def m_armory_installed(params):
     """Installed armory entries live on the operator workstation."""
     from tornadoc2_mcp import paths
     try:
-        return {'installed': _armory_shell()._armory_installed(),
-                'dir': str(paths.ARMORY_DIR)}
+        return {'installed': _armory_mod().installed(),
+                'dir': str(paths.ARMORY_DIR),
+                'repo': _armory_mod().ARMORY_REPO}
     except Exception as exc:
         return {'installed': {}, 'error': str(exc)}
 
@@ -1055,6 +1102,7 @@ METHODS = {
     'disconnect': m_disconnect,
     'status': m_status,
     'capabilities': m_capabilities,
+    'events': m_events,
     'beacons': m_beacons,
     'task': m_beacon_task,
     'task.result': m_task_result,
@@ -1074,6 +1122,8 @@ METHODS = {
     'upload.start': m_upload_start,
     'download.start': m_download_start,
     'build.start': m_build_start,
+    'build.options': m_build_options,
+    'build.validate': m_build_validate,
     'build.profiles': m_build_profiles,
     'build.config.import': m_build_config_import,
     'shell': m_shell,
@@ -1099,6 +1149,7 @@ METHODS = {
     'loot.list': m_loot_list,
     'armory.installed': m_armory_installed,
     'armory.list': m_armory_list,
+    'armory.info': m_armory_info,
     'armory.install': m_armory_install,
     'armory.uninstall': m_armory_uninstall,
     'armory.update': m_armory_update,
@@ -1348,6 +1399,7 @@ def main(argv=None) -> int:
     if args.config:
         try:
             SESSION.connect(args.config)
+            _start_event_stream()
             _log('connected')
         except Exception as exc:
             _log(f'initial connect failed: {exc}')

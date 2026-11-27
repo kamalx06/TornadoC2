@@ -101,6 +101,17 @@ describe('target inventory', () => {
     expect(ids[0]).toBe(1)
   })
 
+  it('opens a target context menu', async () => {
+    const clip = vi.fn(async () => true)
+    ;(window as unknown as { t2: unknown }).t2 = { clipboard: clip }
+    render(<Harness data={rows(3)} />)
+    const row = document.querySelector('[data-row-id="2"]')!
+    fireEvent.contextMenu(row)
+    expect(screen.getByRole('menu', { name: 'Target 2' })).toBeTruthy()
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Copy target id' }))
+    await waitFor(() => expect(clip).toHaveBeenCalledWith('2'))
+  })
+
   it('has no axe violations', async () => {
     const { container } = render(<Harness data={rows(30)} />)
     const res = await axe.run(container, {

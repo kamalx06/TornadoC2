@@ -52,7 +52,14 @@ code. `--tags all` restores everything. Every tag is documented in
 - `privesc caps|suid|sudo|ptrace|container` — read-only privilege
   reconnaissance.
 - `armory install <name>` — operator-local BOFs; `bof <name>` runs
-  one.
+  one. The source is locked to the project armory repository; see
+  [`armory-contract.md`](armory-contract.md).
+- HTTP requests are not printed to the terminal. They stream to the
+  desktop Events pane (`server/http`); daemon lifecycle output stays
+  in `logs/console.log`.
+- `operator add` writes the new operator's config automatically with
+  `0600` and prints its path, digest and fingerprints. Use
+  `operator export <name> --print` only when the PEM body is needed.
 
 ## 4. Evidence
 
@@ -105,5 +112,5 @@ beacons raises the bulk bar (task, tag, kill).
 | `jump needs a TLS HTTP listener` | Create/start a TLS listener, or select one with `--listener`. |
 | `jump <method> is not compiled into this agent` | Rebuild with the matching `jump_*` tag. |
 | `persistence is not compiled into this agent` | Rebuild with a `persist_*` tag. |
-| `armory index signature is missing or invalid` | The index changed without a fresh signature; run `scripts/armory-sign.py sign`. |
+| `armory index unusable` | Refresh failed. Check network/TLS; the last good index is used if one exists. |
 | `at_rest.key` missing after restore | Restore the key too; without it encrypted state cannot be read. |

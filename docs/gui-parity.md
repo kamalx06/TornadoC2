@@ -1,5 +1,9 @@
 # GUI parity and cutover
 
+> This is the completed Qt → Electron cutover record. The broader
+> GUI ↔ CLI parity work, including the CLI-only gaps this record does
+> not cover, is tracked in `gui-cli-parity.md`.
+
 The cutover is complete: `--gui` runs the Electron shell and the
 PySide6 console (`gui.py`) is deleted. `--gui-classic` is accepted as a
 no-op alias. The matrix stays as the record of what moved.

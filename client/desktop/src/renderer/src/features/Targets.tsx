@@ -5,6 +5,7 @@ import {
   nextIndex, rangeSelection, severity, severityLabel, sortRows,
   type SortDir, type SortKey
 } from '../lib/targets'
+import ContextMenu from '../ui/ContextMenu'
 import EmptyState from '../ui/EmptyState'
 import IconButton from '../ui/IconButton'
 import { Toolbar, ToolbarGroup, ToolbarSpacer, ToolbarTitle } from '../ui/Toolbar'
@@ -30,6 +31,7 @@ export default function Targets(props: {
   const [sortDir, setSortDir] = useState<SortDir>('asc')
   const [edit, setEdit] = useState<{ id: number; value: string } | null>(null)
   const [saving, setSaving] = useState(false)
+  const [ctx, setCtx] = useState<{ x: number; y: number; b: Beacon } | null>(null)
   const savingRef = useRef(false)
   const scrollRef = useRef<HTMLDivElement>(null)
   const bodyRef = useRef<HTMLDivElement>(null)
@@ -263,6 +265,11 @@ export default function Targets(props: {
                 onDoubleClick={() => {
                   if (props.primary !== b.id) props.onSelect([b.id], b.id)
                   props.onAttach()
+                }}
+                onContextMenu={(e) => {
+                  e.preventDefault()
+                  if (!props.sel.has(b.id)) props.onSelect([b.id], b.id)
+                  setCtx({ x: e.clientX, y: e.clientY, b })
                 }}>
                 <span className="id" role="cell">
                   <span className={b.alive ? 'live' : 'dead'} aria-hidden="true">●</span>{' '}
@@ -310,6 +317,22 @@ export default function Targets(props: {
           })}
         </div>
       </div>
+      {ctx && (
+        <ContextMenu x={ctx.x} y={ctx.y} onClose={() => setCtx(null)}
+          label={`Target ${ctx.b.id}`} items={[
+            { kind: 'item', id: 'open', label: 'Attach',
+              onSelect: props.onAttach },
+            { kind: 'item', id: 'task', label: 'Run task…',
+              onSelect: props.onTask },
+            { kind: 'item', id: 'tag', label: 'Tag…',
+              onSelect: props.onTag },
+            { kind: 'sep', id: 's' },
+            { kind: 'item', id: 'copy', label: 'Copy target id',
+              onSelect: () => void window.t2.clipboard(String(ctx.b.id)) },
+            { kind: 'item', id: 'kill', label: 'Kill beacon',
+              onSelect: props.onKill }
+          ]} />
+      )}
     </div>
   )
 }

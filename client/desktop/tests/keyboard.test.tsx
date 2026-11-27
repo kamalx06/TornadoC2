@@ -51,22 +51,43 @@ describe('keyboard only', () => {
     expect(screen.queryByRole('dialog', { name: 'Command palette' })).toBeNull()
   })
 
-  it('moves between profiles with arrow keys', async () => {
+  it('opens the View menu with Alt+P and closes with Escape', async () => {
     await connect()
-    const first = document.querySelector('.profiles [role="tab"]') as HTMLElement
-    first.focus()
-    fireEvent.keyDown(first, { key: 'ArrowRight' })
-    await waitFor(() => expect(
-      document.querySelector('.profiles [aria-selected="true"]')?.textContent)
-      .toContain('Investigation'))
+    fireEvent.keyDown(window, { key: 'p', altKey: true })
+    const view = await screen.findByRole('menuitem', { name: 'View' })
+    expect(view.getAttribute('aria-expanded')).toBe('true')
+    fireEvent.keyDown(document.activeElement ?? window, { key: 'Escape' })
+    await waitFor(() => expect(view.getAttribute('aria-expanded')).toBe('false'))
+    expect(document.activeElement).toBe(view)
   })
 
-  it('activates a rail panel with the keyboard', async () => {
+  it('moves between menus with arrow keys', async () => {
     await connect()
-    fireEvent.click(screen.getByRole('button', { name: 'Topology' }))
-    const graph = screen.getByRole('menuitem', { name: 'Graph' })
+    const file = screen.getByRole('menuitem', { name: 'File' })
+    file.focus()
+    fireEvent.keyDown(file, { key: 'ArrowRight' })
+    await waitFor(() => expect(document.activeElement?.textContent).toBe('View'))
+  })
+
+  it('moves between workspaces with the keyboard', async () => {
+    await connect()
+    const trigger = screen.getByRole('button', { name: /Workspace:/ })
+    trigger.focus()
+    fireEvent.keyDown(trigger, { key: 'ArrowDown' })
+    const list = await screen.findByRole('listbox', { name: 'Workspace' })
+    fireEvent.keyDown(list, { key: 'ArrowDown' })
+    await waitFor(() => expect(document.activeElement?.textContent)
+      .toContain('Workspace 2'))
+    fireEvent.keyDown(document.activeElement!, { key: 'Enter' })
+    await waitFor(() => expect(localStorage.getItem('t2.workspace.active')).toBe('w2'))
+  })
+
+  it('opens the View menu and activates a panel with the keyboard', async () => {
+    await connect()
+    fireEvent.keyDown(window, { key: 'p', altKey: true })
+    const graph = await screen.findByRole('menuitem', { name: 'Graph' })
     graph.focus()
-    graph.click()
+    fireEvent.keyDown(graph, { key: 'Enter' })
     await waitFor(() => expect(
       document.querySelector('[data-tab-id="graph"]')?.getAttribute('data-tab-selected'))
       .toBe('true'))

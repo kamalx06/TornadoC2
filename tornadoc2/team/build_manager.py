@@ -149,254 +149,30 @@ class BuildManager:
                 self._per_op[operator] = n
 
     def _validate_transport(self, params: dict) -> None:
-        """Fail-fast transport and format validation.
+        """Validate with the shared build_spec rules.
 
-        Mirrors the checks in beacon/builder.py::_build_ldflags.
-        Duplication is intentional: the builder is authoritative,
-        and this layer exists only so an invalid config is rejected
-        before it consumes a rate-limit token, a staging directory,
-        and a subprocess. If the two ever disagree, the builder's
-        check wins — but the operator pays for it with a token.
+        The builder repeats the same check, but doing it here refuses
+        a malformed build before a slot and a rate token are spent.
+        Two rules are manager-only because they concern the build
+        pipeline rather than the wire config.
         """
-        mode = (params.get('transport_mode') or 'http').lower()
-        modes = [m.strip() for m in mode.split(',') if m.strip()]
-        os_ = params.get('target_os', 'linux')
-        fmt = params.get('output_format', 'elf')
-        url = params.get('url') or ''
-
-        if not modes:
-            raise RuntimeError(
-                "transport_mode is empty after parsing")
-
-        # ---- Child-side single transports ------------------------
-        if 'smb' in modes:
-            if len(modes) != 1:
-                raise RuntimeError(
-                    "transport_mode 'smb' cannot be combined with "
-                    "other transports; the SMB child has no fallback")
-            if os_ != 'windows':
-                raise RuntimeError(
-                    "transport_mode 'smb' requires target_os=windows")
-            if not params.get('smb_pipe'):
-                raise RuntimeError(
-                    "transport_mode='smb' requires smb_pipe")
-            if not params.get('pivot_key_path'):
-                raise RuntimeError(
-                    "transport_mode='smb' requires pivot_key_path")
-
-        if 'tcp' in modes:
-            if len(modes) != 1:
-                raise RuntimeError(
-                    "transport_mode 'tcp' cannot be combined with "
-                    "other transports")
-            if not params.get('tcp_bind_addr'):
-                raise RuntimeError(
-                    "transport_mode='tcp' requires tcp_bind_addr")
-            tok = params.get('tcp_bind_token') or ''
-            if len(tok) != 64:
-                raise RuntimeError(
-                    "tcp_bind_token must be 64 hex characters "
-                    "(32 bytes)")
-            try:
-                bytes.fromhex(tok)
-            except ValueError:
-                raise RuntimeError("tcp_bind_token must be valid hex")
-            if not params.get('pivot_key_path'):
-                raise RuntimeError(
-                    "transport_mode='tcp' requires pivot_key_path")
-
-        if 'tcprev' in modes:
-            if len(modes) != 1:
-                raise RuntimeError(
-                    "transport_mode 'tcprev' cannot be combined "
-                    "with other transports")
-            if not params.get('tcp_rev_target'):
-                raise RuntimeError(
-                    "transport_mode='tcprev' requires "
-                    "tcp_rev_target")
-            tok = params.get('tcp_rev_token') or ''
-            if len(tok) != 64:
-                raise RuntimeError(
-                    "tcp_rev_token must be 64 hex characters "
-                    "(32 bytes)")
-            try:
-                bytes.fromhex(tok)
-            except ValueError:
-                raise RuntimeError(
-                    "tcp_rev_token must be valid hex")
-            if not params.get('pivot_key_path'):
-                raise RuntimeError(
-                    "transport_mode='tcprev' requires "
-                    "pivot_key_path")
-
-        if 'wireguard' in modes:
-            if len(modes) != 1:
-                raise RuntimeError(
-                    "transport_mode 'wireguard' cannot be combined "
-                    "with other transports")
-            for field in ('wireguard_server_pubkey',
-                          'wireguard_server_addr',
-                          'wireguard_agent_privkey',
-                          'wireguard_tunnel_ip'):
-                if not params.get(field):
-                    raise RuntimeError(
-                        f"transport_mode='wireguard' requires "
-                        f"{field}")
-
-        if 'websocket' in modes:
-            if len(modes) != 1:
-                raise RuntimeError(
-                    "transport_mode 'websocket' cannot be combined "
-                    "with other transports in this version")
-            if os_ == 'windows' and fmt == 'dll':
-                raise RuntimeError(
-                    "transport_mode 'websocket' is not supported "
-                    "for output_format='dll'")
-            if not url:
-                raise RuntimeError(
-                    "transport_mode='websocket' requires url")
-
-        if 'quic' in modes:
-            if len(modes) != 1:
-                raise RuntimeError(
-                    "transport_mode 'quic' cannot be combined with "
-                    "other transports in this version")
-            if not url:
-                raise RuntimeError(
-                    "transport_mode='quic' requires url")
-
-        # ---- Failover-list transports ----------------------------
-        if 'dns' in modes or 'doh' in modes:
-            if not params.get('dns_domain'):
-                raise RuntimeError(
-                    "transport_mode includes "
-                    f"{'dns' if 'dns' in modes else 'doh'} but "
-                    "dns_domain is empty")
-
-        if 'icmp' in modes:
-            if os_ == 'windows':
-                raise RuntimeError(
-                    "transport_mode 'icmp' is not supported on "
-                    "Windows")
-            if not params.get('icmp_host'):
-                raise RuntimeError(
-                    "transport_mode includes 'icmp' but icmp_host "
-                    "is empty")
-
-        if ('http' in modes or 'quic' in modes) and not url:
-            raise RuntimeError(
-                f"transport_mode includes "
-                f"{'http' if 'http' in modes else 'quic'} but "
-                f"url is empty")
-
-        # ---- Parent-side relay roles -----------------------------
-        # A build can be a child, a parent, or both. Parent-side
-        # checks are independent of transport_mode.
-        if params.get('smb_relay_pipe'):
-            if os_ != 'windows':
-                raise RuntimeError(
-                    "smb_relay_pipe requires target_os=windows")
-            if not params.get('pivot_key_path'):
-                raise RuntimeError(
-                    "smb_relay_pipe requires pivot_key_path")
-            relay_pipe = params['smb_relay_pipe']
-            for ch in relay_pipe:
-                if not (ch.isalnum() or ch in '._-'):
-                    raise RuntimeError(
-                        f"smb_relay_pipe contains {ch!r}; a "
-                        f"bare pipe name may use only letters, "
-                        f"digits, '.', '_' and '-'")
-
-        if params.get('tcp_relay_target'):
-            rtok = params.get('tcp_relay_token') or ''
-            if len(rtok) != 64:
-                raise RuntimeError(
-                    "tcp_relay_token must be 64 hex characters "
-                    "(32 bytes)")
-            try:
-                bytes.fromhex(rtok)
-            except ValueError:
-                raise RuntimeError(
-                    "tcp_relay_token must be valid hex")
-            if not params.get('pivot_key_path'):
-                raise RuntimeError(
-                    "tcp_relay_target requires pivot_key_path")
-
-        if params.get('tcp_rev_listen'):
-            rtok = params.get('tcp_rev_token') or ''
-            if len(rtok) != 64:
-                raise RuntimeError(
-                    "tcp_rev_token must be 64 hex characters "
-                    "(32 bytes)")
-            try:
-                bytes.fromhex(rtok)
-            except ValueError:
-                raise RuntimeError(
-                    "tcp_rev_token must be valid hex")
-            if not params.get('pivot_key_path'):
-                raise RuntimeError(
-                    "tcp_rev_listen requires pivot_key_path")
-
-        # ---- Injection method -----------------------------------
-        # Mirrors the check in beacon/builder.py::_build_ldflags.
-        # Duplicated so a malformed value is refused before a build
-        # slot is consumed, matching the pattern used for the
-        # transport checks above.
-        inject_method = (
-            params.get('inject_method') or 'default').lower()
-        if inject_method not in ('default', 'apc',
-                                 'threadpool', 'fiber',
-                                 'callback'):
-            raise RuntimeError(
-                f"inject_method must be one of 'default', 'apc', "
-                f"'threadpool', 'fiber', 'callback'; got "
-                f"{inject_method!r}")
-        if inject_method in ('threadpool', 'fiber'):
-            raise RuntimeError(
-                f"inject_method {inject_method!r} is a "
-                f"self-execution technique; it does not fit "
-                f"`migrate <pid>`. Use `execmem` for that verb.")
-        if inject_method == 'callback':
-            raise RuntimeError(
-                "inject_method 'callback' is not implemented. Use "
-                "'apc', or leave it at 'default'.")
-        if inject_method == 'apc':
-            if os_ != 'windows':
-                raise RuntimeError(
-                    "inject_method 'apc' requires "
-                    "target_os='windows'")
-            if not params.get('inject'):
-                raise RuntimeError(
-                    "inject_method='apc' requires inject=True")
-
-        # ---- Output format constraints ---------------------------
+        from ..beacon.build_spec import validate
+        spec = dict(params)
+        for key in ('_evasion_overrides',):
+            spec.pop(key, None)
+        errors = validate(spec)
+        if errors:
+            raise RuntimeError('\n'.join(
+                f"{e['field']}: {e['message']}" for e in errors))
+        fmt = spec.get('output_format')
         if fmt == 'stager':
-            if mode != 'http':
+            if spec.get('wasm_extensions'):
                 raise RuntimeError(
-                    "stager requires transport_mode='http'; "
-                    f"got {mode!r}")
-            if not url.startswith('https://'):
+                    'stager builds do not support wasm_extensions')
+            if spec.get('inject'):
                 raise RuntimeError(
-                    "stager requires an https:// url")
-            if not params.get('stage_name'):
-                raise RuntimeError("stager requires stage_name")
-            if params.get('inject'):
-                raise RuntimeError(
-                    "stager cannot inject itself "
-                    "(inject must be false)")
-            if params.get('use_mtls'):
-                raise RuntimeError(
-                    "stager does not support mTLS")
-            if params.get('wasm_extensions'):
-                raise RuntimeError(
-                    "stager builds do not support wasm_extensions. "
-                    "The stager is a minimal first stage with no "
-                    "extension host — the feature gates a Cargo "
-                    "dependency that would triple the stager's "
-                    "size for no benefit. Leave wasm_extensions="
-                    "false on the stager, and enable it on the "
-                    "full agent the stager fetches.")
-            if fmt == 'dll':
+                    'stager cannot inject itself (inject must be false)')
+            if spec.get('output_format') == 'dll':
                 raise RuntimeError(
                     "output_format='dll' cannot be a stager")
 

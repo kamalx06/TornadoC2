@@ -1,7 +1,7 @@
 // Panel registry. The dock only knows ids; App owns rendering and caps.
 
 export type PanelId =
-  | 'targets' | 'inspector' | 'listeners' | 'engagement' | 'graph'
+  | 'targets' | 'targets-intel' | 'inspector' | 'listeners' | 'engagement' | 'graph'
   | 'audit' | 'chat' | 'armory' | 'ai' | 'jobs' | 'creds' | 'events'
   | 'settings' | 'terminal' | 'screen' | 'processes' | 'files' | 'network'
 
@@ -18,6 +18,7 @@ export interface PanelMeta {
 
 export const PANELS: Record<PanelId, PanelMeta> = {
   targets: { title: 'Targets', glyph: '◉', slot: 'left', cap: 'beacon.list', minWidth: '190px' },
+  'targets-intel': { title: 'Targets (Intel)', glyph: '◉', slot: 'left', cap: 'beacon.list', minWidth: '190px' },
   listeners: { title: 'Listeners', glyph: '◈', slot: 'left', cap: 'listener.view' },
   engagement: { title: 'Engagement', glyph: '◇', slot: 'center', cap: 'beacon.list' },
   graph: { title: 'Graph', glyph: '⌁', slot: 'center', cap: 'beacon.list' },

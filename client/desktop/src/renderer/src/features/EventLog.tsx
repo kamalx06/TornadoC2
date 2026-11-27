@@ -15,8 +15,9 @@ const LEVELS: Array<[Level | 'all', string]> = [
   ['task', 'tasks'], ['info', 'info']
 ]
 const SOURCES: Array<[Source | 'all', string]> = [
-  ['all', 'all sources'], ['bridge', 'bridge'], ['task', 'task'],
-  ['audit', 'audit'], ['operator', 'operator'], ['system', 'system']
+  ['all', 'all sources'], ['server', 'server'], ['bridge', 'bridge'],
+  ['task', 'task'], ['audit', 'audit'], ['operator', 'operator'],
+  ['system', 'system']
 ]
 
 function glyph(level: Level): string {

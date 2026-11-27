@@ -1,24 +1,23 @@
-"""Werkzeug request handler that suppresses client-disconnect noise.
+"""Werkzeug request handler for the operator API.
 
-A client that closes the connection before the server finishes
-writing the response — Ctrl-C at the prompt, a short timeout, a
-network drop — makes werkzeug's threaded HTTPS server print a full
-traceback for what is, from the server's point of view, a completely
-benign condition. Two exception shapes dominate:
+Two jobs:
 
-  * ``BrokenPipeError`` on the response write
-  * ``ssl.SSLError('UNEXPECTED_EOF_WHILE_READING')`` on the
-    subsequent request-body drain
+  * Suppress the noisy tracebacks caused by a client that closes the
+    connection before the response is written. They are benign.
+  * Route completed requests to a sink instead of printing them. The
+    operator console stays quiet; the desktop renders the sink events
+    in the Events pane.
 
-Neither is actionable. This module exposes a request handler that
-swallows both and defers to werkzeug for anything else, so a real
-server-side bug still gets logged.
+A sink is ``callable(record)`` where record is a dict with method,
+path, status, duration_ms, size, cn, ip and ua. Any sink failure is
+swallowed: logging must never break a request.
 """
 
 from __future__ import annotations
 
 import ssl
 import sys
+import time
 
 try:
     from werkzeug.serving import WSGIRequestHandler
@@ -29,9 +28,56 @@ except ImportError:
 if WSGIRequestHandler is not None:
 
     class QuietWSGIRequestHandler(WSGIRequestHandler):
-        """Swallow client-disconnect exceptions during request
-        processing. Everything else flows through to werkzeug's
-        default logger."""
+        """Base handler. ``log_sink`` is assigned by the factory."""
+
+        log_sink = None
+
+        def handle_one_request(self):
+            self._t2_started = time.monotonic()
+            super().handle_one_request()
+
+        def log_request(self, code='-', size='-'):
+            sink = getattr(self, 'log_sink', None)
+            if sink is None:
+                return
+            started = getattr(self, '_t2_started', None)
+            duration = ((time.monotonic() - started) * 1000
+                        if started is not None else 0.0)
+            path = str(getattr(self, 'path', '') or '').split('?', 1)[0]
+            headers = getattr(self, 'headers', None)
+            ua = ''
+            if headers is not None:
+                try:
+                    ua = headers.get('User-Agent', '') or ''
+                except Exception:
+                    ua = ''
+            try:
+                sink({
+                    'method': str(getattr(self, 'command', '') or ''),
+                    'path': path,
+                    'status': code,
+                    'duration_ms': duration,
+                    'size': size,
+                    'cn': self._peer_cn(),
+                    'ip': self.client_address[0]
+                    if getattr(self, 'client_address', None) else '',
+                    'ua': ua,
+                })
+            except Exception:
+                pass
+
+        def _peer_cn(self) -> str:
+            try:
+                cert = self.connection.getpeercert()
+            except Exception:
+                return ''
+            if not cert:
+                return ''
+            for rdn in cert.get('subject', ()):  # type: ignore[union-attr]
+                for key, value in rdn:
+                    if key == 'commonName':
+                        return str(value)[:120]
+            return ''
 
         def handle_error(self):
             exc_type, exc_val, _ = sys.exc_info()
@@ -58,7 +104,14 @@ if WSGIRequestHandler is not None:
                 print('Exception during request processing',
                       file=sys.stderr)
                 traceback.print_exc()
-                print('-' * 40, file=sys.stderr)
 
-else:
-    QuietWSGIRequestHandler = None
+
+def make_request_handler(sink):
+    """Return a request-handler class bound to ``sink``."""
+    if WSGIRequestHandler is None:
+        return None
+
+    class _BoundHandler(QuietWSGIRequestHandler):
+        log_sink = staticmethod(sink)
+
+    return _BoundHandler

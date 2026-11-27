@@ -34,7 +34,7 @@ export default function MenuButton(props: {
     }
     document.addEventListener('pointerdown', onDown)
     document.addEventListener('keydown', onKey)
-    menu.current?.querySelector<HTMLElement>('[role="menuitem"]')?.focus()
+    menu.current?.querySelector<HTMLElement>('[role^="menuitem"]')?.focus()
     return () => {
       document.removeEventListener('pointerdown', onDown)
       document.removeEventListener('keydown', onKey)
@@ -45,7 +45,7 @@ export default function MenuButton(props: {
     if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return
     e.preventDefault()
     const items = [...(menu.current?.querySelectorAll<HTMLElement>(
-      '[role="menuitem"]') ?? [])]
+      '[role^="menuitem"]') ?? [])]
     const at = items.indexOf(document.activeElement as HTMLElement)
     const next = (at + (e.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length
     items[next]?.focus()
@@ -73,7 +73,9 @@ export default function MenuButton(props: {
             }
             return (
               <li key={it.id} role="none">
-                <div role="menuitem" tabIndex={0}
+                <div role={it.checked === undefined ? 'menuitem' : 'menuitemcheckbox'}
+                  aria-checked={it.checked === undefined ? undefined : it.checked}
+                  tabIndex={0}
                   className={it.checked ? 'on' : undefined}
                   aria-disabled={it.disabled || undefined}
                   onClick={() => {

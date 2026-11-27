@@ -14,7 +14,7 @@ export interface GroupMeta {
 export const GROUPS: Record<GroupId, GroupMeta> = {
   session: {
     label: 'Session', glyph: '◉', hint: 'Target inventory',
-    panels: ['targets']
+    panels: ['targets', 'targets-intel']
   },
   host: {
     label: 'Host', glyph: '❯', hint: 'Inspect, console and host data',

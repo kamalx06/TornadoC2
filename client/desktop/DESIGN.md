@@ -20,13 +20,22 @@ default, neon is reserved for state.
    Icon-only controls need `aria-label` (`IconButton` does this).
 6. **Motion is budgeted.** 90/150/220 ms on one easing curve;
    `prefers-reduced-motion` collapses it.
+7. **Canvas is #0A0A0A, panes #121212, raised #1E1E1E.** Accents are
+   `#00E5FF`, `#00FF00`, `#FF3B5C`, `#FFB020`, `#B18CFF`. Data grids
+   and table wrappers use `--r-grid` (0).
+8. **Typography is Inter for UI and JetBrains Mono for data.** Grids,
+   terminals, logs and timestamps always use the mono stack.
 
 ## Primitives
 
 `src/renderer/src/ui/` exports `Toolbar`, `ToolbarTitle`,
 `ToolbarGroup`, `ToolbarSep`, `Field`, `StatusPill`, `EmptyState`,
-`KeyHint`, `IconButton`, `SplitButton`. Compose these instead of
-re-inventing headers, labels or empty states.
+`KeyHint`, `IconButton`, `SplitButton`, `MenuBar`, `WorkspaceSwitcher`,
+`SideSheet`, `ContextMenu`, `StatusCluster`, `ProgressBar`, `Skeleton`,
+`Markdown`, `CopyButton`, `EmptyPreset`, `ErrorPreset`,
+`NoResultsPreset` and `DataGrid`. Compose these instead of
+re-inventing headers, labels, menus or states. Contracts and
+accessibility rules are in `../../docs/design/primitives.md`.
 
 ## Workspace
 
@@ -40,7 +49,7 @@ that moves a whole pane, and a maximised overlay per pane.
   toast instead of a blank window.
 - **Reset** lives in the status bar and command palette; it clears the
   key before restoring the default model.
-- **Capabilities** filter the rail and palette, never the saved model,
+- **Capabilities** filter the View menu and palette, never the saved model,
   so a loss of capability does not destroy an operator's arrangement.
 - **Tab content is not remounted when moved** (`keep-mounted`), which
   matters for terminals and polling panes.
@@ -78,24 +87,25 @@ installer syntax/help, an AppImage build, checksums and a fuse read
 
 ## Armory bridge
 
-`_armory_shell` is a thin adapter over `Client`'s operator-local armory.
-It must expose `ARMORY_BASE` and every `_armory_*` helper, so it now
-binds by introspection instead of a hand-maintained name list. New
-helpers cannot be forgotten. Armory failures surface as a clean
-`armory` bridge error and the pane shows it inline.
+`bridge._armory_mod()` resolves the operator-local armory module.
+`armory.py` owns the locked repository constant, cache, archive reader
+and installs; the bridge methods never accept a URL. The pane shows the
+source read-only with branch and snapshot id. Failures surface as a
+clean `armory` bridge error and the pane shows them inline.
 
 ## Panel taxonomy
 
 - Leaves are grouped once, exhaustively, in `workspace/groups.ts`:
   Session, Host, Topology, Assets, Activity, System. The registry test
   fails if a leaf is missing or appears twice.
-- The rail has one launcher per group instead of one per leaf. Launchers
-  open a right-hand menu; Arrows/Enter/Escape and the usual outside-click
-  close work, and the active leaf marks its group current. Groups with
-  no permitted leaf are hidden; Assets carries the degraded/down
-  listener badge.
+- `View → Panels` carries one heading per group. The menu opens with
+  `Alt+P`, is filterable by typing, and hides groups with no permitted
+  leaf. There is no side rail.
+- Every panel stays reachable through the menu, palette, command
+  palette and classic layouts.
 - Profiles are curated starter sets (≤ 9 tabs), not exhaustive dumps.
-  Everything else remains in the group menu, palette and old layouts.
+  They remain under `View → Classic layouts` for one release while the
+  four workspaces settle.
 - First run after grouping migrates once to the curated default and
   copies the previous layout to `t2.dock.v1.pre-groups`; no saved data is
   discarded silently.
@@ -222,22 +232,26 @@ helpers cannot be forgotten. Armory failures surface as a clean
 
 ## Shell
 
-- **Profiles** are static, exhaustive presets: engagement, investigation,
-  listeners, admin. Every panel stays reachable; switching never drops
-  one. A manual move/close/resize marks the workspace `custom` and the
-  label persists. Arrow keys move between profiles.
-- **Quick actions** are icon buttons with labels: build, panels, jump,
-  export menu, palette, settings. Capability-gated ones disappear.
-- **Status bar** is live: connection, config basename, live/dead counts,
-  listener health, selection, safe mode, reset and a UTC clock.
+- **Menu bar** — File, View, Tabs, Help at the left. Roving focus,
+  ArrowLeft/Right between menus, Enter/ArrowDown to open, Escape to
+  close. `Alt+P` opens View. Panels are grouped under View.
+- **Quick actions** sit right of centre: build, panels, jump, palette,
+  settings, disconnect. Capability-gated ones disappear.
+- **Status cluster** is on the far right: connection, config basename,
+  operator, live/dead, listener health, selection, safe mode, detach,
+  reset, workspace selector, UTC clock, window controls. Everything
+  that used to live in the status bar moved here.
+- **Workspace selector** is a controlled listbox. `Alt+W` focuses it;
+  ArrowLeft/Right changes workspace; ArrowDown/Enter opens the list.
+  A manual layout change marks it `custom`.
 - **Connect gate** is a two-column brand/form layout with recent configs,
   version, platform and the transport invariant. Window controls sit in
   the corner.
-- **Double-click the titlebar** toggles maximize. Window controls remain
-  `no-drag`.
+- **Double-click the titlebar** toggles maximize unless a button or menu
+  is the target. Window controls remain `no-drag`.
 - **Detached windows** mount the same dock with one tabset and their own
   storage key (`t2.dock.detach.<panel>`); they reuse the main session
-  and keep the full quick-action surface.
+  and keep the full quick-action surface. The menu bar is omitted.
 - Disconnect broadcasts `idle` to every window so no detached pane keeps
   a stale identity.
 - A renderer fault lands in `ErrorBoundary` with reload/retry actions
