@@ -24,6 +24,7 @@ MCP_LOG = STATE_DIR / 'mcp.log'
 BUILD_DIR = STATE_DIR / 'builds'
 PINS_DIR = STATE_DIR / 'pins'
 HISTORY_FILE = STATE_DIR / 'history'
+ARMORY_DIR = STATE_DIR / 'armory'
 
 _MIGRATION_MARKER = STATE_DIR / '.migrated-from-home'
 _LEGACY_DIR = Path.home() / '.tornadoc2'
@@ -77,7 +78,7 @@ def ensure_state_dir() -> Path:
     """Create the state tree ``0700`` and run legacy migration once."""
     STATE_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
     _chmod(STATE_DIR, 0o700)
-    for d in (PINS_DIR,):
+    for d in (PINS_DIR, ARMORY_DIR):
         d.mkdir(mode=0o700, parents=True, exist_ok=True)
         _chmod(d, 0o700)
     _migrate_legacy_once()

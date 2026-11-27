@@ -18,7 +18,7 @@ by walking the shared-attribute edges.
 from __future__ import annotations
 
 from collections import defaultdict, deque
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set
 
 
 def _identity(s) -> dict:
@@ -216,6 +216,41 @@ class Graph:
 
     # ------------------------------------------------------------------
     # Path finding
+
+    @classmethod
+    def from_model(cls, engagement) -> dict:
+        """Project the stored model into the same graph shape.
+
+        Used when live sessions are gone but the engagement record
+        remains. Nodes are hosts; edges are shared users or
+        privilege groups, exactly like the live view.
+        """
+        hosts = engagement.hosts()
+        nodes, groups = [], {'user': {}, 'privilege': {}}
+        for h in hosts:
+            bid = h.get('beacon_id') or 0
+            user = (h.get('user') or '').lower()
+            priv = (h.get('privilege') or 'user').lower()
+            nodes.append({
+                'id': bid, 'user': user, 'privilege': priv,
+                'hostname': h.get('hostname', ''),
+                'domain': '', 'subnet': '', 'alive': False,
+                'elevated': priv not in ('user', ''),
+                'session_id': 0, 'parent': h.get('parent', ''),
+            })
+            groups['user'].setdefault(user, []).append(bid)
+            groups['privilege'].setdefault(priv, []).append(bid)
+
+        edges = []
+        for key in ('user', 'privilege'):
+            for value, members in groups[key].items():
+                if not value or len(members) < 2:
+                    continue
+                for i, a in enumerate(members):
+                    for b in members[i + 1:]:
+                        edges.append({'from': a, 'to': b,
+                                      'shared': [key + '=' + value]})
+        return {'nodes': nodes, 'edges': edges, 'groups': groups}
 
     def find_path(self, src_id: int, dst_id: int) -> Optional[List[int]]:
         """Return the shortest path through shared-attribute edges,

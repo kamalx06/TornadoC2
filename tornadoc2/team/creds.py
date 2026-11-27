@@ -113,12 +113,11 @@ class CredStore:
     # Persistence
 
     def _load(self) -> dict:
-        import json
+        from . import atrest
         if not os.path.isfile(self.path):
             return {}
         try:
-            with open(self.path, 'r', encoding='utf-8') as fh:
-                data = json.load(fh)
+            data = atrest.load_json(self.path, {})
             if not isinstance(data, dict):
                 raise ValueError(
                     f'expected dict, got {type(data).__name__}')
@@ -138,20 +137,12 @@ class CredStore:
             return {}
 
     def _save(self, data: dict) -> None:
-        import json
-        tmp = self.path + '.tmp'
+        from . import atrest
         try:
-            with open(tmp, 'w', encoding='utf-8') as fh:
-                json.dump(data, fh, indent=2, sort_keys=True)
-                fh.flush()
-                try:
-                    os.fsync(fh.fileno())
-                except OSError:
-                    pass
-            os.replace(tmp, self.path)
+            atrest.save_json(self.path, data)
         except OSError:
             try:
-                os.remove(tmp)
+                os.remove(self.path + '.tmp')
             except OSError:
                 pass
 

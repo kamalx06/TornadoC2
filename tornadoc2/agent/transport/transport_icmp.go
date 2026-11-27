@@ -1,3 +1,5 @@
+//go:build t_icmp
+
 package transport
 
 import (
@@ -329,3 +331,15 @@ func (t *icmpTransport) PostResult(r protocol.Result,
 }
 
 func (t *icmpTransport) Close() error { return nil }
+
+func init() {
+	register("icmp", func(o Options) (protocol.Transport, error) {
+		if !supportsICMP() {
+			return nil, fmt.Errorf("transport=icmp is not implemented on Windows")
+		}
+		if o.ICMPHost == "" {
+			return nil, fmt.Errorf("transport=icmp but no ICMPHost")
+		}
+		return NewICMPTransport(o.ICMPHost)
+	})
+}

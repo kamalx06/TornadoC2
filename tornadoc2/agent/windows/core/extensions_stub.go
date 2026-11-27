@@ -16,7 +16,7 @@ import (
 func isExtensionVerb(verb string) bool {
 	switch verb {
 	case "extension_register", "extension_call",
-		"extension_list", "extension_unload":
+		"extension_info", "extension_list", "extension_unload":
 		return true
 	}
 	return false
@@ -31,6 +31,10 @@ func (a *Agent) extensionRegister(t protocol.Task) Result {
 
 func (a *Agent) extensionCall(ctx context.Context,
 	t protocol.Task) Result {
+	return Result{ID: t.ID, Error: extensionsNotBuilt}
+}
+
+func (a *Agent) extensionInfo(t protocol.Task) Result {
 	return Result{ID: t.ID, Error: extensionsNotBuilt}
 }
 

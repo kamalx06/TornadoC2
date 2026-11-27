@@ -1184,7 +1184,7 @@ class _TransferJob:
 
     def __init__(self, client, direction, local_path, remote_path,
                  digest, size, beacon_id, no_loot=False):
-        self.id = cls_id = _TransferJob._next_id()
+        self.id = _TransferJob._next_id()
         self.client = client
         self.direction = direction          # 'upload' | 'download'
         self.local_path = local_path
@@ -1772,6 +1772,24 @@ class Client:
                 and len(words) > 1 and words[1] == '-o':
             return self._complete_paths(text)
 
+        if first in ('armory', 'arm'):
+            if arg_i == 1:
+                return sorted(
+                    x for x in ('list-all', 'list-installed', 'show',
+                                'install', 'uninstall', 'update')
+                    if x.startswith(text.lower()))
+            if arg_i == 2 and len(words) > 1 \
+                    and words[1].lower() in ('show', 'install',
+                                             'uninstall'):
+                try:
+                    names = list(self._armory_installed())
+                    if words[1].lower() == 'install':
+                        names = [r['name'] for r in self._armory_index()]
+                except Exception:
+                    names = []
+                return sorted(n for n in names if n.startswith(text))
+            return []
+
         if first == 'ai':
             if arg_i == 1:
                 return sorted(x for x in ('config', 'setup')
@@ -1971,6 +1989,26 @@ class Client:
                     self._cmd_c2_profiles(parts)
                 elif cmd == 'bofs':
                     self._cmd_bofs(parts)
+                elif cmd in ('armory', 'arm'):
+                    self._cmd_armory(parts)
+                elif cmd in ('jump', 'jmp') and self.current_beacon:
+                    self._cmd_jump(parts)
+                elif cmd == 'timeline':
+                    self._cmd_timeline(parts)
+                elif cmd == 'findings':
+                    self._cmd_findings(parts)
+                elif cmd == 'report':
+                    self._cmd_report(parts)
+                elif cmd == 'atrest':
+                    self._cmd_atrest(parts)
+                elif cmd == 'model':
+                    self._cmd_model(parts)
+                elif cmd == 'evidence':
+                    self._cmd_evidence(parts)
+                elif cmd == 'export':
+                    self._cmd_export(parts)
+                elif cmd == 'bulk':
+                    self._cmd_bulk(parts)
                 elif cmd in ('beacons', 'bl'):
                     self._cmd_beacons()
                 elif cmd == 'use':
@@ -3451,6 +3489,565 @@ class Client:
             print(f"  {c['dim']}{i:>5}{c['reset']}  {item}")
         print()
 
+    def _cmd_timeline(self, parts):
+        c = CLR
+        if len(parts) > 2:
+            self.tp.post('/api/v1/timeline',
+                         {'kind': parts[1], 'text': ' '.join(parts[2:])})
+        for e in self.tp.post('/api/v1/timeline', {}).get('timeline', []):
+            import time as _t
+            print(f"{c['dim']}{_t.strftime('%H:%M', _t.localtime(e['ts']))}"
+                  f"{c['reset']} {e['kind']}: {e['text']}")
+
+    def _cmd_findings(self, parts):
+        if len(parts) > 4:
+            rest = parts[4:]
+            ev = []
+            if '--ev' in rest:
+                i = rest.index('--ev')
+                ev = rest[i + 1:]
+                rest = rest[:i]
+            self.tp.post('/api/v1/findings', {
+                'severity': parts[1], 'host': parts[2],
+                'title': parts[3], 'detail': ' '.join(rest),
+                'evidence': ev})
+        for f in self.tp.post('/api/v1/findings', {}).get('findings', []):
+            print(f"  #{f['id']} [{f['severity'].upper()}] "
+                  f"{f['host']} {f['title']} — {f['detail']}")
+
+    def _cmd_model(self, parts):
+        c = CLR
+        try:
+            r = self.tp.post('/api/v1/model', {})
+        except Exception as exc:
+            print(f"{c['red']}model: {exc}{c['reset']}")
+            return
+        which = parts[1].lower() if len(parts) > 1 else ''
+        for key, label, cols in (
+                ('hosts', 'HOSTS', ('hostname', 'os', 'user',
+                                    'privilege')),
+                ('users', 'USERS', ('user', 'host', 'kind')),
+                ('shares', 'SHARES', ('name', 'host', 'access')),
+                ('services', 'SERVICES', ('name', 'host', 'state')),
+                ('evidence', 'EVIDENCE', ('sha256', 'name', 'host'))):
+            if which and which.rstrip('s') not in key:
+                continue
+            rows = r.get(key) or []
+            print(f"\n{label} ({len(rows)})")
+            for row in rows[:100]:
+                print('  ' + '  '.join(str(row.get(x, '')) for x in cols))
+        print(f"\n{c['dim']}dataset {str(r.get('dataset'))[:16]}…"
+              f"{c['reset']}")
+
+    def _cmd_evidence(self, parts):
+        minimum = 3 if len(parts) > 1 and parts[1] == '--loot' else 4
+        if len(parts) < minimum:
+            print(f"{CLR['red']}usage: evidence <sha256> <name> <host> "
+                  f"[detail] | evidence --loot <digest> [host] [detail]"
+                  f"{CLR['reset']}")
+            return
+        payload = {'name': parts[2], 'host': parts[3],
+                   'detail': ' '.join(parts[4:])}
+        if parts[1] == '--loot':
+            if len(parts) < 3:
+                print(f"{CLR['red']}usage: evidence --loot <digest> "
+                      f"[host] [detail]{CLR['reset']}")
+                return
+            payload = {'loot': parts[2],
+                       'host': parts[3] if len(parts) > 3 else '',
+                       'detail': ' '.join(parts[4:])}
+        else:
+            payload['sha256'] = parts[1]
+        try:
+            r = self.tp.post('/api/v1/evidence', payload)
+        except Exception as exc:
+            print(f"{CLR['red']}evidence: {exc}{CLR['reset']}")
+            return
+        print(f"{CLR['green']}recorded evidence #{r['evidence']['id']}"
+              f"{CLR['reset']}")
+
+    def _cmd_export(self, parts):
+        c = CLR
+        kind = parts[1].lower() if len(parts) > 1 else ''
+        if kind in ('ioc', 'stix'):
+            try:
+                r = self.tp.post(f'/api/v1/export/{kind}', {})
+            except Exception as exc:
+                print(f"{c['red']}export: {exc}{c['reset']}")
+                return
+            import json as _j
+            body = (r.get('csv') if kind == 'ioc'
+                    else _j.dumps(r.get('bundle'), indent=2))
+        elif kind == 'mitre':
+            try:
+                r = self.tp.post('/api/v1/export/mitre', {})
+            except Exception as exc:
+                print(f"{c['red']}export: {exc}{c['reset']}")
+                return
+            for row in r.get('mitre') or []:
+                print(f"  {row['tactic']} · {row['technique']} "
+                      f"({row['kind']})")
+            return
+        elif kind == 'report':
+            try:
+                r = self.tp.post('/api/v1/report', {})
+            except Exception as exc:
+                print(f"{c['red']}export: {exc}{c['reset']}")
+                return
+            body = r.get('markdown') or ''
+        else:
+            print(f"{c['red']}usage: export ioc|stix|mitre|report [path]"
+                  f"{c['reset']}")
+            return
+        out = parts[2] if len(parts) > 2 else ''
+        if out:
+            try:
+                fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+                             0o600)
+                with os.fdopen(fd, 'w', encoding='utf-8') as fh:
+                    fh.write(body)
+                print(f"{c['green']}wrote {out}{c['reset']}")
+            except OSError as exc:
+                print(f"{c['red']}{exc}{c['reset']}")
+        else:
+            print(body)
+
+    def _cmd_bulk(self, parts):
+        c = CLR
+        if len(parts) < 3:
+            print(f"{c['red']}usage: bulk task <id,id,…> <verb> [args] |"
+                  f" bulk tag|untag <tag> <id,id,…> | "
+                  f"bulk kill <id,id,…>{c['reset']}")
+            return
+        action = parts[1].lower()
+        payload = {'action': action}
+        rest = parts[2:]
+        if action == 'task':
+            if len(rest) < 2:
+                print(f"{c['red']}usage: bulk task <ids> <verb> [args]"
+                      f"{c['reset']}")
+                return
+            ids = rest[0].split(',')
+            payload['verb'] = rest[1]
+            payload['args'] = rest[2:]
+        elif action in ('tag', 'untag'):
+            if len(rest) < 2:
+                print(f"{c['red']}usage: bulk {action} <tag> <ids>"
+                      f"{c['reset']}")
+                return
+            payload['tag'] = rest[0]
+            ids = rest[1].split(',')
+        elif action == 'kill':
+            ids = rest[0].split(',') if rest else []
+        else:
+            print(f"{c['red']}unknown bulk action {action}{c['reset']}")
+            return
+        try:
+            payload['ids'] = [int(i.lstrip('#')) for i in ids]
+        except ValueError:
+            print(f"{c['red']}ids must be numbers{CLR['reset']}")
+            return
+        try:
+            r = self.tp.post('/api/v1/bulk', payload)
+        except Exception as exc:
+            print(f"{c['red']}bulk: {exc}{c['reset']}")
+            return
+        ok = sum(1 for x in r.get('results', [])
+                 if x.get('outcome', 'ok') == 'ok')
+        print(f"{c['green']}{ok}/{len(payload['ids'])} done"
+              f"{c['reset']}")
+
+    def _cmd_atrest(self, parts):
+        action = parts[1].lower() if len(parts) > 1 else 'status'
+        try:
+            r = self.tp.post('/api/v1/atrest', {'action': action})
+        except Exception as exc:
+            print(f"{CLR['red']}atrest: {exc}{CLR['reset']}")
+            return
+        if action == 'status':
+            rows = r.get('plaintext') or []
+            if not rows:
+                print(f"{CLR['green']}no plaintext state files"
+                      f"{CLR['reset']}")
+            for p in rows:
+                print(f"  plaintext {p}")
+            print(f"  {len(rows)} file(s); migration "
+                  f"{'done' if r.get('migrated') else 'pending'}")
+        else:
+            print(f"{CLR['green']}migration run{CLR['reset']} "
+                  f"(audit {r.get('audit_id')})")
+
+    def _cmd_report(self, parts):
+        r = self.tp.post('/api/v1/report', {})
+        print(r.get('markdown', ''))
+
+    def _cmd_update(self, parts):
+        if len(parts) < 2:
+            print(f"{CLR['red']}usage: update <url> <sha256> <sig> "
+                  f"[--no-restart] | update publish <build_id>"
+                  f"{CLR['reset']}")
+            return
+        if parts[1].lower() == 'publish':
+            if len(parts) < 3:
+                print(f"{CLR['red']}usage: update publish <build_id>"
+                      f"{CLR['reset']}")
+                return
+            try:
+                r = self.tp.post('/api/v1/agent/publish',
+                                 {'build_id': parts[2]})
+            except Exception as exc:
+                print(f"{CLR['red']}publish: {exc}{CLR['reset']}")
+                return
+            if not r.get('ok'):
+                print(f"{CLR['red']}{r.get('error')}{CLR['reset']}")
+                return
+            args = ['update', r['url'], r['sha256'], r['signature']]
+        elif len(parts) < 4:
+            print(f"{CLR['red']}update needs url, sha256 and signature"
+                  f"{CLR['reset']}")
+            return
+        else:
+            args = parts
+        self._dispatch_task(args)
+        print(f"{CLR['dim']}update queued{CLR['reset']}")
+
+    def _cmd_jump(self, parts):
+        c = CLR
+        methods = ('psexec', 'winrm', 'wmi', 'scshell')
+        if len(parts) < 3 or parts[1].lower() not in methods:
+            print(f"{c['red']}usage: jump <psexec|winrm|wmi|scshell> "
+                  f"<host> [flags]{c['reset']}")
+            return
+        method, target = parts[1].lower(), parts[2]
+        flags = parts[3:]
+        listener = ''
+        for i, a in enumerate(flags):
+            if a == '--listener' and i + 1 < len(flags):
+                listener = flags[i + 1]
+        os_name = None
+        for b in getattr(self, '_beacon_cache', []):
+            if b.get('id') == self.current_beacon:
+                os_name = b.get('os')
+                break
+        if os_name and os_name != 'windows':
+            print(f"{c['red']}jump requires a Windows beacon"
+                  f"{c['reset']}")
+            return
+        print(f"{c['dim']}building stager for {method} -> {target}…"
+              f"{c['reset']}")
+        try:
+            r = self.tp.post('/api/v1/jump/stage', {'listener': listener})
+        except Exception as exc:
+            print(f"{c['red']}jump stage: {exc}{c['reset']}")
+            return
+        if not r.get('ok'):
+            print(f"{c['red']}{r.get('error', 'stage failed')}"
+                  f"{c['reset']}")
+            return
+        args = [method, target, r.get('data_b64', '')] + flags
+        print(f"{c['dim']}stager {r.get('url')} "
+              f"sha256={r.get('sha256','')[:16]}…{c['reset']}")
+        self._dispatch_task(args)
+        print(f"{c['dim']}queued jump {method} -> {target}{c['reset']}")
+
+    # ------------------------------------------------------------------
+    # Operator-local armory
+
+    ARMORY_BASE = (
+        'https://raw.githubusercontent.com/kamalx06/'
+        'tornadoc2-armory/main')
+
+    def _armory_state(self):
+        from tornadoc2_mcp import paths
+        paths.ensure_state_dir()
+        d = paths.ARMORY_DIR
+        (d / 'installed').mkdir(parents=True, exist_ok=True)
+        return d
+
+    def _armory_installed(self):
+        import json
+        f = self._armory_state() / 'installed.json'
+        try:
+            raw = json.loads(f.read_text(encoding='utf-8'))
+            return raw if isinstance(raw, dict) else {}
+        except Exception:
+            return {}
+
+    def _armory_save_installed(self, data):
+        import json, os
+        f = self._armory_state() / 'installed.json'
+        tmp = f.with_suffix('.tmp')
+        tmp.write_text(json.dumps(data, indent=2, sort_keys=True),
+                       encoding='utf-8')
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, f)
+
+    def _armory_verify(self, body, sig):
+        """Verify the index signature against trusted keys.
+
+        Returns True when signed by a trusted key, False when a
+        signature is present but does not verify, None when the repo
+        has no signature and no key is configured.
+        """
+        from tornado_client import armory_verify as av
+        if sig is not None:
+            return av.verify(body, sig)
+        return None if not av.trusted_keys() else False
+
+    def _armory_index(self, refresh=False):
+        import json, os, urllib.request
+        from tornado_client import armory_verify as av
+        d = self._armory_state()
+        cache = d / 'index.json'
+        sig_cache = d / 'index.json.sig'
+        body = None
+        if refresh or not cache.is_file():
+            req = urllib.request.Request(
+                self.ARMORY_BASE + '/index.json',
+                headers={'User-Agent': 'TornadoC2-armory'})
+            with urllib.request.urlopen(req, timeout=20) as r:
+                body = r.read(4 * 1024 * 1024)
+            sig = None
+            if av.trusted_keys():
+                try:
+                    sq = urllib.request.Request(
+                        self.ARMORY_BASE + '/index.json.sig',
+                        headers={'User-Agent': 'TornadoC2-armory'})
+                    with urllib.request.urlopen(sq, timeout=20) as r:
+                        sig = r.read(4096).decode('ascii', 'replace')
+                except Exception:
+                    sig = None
+            if self._armory_verify(body, sig) is not True:
+                if not av.trusted_keys():
+                    print('[armory] index is not signed by a trusted key')
+                else:
+                    raise RuntimeError(
+                        'armory index signature is missing or invalid')
+            tmp = cache.with_suffix('.tmp')
+            tmp.write_bytes(body)
+            os.chmod(tmp, 0o600)
+            os.replace(tmp, cache)
+            st = sig_cache.with_suffix('.tmp')
+            st.write_text(sig or '', encoding='utf-8')
+            os.chmod(st, 0o600)
+            os.replace(st, sig_cache)
+        try:
+            body = cache.read_bytes()
+            data = json.loads(body.decode('utf-8'))
+        except Exception as exc:
+            raise RuntimeError(f'armory index unreadable: {exc}')
+        if av.trusted_keys():
+            sig = ''
+            try:
+                sig = sig_cache.read_text(encoding='utf-8')
+            except Exception:
+                pass
+            if self._armory_verify(body, sig) is not True:
+                raise RuntimeError('cached armory index failed '
+                                   'signature verification')
+        if not isinstance(data, dict) or data.get('version') != 1:
+            raise RuntimeError('unsupported armory index')
+        rows = data.get('bofs') or []
+        return [r for r in rows if isinstance(r, dict) and r.get('name')]
+
+    def _armory_log(self, action, name, detail=''):
+        import json, time
+        try:
+            f = self._armory_state() / 'armory.log'
+            with open(f, 'a', encoding='utf-8') as fh:
+                fh.write(json.dumps({
+                    'ts': time.time(), 'action': action,
+                    'name': name, 'detail': detail}) + '\n')
+        except Exception:
+            pass
+
+    def _armory_fetch(self, rel, cap=4 * 1024 * 1024):
+        import urllib.request
+        if not rel or '..' in rel or rel.startswith('/'):
+            raise RuntimeError(f'bad armory path {rel!r}')
+        req = urllib.request.Request(
+            self.ARMORY_BASE + '/' + rel,
+            headers={'User-Agent': 'TornadoC2-armory'})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            data = r.read(cap + 1)
+        if len(data) > cap:
+            raise RuntimeError(f'{rel} exceeds {cap} bytes')
+        return data
+
+    def _cmd_armory(self, parts):
+        c = CLR
+        if 'armory.view' not in self.caps:
+            print(f"{c['red']}your role does not include "
+                  f"armory.view{c['reset']}")
+            return
+        sub = parts[1].lower() if len(parts) > 1 else 'list-all'
+
+        if sub == 'list-all':
+            try:
+                rows = self._armory_index()
+            except Exception as exc:
+                print(f"{c['red']}armory: {exc}{c['reset']}")
+                return
+            ins = self._armory_installed()
+            if not rows:
+                print(f"{c['dim']}armory is empty{c['reset']}")
+                return
+            for r in sorted(rows, key=lambda x: x['name']):
+                mark = '✓' if r['name'] in ins else ' '
+                print(f"  {mark} {r['name']:<28} "
+                      f"{r.get('format','?'):<9} "
+                      f"{(r.get('description') or '')[:70]}")
+            print(f"  {c['dim']}install: armory install <name> | all"
+                  f"{c['reset']}")
+            return
+
+        if sub == 'list-installed':
+            ins = self._armory_installed()
+            if not ins:
+                print(f"  {c['dim']}(nothing installed){c['reset']}")
+                return
+            for name, meta in sorted(ins.items()):
+                print(f"  {name:<28} {meta.get('format','?'):<9} "
+                      f"{meta.get('sha256','')[:16]}…")
+            return
+
+        if sub == 'show':
+            if len(parts) < 3:
+                print(f"{c['red']}usage: armory show <name>{c['reset']}")
+                return
+            name = parts[2]
+            ins = self._armory_installed()
+            meta = ins.get(name)
+            if meta is None:
+                try:
+                    meta = next((r for r in self._armory_index()
+                                 if r['name'] == name), None)
+                except Exception as exc:
+                    print(f"{c['red']}{exc}{c['reset']}")
+                    return
+            if meta is None:
+                print(f"{c['red']}unknown BOF: {name}{c['reset']}")
+                return
+            import json
+            print(json.dumps(meta, indent=2, sort_keys=True))
+            return
+
+        if sub == 'update':
+            try:
+                rows = self._armory_index(refresh=True)
+            except Exception as exc:
+                print(f"{c['red']}armory update: {exc}{c['reset']}")
+                return
+            print(f"{c['green']}✓{c['reset']} index updated "
+                  f"({len(rows)} entries)")
+            return
+
+        if 'armory.manage' not in self.caps:
+            print(f"{c['red']}your role does not include "
+                  f"armory.manage{c['reset']}")
+            return
+
+        if sub == 'uninstall':
+            if len(parts) < 3:
+                print(f"{c['red']}usage: armory uninstall <name...>"
+                      f"{c['reset']}")
+                return
+            import shutil
+            ins = self._armory_installed()
+            d = self._armory_state() / 'installed'
+            for name in parts[2:]:
+                if name not in ins:
+                    print(f"{c['red']}not installed: {name}{c['reset']}")
+                    continue
+                shutil.rmtree(d / name, ignore_errors=True)
+                ins.pop(name, None)
+                self._armory_log('uninstall', name)
+                print(f"{c['green']}✓{c['reset']} uninstalled {name}")
+            self._armory_save_installed(ins)
+            return
+
+        if sub != 'install':
+            print(f"{c['red']}unknown armory subcommand: {sub}"
+                  f"{c['reset']}")
+            return
+
+        if len(parts) < 3:
+            print(f"{c['red']}usage: armory install <name...>|all"
+                  f"{c['reset']}")
+            return
+        try:
+            rows = self._armory_index()
+        except Exception as exc:
+            print(f"{c['red']}armory: {exc}{c['reset']}")
+            return
+        by_name = {r['name']: r for r in rows}
+        targets = (list(by_name) if parts[2].lower() == 'all'
+                   else parts[2:])
+        ins = self._armory_installed()
+        d = self._armory_state() / 'installed'
+        import hashlib, json, os, shutil
+
+        for name in targets:
+            meta = by_name.get(name)
+            if meta is None:
+                print(f"{c['red']}not in armory: {name}{c['reset']}")
+                continue
+            if name in ins and '--replace' not in parts:
+                print(f"{c['yellow']}already installed: {name} "
+                      f"(use --replace){c['reset']}")
+                continue
+            fmt = meta.get('format', '')
+            if fmt not in ('coff-x64', 'coff-x86', 'coff-arm64'):
+                print(f"{c['red']}{name}: unsupported format {fmt!r}"
+                      f"{c['reset']}")
+                continue
+            rel = meta.get('path') or (
+                f"bofs/{name}/{meta.get('file') or name + '.o'}")
+            try:
+                body = self._armory_fetch(rel)
+                digest = hashlib.sha256(body).hexdigest()
+                want = (meta.get('sha256') or '').lower()
+                if want and digest != want:
+                    print(f"{c['red']}{name}: sha256 mismatch"
+                          f"{c['reset']}")
+                    continue
+                dst = d / name
+                if dst.exists():
+                    shutil.rmtree(dst)
+                dst.mkdir(parents=True, mode=0o700)
+                fname = meta.get('file') or (name + '.o')
+                (dst / fname).write_bytes(body)
+                os.chmod(dst / fname, 0o600)
+                if meta.get('cna'):
+                    try:
+                        cna = self._armory_fetch(meta['cna'])
+                        (dst / 'script.cna').write_bytes(cna)
+                        os.chmod(dst / 'script.cna', 0o600)
+                    except Exception:
+                        pass
+                saved = dict(meta)
+                saved.update({'sha256': digest, 'size': len(body),
+                              'file': fname, 'installed_at':
+                              __import__('time').time()})
+                ins[name] = saved
+                self._armory_log('install', name, digest)
+                print(f"{c['green']}✓{c['reset']} installed {name}")
+            except Exception as exc:
+                print(f"{c['red']}{name}: {exc}{c['reset']}")
+        self._armory_save_installed(ins)
+
+    def _armory_lookup(self, name):
+        """Return (bytes, format) for an installed BOF, or None."""
+        meta = self._armory_installed().get(name)
+        if not meta:
+            return None
+        f = self._armory_state() / 'installed' / name / (
+            meta.get('file') or name + '.o')
+        try:
+            return f.read_bytes(), meta.get('format', '')
+        except OSError:
+            return None
+
     def _cmd_bofs(self, parts):
         """bofs list
            bofs add <path> [--as <name>] [--replace]
@@ -3704,7 +4301,7 @@ class Client:
     def _cmd_listeners(self, parts):
         """listeners [list | show <id> | create <type> [flags] |
                       start <id> | stop <id> | edit <id> |
-                      delete <id> | help]
+                      delete <id> | health [--probe <id>] | help]
 
         Flags are parsed in-REPL; with no flags the wizard runs.
         Both paths feed the same spec builder, so the API payload
@@ -3721,7 +4318,7 @@ class Client:
         if sub in ('help', '?', '-h', '--help'):
             print("listeners [list | show <id> | create <type> "
                   "[flags] | start <id> | stop <id> | edit <id> | "
-                  "delete <id>]")
+                  "delete <id> | health [--probe <id>] | help]")
             print(f"  {c['dim']}types: http, quic, websocket, "
                   f"dns, icmp, wireguard{c['reset']}")
             print(f"  {c['dim']}create flags: --host --port --tls "
@@ -3830,6 +4427,17 @@ class Client:
                 print(f"    {c['dim']}domain :{c['reset']} {domain}")
             if err:
                 print(f"    {c['red']}error  : {err}{c['reset']}")
+            health = lst.get('health') or 'unknown'
+            hcol = {'ok': c['green'], 'degraded': c['yellow'],
+                    'down': c['red']}.get(health, c['dim'])
+            print(f"    {c['dim']}health :{c['reset']} "
+                  f"{hcol}{health}{c['reset']}")
+            days = lst.get('cert_days_left')
+            if isinstance(days, int) and days >= 0:
+                dcol = (c['red'] if days <= 7 else
+                        c['yellow'] if days <= 30 else c['dim'])
+                print(f"    {c['dim']}cert   :{c['reset']} "
+                      f"{dcol}{days} day(s) left{c['reset']}")
             print()
 
         print(f"  {c['dim']}show details:    "
@@ -5750,6 +6358,34 @@ class Client:
                     'opsec plus UPX and the ekko sleep mask'),
                 ], 0)
 
+        def section_evasion(state):
+            if state.get('os') != 'windows':
+                state['evasion'] = {}
+                return {}
+            print(f"    {c['dim']}applied on top of the profile; "
+                f"blank keeps the profile value{c['reset']}")
+            out = {}
+            for key, label in (
+                    ('antisanbox', 'Anti-sandbox'),
+                    ('amsi_bypass', 'AMSI patch'),
+                    ('etw_patch', 'ETW patch'),
+                    ('stack_spoof', 'Call-stack spoof (ev_stackspoof)'),
+                    ('unhook', 'ntdll unhook (ev_unhook)'),
+                    ('stomp', 'module stomp verb (ev_stomp)'),
+                    ('ppid_spoof', 'PPID spoof'),
+                    ('antidebug', 'Anti-debug'),
+                    ('antivm', 'Anti-VM')):
+                v = ask(f'{label} on? (y/n)',
+                        'y' if key == 'stack_spoof' else '')
+                if v in ('BACK', 'CANCEL'):
+                    return v
+                if v.lower() in ('y', 'yes', 'on'):
+                    out[key] = True
+                elif v.lower() in ('n', 'no', 'off'):
+                    out[key] = False
+            state['evasion'] = out
+            return out
+
         def section_c2(state):
             try:
                 from .beacon.builder import list_c2_profiles
@@ -6148,6 +6784,8 @@ class Client:
                 section_endpoint,      _always,   '5/9'),
             ('opsec_profile', 'OPSEC profile',
                 section_opsec,         _always,   '6/9'),
+            (None,            'Evasion overrides',
+                section_evasion,       _always,   '6b/9'),
             ('c2_profile',    'C2 profile',
                 section_c2,            _has_c2,  '7/9'),
             ('tls_profile',   'TLS fingerprint',
@@ -6264,6 +6902,9 @@ class Client:
             'work_hours_end':   state['work_hours_end'],
             'verbose':          bool(state.get('verbose', False)),
         }
+
+        if state.get('evasion'):
+            payload['_evasion_overrides'] = state['evasion']
 
         if state.get('c2_profile'):
             payload['c2_profile'] = state['c2_profile']
@@ -6828,7 +7469,7 @@ class Client:
             print(f"  {CLR['green']}•{CLR['reset']} {cap}")
 
     def _cmd_audit(self, parts):
-        """audit [N] | audit chat [N]
+        """audit [N] | audit chat [N] | audit verify
 
         No arguments: show the last 50 non-chat entries.
         audit N:      show the last N non-chat entries (1-500).
@@ -6843,6 +7484,18 @@ class Client:
         """
         limit = 50
         action_filter = None
+        if len(parts) > 1 and parts[1].lower() == 'verify':
+            full = len(parts) > 2 and parts[2] == '--full'
+            try:
+                r = self.tp.post('/api/v1/audit/verify',
+                                 {'full': full})
+            except Exception as exc:
+                print(f"{CLR['red']}audit verify: {exc}{CLR['reset']}")
+                return
+            mark = (f"{CLR['green']}ok{CLR['reset']}" if r.get('ok')
+                    else f"{CLR['red']}FAILED{CLR['reset']}")
+            print(f"  chain {mark} — {r.get('message')}")
+            return
         if len(parts) > 1:
             sub = parts[1].lower()
             if sub == 'chat':
@@ -6980,6 +7633,10 @@ class Client:
             self._cmd_enablepriv(parts)
         elif op == 'migrate':
             self._cmd_migrate(parts)
+        elif op == 'update':
+            self._cmd_update(parts)
+        elif op in ('persist', 'privesc', 'fork', 'stomp', 'unhook'):
+            self._dispatch_task(parts)
         elif op == 'shell':
             self._cmd_shell(parts)
         elif verb == 'sh' and len(parts) > 1 \
@@ -7044,7 +7701,6 @@ class Client:
         which strips the ANSI codes and renders the message as a
         wrapped label inside a modal dialog with Yes/No buttons.
         Same call, both frontends."""
-        c = CLR
         line = ' '.join(parts)
         prompt = (
             f"\n"
@@ -8107,7 +8763,6 @@ class Client:
 
         mode = 'plain'
         agent_args = []
-        disable = False
 
         for a in args:
             low = a.lower()
@@ -8121,7 +8776,6 @@ class Client:
                 agent_args.append('--all')
             elif a in ('--disable', '-d'):
                 agent_args.append('--disable')
-                disable = True
             elif a.startswith('-'):
                 print(f"{c['red']}enablepriv: unknown option "
                       f"{a!r}{c['reset']}")
@@ -10235,6 +10889,9 @@ code {{ background: var(--code-bg); border-radius: 3px;
         """graph [tree|flat|summary|path <a> <b>]"""
         sub = parts[1].lower() if len(parts) > 1 else 'tree'
         payload = {'mode': sub}
+        if '--model' in parts:
+            payload['source'] = 'model'
+            parts = [x for x in parts if x != '--model']
         if sub == 'path' and len(parts) >= 4:
             try:
                 payload['src'] = int(parts[2])
@@ -11145,8 +11802,13 @@ code {{ background: var(--code-bg); border-radius: 3px;
         target_arg = parts[1]
         extra_args = parts[2:]
 
+        # --- Case 0: operator armory ---
+        inst = self._armory_lookup(target_arg)
+        if inst is not None:
+            coff, fmt = inst
+            source_label = f"armory:{target_arg}"
         # --- Case 1: local file ---
-        if os.path.isfile(target_arg):
+        elif os.path.isfile(target_arg):
             try:
                 with open(target_arg, 'rb') as fh:
                     coff = fh.read()

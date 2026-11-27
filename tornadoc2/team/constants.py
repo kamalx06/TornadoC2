@@ -38,6 +38,8 @@ ROLE_CAPABILITIES = {
         'listener.view',
         'listener.manage',
         'listener.delete',
+        'armory.view',
+        'armory.manage',
     }),
     'guardian': frozenset({
         'commands.list',
@@ -74,6 +76,8 @@ ROLE_CAPABILITIES = {
         'listener.view',
         'listener.manage',
         'listener.delete',
+        'armory.view',
+        'armory.manage',
     }),
     'local': frozenset({
         'beacon.list', 'beacon.info', 'beacon.use', 'beacon.forget',
@@ -95,6 +99,8 @@ ROLE_CAPABILITIES = {
         'listener.view',
         'listener.manage',
         'listener.delete',
+        'armory.view',
+        'armory.manage',
     }),
 }
 

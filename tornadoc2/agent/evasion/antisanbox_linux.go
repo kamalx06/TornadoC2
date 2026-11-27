@@ -1,4 +1,4 @@
-//go:build linux
+//go:build ev_antisanbox && linux
 
 package evasion
 
@@ -11,7 +11,7 @@ import (
 	"strings"
 )
 
-func SandboxDetected() bool {
+func detectSandbox() bool {
 	score := 0
 
 	// High confidence.
@@ -284,3 +284,5 @@ func containerMarkers() bool {
 	}
 	return false
 }
+
+func init() { sandboxFns = append(sandboxFns, detectSandbox) }

@@ -1,9 +1,8 @@
-//go:build windows
+//go:build (ev_amsi || ev_etw) && windows
 
 package evasion
 
 import (
-	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -304,22 +303,4 @@ func RevertWindowsEvasion() error {
 		return fmt.Errorf("revert: %s", strings.Join(errs, "; "))
 	}
 	return nil
-}
-
-func ApplyWindowsEvasion(amsi, etw bool) error {
-	var errs []error
-	if amsi {
-		if err := PatchAMSIWithMethod(AMSIBoth); err != nil {
-			errs = append(errs, err)
-		}
-	}
-	if etw {
-		if err := PatchETWWithMethod(ETWAll); err != nil {
-			errs = append(errs, err)
-		}
-	}
-	if len(errs) == 0 {
-		return nil
-	}
-	return fmt.Errorf("evasion: %w", errors.Join(errs...))
 }

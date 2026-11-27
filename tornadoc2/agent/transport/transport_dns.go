@@ -1,3 +1,5 @@
+//go:build t_dns
+
 package transport
 
 import (
@@ -322,3 +324,12 @@ func (t *dnsTransport) PostResult(r Result, wire *WireSession) error {
 }
 
 func (t *dnsTransport) Close() error { return nil }
+
+func init() {
+	register("dns", func(o Options) (protocol.Transport, error) {
+		if o.DNSDomain == "" {
+			return nil, fmt.Errorf("transport=dns but no DNSDomain")
+		}
+		return NewDNSTransport(o.DNSDomain, o.DNSResolver)
+	})
+}

@@ -30,6 +30,7 @@ func GatherIdentity(cfg Config) protocol.Identity {
 		OS:           platformName,
 		Arch:         runtime.GOARCH,
 		Proto:        1,
+		AgentVersion: cfg.AgentVersion,
 		KillDays:     cfg.KillDays,
 		WorkStart:    cfg.WorkHoursStart,
 		WorkEnd:      cfg.WorkHoursEnd,

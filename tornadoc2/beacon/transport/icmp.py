@@ -22,7 +22,6 @@ differ enough that a second implementation is a project of its own.
 
 from __future__ import annotations
 
-import base64
 import json
 import os
 import socket
@@ -30,7 +29,7 @@ import struct
 import threading
 import time
 
-from .dns import DNSTransport, _b64d, _HEX4, _HEX8
+from .dns import DNSTransport, _HEX4, _HEX8
 
 _ICMP_ECHO_REPLY = 0
 _ICMP_ECHO_REQUEST = 8

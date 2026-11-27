@@ -431,15 +431,19 @@ BOF and .NET assembly execution are Windows-only.
 | **Command execution** | `exec` spawns a child process · `sh` routes a command through a stdin-piped shell so the command never appears in argv · `shell` holds a `/bin/sh` (Linux) or `cmd.exe` (Windows) alive across check-ins so `cd`, `env`, and shell variables persist between commands. **Bad opsec** — the client warns and confirms before starting one. `sh` is the recommended form for one-off commands; `shell` is for sessions where state persistence is worth a long-lived child process on the target |
 | **In-memory payloads** | `execmem <path> exe` on Windows — in-process Go PE loader: maps the image, resolves imports, applies base relocations, walks the TLS directory, executes the entry point; no PowerShell, no temp file · `execmem <path> elf` on Linux (`memfd_create`, `/dev/shm` fallback) · `execute-assembly <local.exe>` runs a .NET assembly by spawning a **sacrificial worker process**. The worker hosts the CLR, loads the target with `Assembly.Load(byte[])`, and captures stdout/stderr. When the target calls `Environment.Exit` — the Sharp* family does, at the end of `Main` — the worker dies and the beacon survives. Only a fixed, non-secret bootstrap touches disk, and only under `%TEMP%` with `FILE_FLAG_DELETE_ON_CLOSE`. The sacrificial binary is settable per-session with the `spawnto` verb; the default is a fresh copy of the beacon binary · On-disk source unlinked before invocation on every path |  
 | **Inline scripts** | `pyexec`, `psexec`, `shexec` deliver script source base64-encoded in the task and pipe it to `python3 -`, `powershell.exe -Command -`, or `/bin/sh -s` via stdin · Source never appears in argv · `--stdin` variant reads the source from the operator's terminal in paste mode |
+| **Execution** | `fork` spawns a second independent beacon and leaves the parent alive; `stomp` writes shellcode into the executable section of a signed loaded module and starts it (`ev_stomp`), and also runs a PE or BOF payload (`stomp --pe|--bof <path>`); `update` downloads a binary, verifies SHA-256 **and an ECDSA signature**, keeps a `.old` rollback and restarts (`update publish <build_id>` signs a staged build) |
+| **Model & exports** | Versioned engagement store (schema 2, newer schema refused with a clear error, corrupt file kept as `.corrupt`): hosts, users, shares, services, findings, evidence with SHA-256 and provenance · `model`, `evidence`, `findings … --ev`, `timeline`, `export ioc|stix|mitre|report`, `bulk task|tag|untag|kill` · dataset-hashed, injection-safe reports and exports (CSV formula neutralised, Markdown escaped, STIX uses real SCO patterns), `since`-based model polling · evidence can link a loot digest, bulk rejects >500 ids and reports per-item failures, graph projection from the stored model (`graph --model`) |
+| **Jump** | Windows lateral movement over a fresh stager for a running TLS HTTP listener · `jump psexec` (ADMIN$ + SCM, stager built with the service host), `jump winrm` (WSMan), `jump wmi` (`Win32_Process.Create` via `wmic`, falling back to CIM), `jump scshell` (remote SCM binary-path swap) · Current token or explicit `--user/--pass`, cleanup by default · Each method is a build tag (`jump_psexec`, `jump_winrm`, `jump_wmi`, `jump_scshell`) |
+| **Armory** | Operator-local BOF catalogue backed by `github.com/kamalx06/tornadoc2-armory` · `armory list-all/list-installed/show/install/uninstall/update` · One `help` line, not a BOF dump · SHA-256 verified, installed under `client/.tornadoc2/armory`, never added to the shared server registry · `.cna` stored, `.o` used by `bof <name>` |
 | **BOF / COFF** | Windows-only execution · `bofs` (main-scope) manages the **shared server-side registry** — `list`, `add`, `remove` · `bof` (beacon-scope) runs a registered BOF by name, or a local `.o` file by path · Arguments packed according to the BOF's declared `bof_pack` format when one is registered, falling back to a single space-joined `z` string · The registry is persisted to `logs/.tornadoc2_bofs.json`, with raw COFF bytes under `bofs/<name>.o` · Server never executes the bytes — the beacon's in-process Go COFF loader does |
 | **C2 profile catalogue** | `c2-profiles` (alias `c2p`) lists every profile the server can build against, with the fields an operator needs to pick one — the three request paths, the User-Agent, and the shaping roles the profile declares · `c2-profiles <name>` prints the raw JSON so it can be copied as a starting point for a new profile or pasted into a build config · Thirty profiles ship in-tree covering enterprise SaaS (Teams, Slack, Salesforce, ServiceNow-adjacent APIs), developer infrastructure (GitHub, GitLab, Stripe, Sentry-adjacent APIs), and consumer applications (Instagram, TikTok, Netflix, YouTube), plus a dedicated DNS-transport profile · **Multi-profile handler.** The listener builds a per-path shape map at startup and serves every profile under `profiles/c2/` concurrently. Agents built against different profiles coexist on one handler, each getting the shape its own profile declared — same port, same certificate, same process. No team-server restart to change profiles, no second listener for a second fingerprint, no "active profile" state. Contrast with Cobalt Strike, Sliver, Havoc, and Brute Ratel, which all bind one profile per team server. Thirty profiles ship in-tree; the handler scales to any number without architectural change
 | **Scheduling** | Configurable sleep interval and jitter · Re-check-in on session expiry · Kill date enforcement · Working-hours window · Server-side recurring tasks with persistent storage and optional output retention |
 | **Cryptography** | ECDSA P-256 task signing · ECDSA result signing · ECDSA identity signing at check-in · P-256 ECDH wire key agreement · Trust-on-first-use public key pinning per session |
 | **OPSEC** | Compile-time evasion profiles · Anti-sandbox, anti-debug, anti-VM heuristics · AMSI/ETW patching · Sleep mask with four modes: `rc4` and `aes-ctr` on Linux and Windows, `cronos` and `hwbp` on Windows amd64 · No kernel timer, no APC, no new thread in either Windows mode · Indirect syscalls · Self-deletion of the on-disk binary · String obfuscation · Garble · UPX · Shell history suppression · Jittered first check-in |
 | **Chunked transfer** | Upload: `truncate` / `writechunk` / `sha256file` · Download: `filesize` / `readchunk` / `sha256file` · 256 KiB base chunk size, jittered within `[base/2, base]` · **Pipelined, 16 chunks in flight** so the beacon's task queue is never idle · **Runs on a background worker thread** — the prompt stays live and no per-chunk output floods the terminal · `jobs` lists active transfers, `jobs kill <id>` cancels · Local and remote SHA-256 verified · On a verified download, pushes to the loot store automatically |
-| **Extensions** | WASM extension host with a four-function ABI · wazero interpreter, no JIT to `PROT_EXEC` · 16 MiB memory ceiling per module · Runtime push, hot-swap, and unload over the ECDSA-signed task channel · Sub-verbs: `list`, `info`, `load`, `unload`, `list-loaded`, `call` |
+| **Extensions** | Versioned WASM ABI v1 · wazero interpreter, no JIT to `PROT_EXEC` · 2 MiB module cap, 16 MiB memory cap, 5 s deadline, forced close on timeout · Error-correct host imports · Runtime push, hot-swap, unload and `info` over the signed task channel · Compiled only with `--wasm-extensions` |
 | **Staged payloads** | A ~4 MB stager that checks in, fetches a full agent, decrypts it in memory, and executes it · Linux uses `memfd_create` with a `/dev/shm` fallback · Windows uses `FILE_FLAG_DELETE_ON_CLOSE` · Optional AES-256-GCM per-payload encryption · ECDSA signature verification on the served payload |
-| **Build system** | `beacon-build` — wizard, non-interactive flags, or a JSON config file · Per-build selection of OPSEC profile, C2 profile, TLS fingerprint, transport, kill days, work hours, mTLS bundle · Config-file builds override evasion toggles one key at a time |
+| **Build system** | `beacon-build` — wizard, non-interactive flags, or a JSON config file · Per-build selection of OPSEC profile, C2 profile, TLS fingerprint, transport, kill days, work hours, mTLS bundle · **Feature-pruned**: unused transports, evasion, sleep masks, WASM and Jump code are excluded by build tags · `tags=all` reproduces the full agent |
 | **Remote build** | Operators with `beacon.build` compile from their own client · The server does the compile and streams the binary in 512 KiB chunks · Path whitelist prevents reading arbitrary files · Rate-limited per operator · Audited with the binary's SHA-256 |
 | **Remote operator management** | Admin operators can list, add, remove, set-role, reset passwords for, and export config files for viewer and operator accounts over the API · Admin accounts are protected: they can only be created, removed, demoted, or have their password reset from the local console · Every mutation is audited with a role-aware vocabulary |
 | **Operator password** | Optional second factor per operator · scrypt (N=131072, r=8, p=1, dklen=32) with a **per-operator random salt** generated by the server at operator creation and rotated on every password change · Client prompts once per session, derives the same key, and HMAC-signs every request over `ts ‖ nonce ‖ path` · Server enforces ±300 s timestamp window · Config carries `auth_algo`, `auth_params`, and `auth_salt` for cross-version compatibility |
@@ -459,6 +463,8 @@ BOF and .NET assembly execution are Windows-only.
 | **SOCKS5 pivot** | Client-side SOCKS5 listener on the operator's `127.0.0.1` · Tunnel carries bytes over the operator API to the team server · Team server bridges to a beacon dial-back on the pivot listener · Beacon opens the target connection from the target's network |
 | **Session graph** | Engagement map of shared user/domain/subnet, relay and process parentage, privilege, elevation, integrity and session · Text modes `tree`, `flat`, `summary`, `path` and a JSON mode for the GUI graph · Privilege collected at every check-in |
 | **Desktop notifications** | New beacon check-in, kill-deadline proximity, scheduled-task completion · Backends: `notify-send`, `terminal-notifier`, AppleScript, `ntfy.sh` |
+| **Infrastructure** | `scripts/redirector.py` emits hardened nginx (SNI passthrough or TLS termination), Caddy and Cloudflare Worker configs with a host allowlist and 421 default · listener health prober (TLS + `/health`, 3-strike `ok→degraded→down`, cert expiry, history, `listener-health` webhook, `listeners health` / `health --probe`) |
+| **GUI console** | Virtualised tables (10k rows; `scripts/gui-bench.py` gates render and scroll), bounded background runner with timeouts, multi-select bulk bar, fuzzy palette with recents, toasts, light/compact modes, editable keybindings, saved workspace and `--safe` start |
 | **AI console and MCP server** | `beacon-client.py ai` opens an agent loop backed by the operator's own provider — `anthropic`, `openai`, `openrouter`, `gemini`, `groq`, `ollama`, `claude_code`, or `claude_code`'s one-shot synthesis mode. Configuration lives at `<repo>/client/.tornadoc2/ai.json` (0600) on the workstation and never leaves it; `ai config` and GUI `Edit › AI settings` edit it without hand-written JSON. Forty-three tools across three tiers — 16 read-only, 18 safe-mutation, 9 approval-gated. Every Tier-3 call (`kill_beacon`, `killall_beacons`, `run_bof`, `creds_reveal`, `creds_validate`, file transfer, screenshot) prompts for a per-tool confirmation word before dispatch; `kill_beacon` requires the exact beacon ID, `killall_beacons` requires `yes` followed by the match count. The `mcp_allow_verbs` and `mcp_allow_bofs` allowlists bound the AI's mutation scope; a verb not on the list is refused by the dispatcher before the task reaches the queue. `python -m tornadoc2_mcp` exposes the Tier-1 and Tier-2 tools over stdio for external MCP clients — the Tier-3 tools are deliberately absent because the approval prompt has nowhere to appear in the MCP protocol. Listener lifecycle is fully exposed (list, get, create, start, stop, update, delete); create and delete are gated by `mcp_allow_listener_create` / `mcp_allow_listener_delete`, both `false` by default. **No server-side change**: the AI console and MCP server consume the same `.cfg` the CLI does |
 
 **Not supported:**Interactive streaming sessions or plugin execution
@@ -890,10 +896,137 @@ On kill or kill-deadline:
 - **Windows.** The file is opened with `FILE_FLAG_DELETE_ON_CLOSE`.
 - **Best-effort.** A page of `.text` is zeroed before exit.
 
+### Jump
+
+`jump <method> <host>` asks the server for a fresh stager for a
+running TLS HTTP listener, then delivers and starts it:
+
+- `psexec` — copy to `ADMIN$`, create/start/delete a service.
+- `winrm` — WSMan upload and remote invocation (5986 TLS, 5985 plain).
+- `wmi` — `Win32_Process.Create` via `wmic`, temp payload under `%TEMP%`.
+- `scshell` — remote SCM `ChangeServiceConfig` path swap and restore.
+
+Credentials come from the current token or `--user/--pass`
+(`LogonUser` with new credentials, reverted afterwards). Cleanup is
+default; `--no-cleanup` keeps the service and payload. Each method is
+compiled only with its `jump_*` tag. Jump requires a TLS HTTP listener.
+
+### Armory
+
+`armory` installs BOFs into operator-local storage from
+`github.com/kamalx06/tornadoc2-armory`:
+
+```
+armory list-all | list-installed | show <name>
+armory install <name...> | all
+armory uninstall <name...>
+armory update
+```
+
+One `armory` line appears in `help`; the BOF list does not. Files live
+under `client/.tornadoc2/armory/installed/<name>/` with a per-operator
+`installed.json`, SHA-256 and format verification, and atomic writes.
+Installed `.o` files are usable as `bof <name>`. The shared server
+`bofs` registry is untouched. `.cna` scripts are stored and shown but
+not executed. `viewer` and `guardian` have no access.
+
+### Server hardening
+
+- **Credentials, notes, chat, loot, aliases, webhooks, listeners,
+  scheduler state and the engagement model are encrypted at
+  rest** with AES-256-GCM under `logs/at_rest.key` (0600). A copy of
+  that key is required to restore a backup. Files from older
+  revisions are read as plaintext and re-written encrypted; set
+  `TORNADOC2_AT_REST=off` to opt out, or `TORNADOC2_AT_REST_KEY` to
+  supply the key from outside the backup.
+- `audit verify` walks the suffix after the sealed checkpoint;
+  `audit verify --full` re-walks everything (run it on a schedule).
+- **Audit seal key and anchor** are written to `logs/audit/audit.key`
+  and `anchor.json`. `audit verify` (admin) walks chain, checkpoint and
+  anchor and reports the first failure. Keep the key off the log volume
+  with `TORNADOC2_AUDIT_KEY` and put the anchor elsewhere with
+  `TORNADOC2_AUDIT_ANCHOR`.
+- **Password-HMAC lockout.** Five bad HMACs from one operator lock
+  authentication for 30 s (`auth.lockout` in the audit chain), so the
+  password can be guessed online only slowly. No second device is
+  needed: mTLS, signed configs, nonce replay protection and cert
+  revocation are the factors.
+- `scripts/backup.sh` / `scripts/restore.sh` produce and check a
+  checksummed archive of audit, creds, notes, engagement, keys and
+  TLS material.
+
+### Assurance and release
+
+- `tests_py/` covers RBAC, listeners, routes, armory, at-rest
+  encryption, lockout and the engagement model; `go test` covers
+  protocol, transport, WASM and evasion.
+- `.github/workflows/ci.yml` runs server tests, race-enabled Go tests
+  on Linux, a Windows build with every Jump/WASM tag, and a protocol
+  fuzz pass.
+- `VERSION`, `CHANGELOG.md`, `.github/workflows/release.yml` and
+  `scripts/sbom.sh` provide tag-driven, checksummed releases with an
+  SBOM.
+- The armory index is signed with Ed25519. `scripts/armory-sign.py`
+  generates keys and signatures; the public key is compiled in
+  (`deploy/armory.pub`, private key `deploy/armory.key`). A missing or
+  tampered signature is refused. Forks set `TORNADOC2_ARMORY_KEYS`;
+  `off` restores the old advisory behaviour.
+- **Armory key rotation.** `scripts/armory-sign.py keygen` a new pair,
+  re-sign the index with the new key, publish both the index and
+  signature, then replace the tuple in `armory_verify.py` in the same
+  commit as the re-signed index. Keep the old key until every client
+  release in support has the new one. The private key in the repo is
+  for the public index only; a separate signer repo is better for
+  forks.
+
+### Feature-pruned builds
+
+Transport, evasion, sleep-mask, WASM and Jump code is selected by build
+tags. An HTTP-only build links no QUIC, WireGuard, DNS, WebSocket or
+wazero code; `tags=all` restores the full agent. Stagers always exclude
+WASM, BOF, .NET, PE-loader and Jump code.
+
+### Windows post-exploitation
+
+- `persist add registry|task|service <name>` installs a Run key,
+  scheduled task or service, after copying the binary to
+  `%LOCALAPPDATA%\Tornado`. `task:system` installs an onstart SYSTEM
+  task. `persist remove <method> <name>` cleans up. `service` needs the
+  `svc_host` tag and verifies the SCM reports RUNNING before returning
+  success.
+- **Call-stack spoofing** (`--stack-spoof`, tag `ev_stackspoof`,
+  default on for Windows) builds a synthetic kernel32/ntdll-shaped chain
+  before `NtCreateThreadEx`, `VirtualProtect` and `CreateThread`, so a
+  thread start or memory transition is not a single Go frame. Disable
+  per build with `stack_spoof: false`.
+- `unhook` (tag `ev_unhook`) restores `ntdll!` `.text` from
+  disk, removing EDR inline hooks before execution.
+- `stomp` (`ev_stomp`) avoids new private executable memory and supports `--restore` / `--force`.
+- `fork [--parent]` produces a second beacon without killing the first; `--parent` spawns under a shell-derived parent.
+- `update` verifies the payload digest and keeps a rollback copy.
+
+### Linux post-exploitation
+
+- `persist add systemd|cron|profile <name>` and `persist remove <name>`
+  install and clean up boot persistence. Each method is a build tag
+  (`persist_systemd`, `persist_cron`, `persist_profile`).
+- `privesc` reports effective capabilities, SUID/SGID files, sudo
+  rules, the Yama ptrace scope and container markers. Read-only.
+
 ### Extensions
 
-- **Sandboxed WASM.** Extensions load into a wazero interpreter.
-- **Four host functions, all read-only or write-only.**
+- **Sandboxed WASM, ABI v1.** Extensions load into the wazero
+  interpreter only when the agent was built with
+  `--wasm-extensions`. A module must export `run() -> i32` and, if it
+  exports it, `abi_version() == 1`.
+- **Limits.** 2 MiB module, 16 MiB memory, 8 MiB host read, 5 s
+  wall-clock deadline capped by the task timeout. A timed-out module
+  is closed, so an infinite loop cannot wedge the task worker.
+- **Error-correct imports.** `host_out`, `host_read`, `host_size`,
+  `host_env`, `host_args`, `host_err`, `host_time_ms` return bytes or
+  a negative error.
+- **Lifecycle.** `extension info` reports hash, size, ABI and loaded
+  state; failed reloads keep the working module.
 - **No binary hash change.** The agent binary is identical with zero
   extensions loaded and with fifty.
 
@@ -2972,6 +3105,16 @@ match the token on the child.
 7. **Operate normally.** `use <child-id>`, then any verb.
 
 ---
+
+## Documentation
+
+- [Operator handbook](docs/operator-handbook.md) — deploy, pivot,
+  report, tear down.
+- [Detection notes](docs/detection.md) — telemetry per feature and
+  known gaps.
+- [WASM extension ABI](docs/wasm-abi.md) — exports, imports, limits
+  and an example.
+- [Contributing](docs/contributing.md) — layout, rules and checks.
 
 ## Requirements & Installation
 

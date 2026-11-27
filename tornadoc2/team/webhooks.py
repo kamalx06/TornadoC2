@@ -28,6 +28,7 @@ from urllib.parse import urlparse
 _EVENT_KINDS = {
     'new-beacon', 'kill-deadline', 'schedule-complete',
     'beacon-identity-mismatch', 'beacon-signature-failure',
+    'listener-health',
 }
 
 _VALID_SEVERITIES = frozenset(('info', 'warn', 'crit'))
@@ -134,22 +135,16 @@ class WebhookStore:
     # ------ CRUD ------
 
     def _load(self) -> list:
+        from . import atrest
         try:
-            with open(self.path, 'r', encoding='utf-8') as fh:
-                d = json.load(fh)
+            d = atrest.load_json(self.path, [])
             return d if isinstance(d, list) else []
         except (OSError, ValueError):
             return []
 
     def _save(self, lst: list) -> None:
-        tmp = self.path + '.tmp'
-        with open(tmp, 'w', encoding='utf-8') as fh:
-            json.dump(lst, fh, indent=2)
-        os.replace(tmp, self.path)
-        try:
-            os.chmod(self.path, 0o600)
-        except OSError:
-            pass
+        from . import atrest
+        atrest.save_json(self.path, lst)
 
     def list(self, requester=None, *, is_admin=False) -> list:
         """Return hooks visible to the caller.

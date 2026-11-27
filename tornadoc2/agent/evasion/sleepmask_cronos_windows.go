@@ -1,4 +1,4 @@
-//go:build windows && amd64
+//go:build sleep_cronos && windows && amd64
 
 package evasion
 
@@ -165,3 +165,5 @@ func maskedSleepCronos(ms uint32) error {
 // cronosFiberEntry is the CreateFiber entry. Implemented in
 // sleepmask_cronos_windows_amd64.s; it never returns to Go.
 func cronosFiberEntry()
+
+func init() { maskFns["cronos"] = maskedSleepCronos }

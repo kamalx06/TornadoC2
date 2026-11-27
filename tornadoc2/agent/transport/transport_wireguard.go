@@ -1,3 +1,5 @@
+//go:build t_wireguard
+
 package transport
 
 import (
@@ -351,4 +353,16 @@ func (t *wgTransport) Close() error {
 		t.dev = nil
 	}
 	return nil
+}
+
+func init() {
+	register("wireguard", func(o Options) (protocol.Transport, error) {
+		if o.WGServerPubKey == "" || o.WGServerAddr == "" ||
+			o.WGAgentPrivKey == "" || o.WGTunnelIP == "" {
+			return nil, fmt.Errorf("transport=wireguard missing parameters")
+		}
+		return NewWireGuardTransport(o.WGServerPubKey, o.WGServerAddr,
+			o.WGAgentPrivKey, o.WGTunnelIP, o.WGInnerPort,
+			o.WGServerTunnelIP, o.Profile, o.TLSConfig, o.Shaping)
+	})
 }

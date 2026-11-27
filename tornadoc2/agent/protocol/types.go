@@ -11,6 +11,7 @@ type Identity struct {
 	WorkStart    int    `json:"work_start"`
 	WorkEnd      int    `json:"work_end"`
 	Stager       bool   `json:"stager,omitempty"`
+	AgentVersion string `json:"agent_version,omitempty"`
 	IdentityRole string `json:"identity_role,omitempty"`
 	LocalAddr    string `json:"local_addr,omitempty"`
 

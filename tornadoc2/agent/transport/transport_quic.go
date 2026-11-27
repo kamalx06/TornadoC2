@@ -1,3 +1,5 @@
+//go:build t_quic
+
 package transport
 
 import (
@@ -338,4 +340,10 @@ func (t *quicTransport) Close() error {
 	}
 	t.client.CloseIdleConnections()
 	return nil
+}
+
+func init() {
+	register("quic", func(o Options) (protocol.Transport, error) {
+		return NewQUICTransport(o.URL, o.Profile, o.TLSConfig, o.Shaping)
+	})
 }

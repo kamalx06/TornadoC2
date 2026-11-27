@@ -6,6 +6,8 @@ var (
 	DefaultURL      string
 	DefaultProfile  string
 	ServerPubKeyPem string
+	AgentVersion    string
+	StackSpoof      bool
 	ClientCertPem   string
 	ClientKeyPem    string
 	RootCAPem       string
@@ -62,6 +64,7 @@ var (
 	AntiSandboxEnabled     bool    = false
 	SleepMaskEnabled       bool    = false
 	AmsiBypass             bool    = false
+	Unhook                 bool    = false
 	EtwPatch               bool    = false
 	StringObfuscation      bool    = false
 	PpidSpoof              bool    = false

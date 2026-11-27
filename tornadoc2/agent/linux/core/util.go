@@ -306,154 +306,38 @@ func newAgent(cfg Config) (*Agent, error) {
 
 	for _, mode := range modes {
 		diag("[agent] building transport %q\n", mode)
-		switch mode {
-		case "dns":
-			if DNSDomain == "" {
-				return nil, errors.New("transport=dns but no DNSDomain")
-			}
-			dnsT, err := transport.NewDNSTransport(
-				DNSDomain, DNSResolver)
-			if err != nil {
-				return nil, err
-			}
-			a.transports = append(a.transports, dnsT)
-			a.transportNames = append(a.transportNames, "dns")
-			diag("[agent] dns transport ready zone=%q resolver=%q\n",
-				DNSDomain, DNSResolver)
-		case "doh":
-			if DNSDomain == "" {
-				return nil, errors.New("transport=doh but no DNSDomain")
-			}
-			dohTLS, err := BuildDoHTLSConfig(cfg)
-			if err != nil {
-				return nil, err
-			}
-			dohT, err := transport.NewDoHTransport(
-				DNSDomain, DoHResolver,
-				DoHHostHeader, DoHUserAgent, dohTLS)
-			if err != nil {
-				return nil, err
-			}
-			a.transports = append(a.transports, dohT)
-			a.transportNames = append(a.transportNames, "doh")
-			diag("[agent] doh transport ready zone=%q resolver=%q\n",
-				DNSDomain, DoHResolver)
-		case "icmp":
-			if !supportsICMP {
-				return nil, errors.New(
-					"transport=icmp is not implemented on Windows")
-			}
-			if ICMPHost == "" {
-				return nil, errors.New("transport=icmp but no ICMPHost")
-			}
-			icmpT, err := transport.NewICMPTransport(ICMPHost)
-			if err != nil {
-				return nil, err
-			}
-			a.transports = append(a.transports, icmpT)
-			a.transportNames = append(a.transportNames, "icmp")
-			diag("[agent] icmp transport ready host=%q\n", ICMPHost)
-		case "http":
-			tlsCfg, err := BuildTLSConfig(cfg)
-			if err != nil {
-				return nil, err
-			}
-			httpT, err := transport.NewHTTPTransport(
-				DefaultURL, a.profile, tlsCfg, a.shaping)
-			if err != nil {
-				return nil, err
-			}
-			a.transports = append(a.transports, httpT)
-			a.transportNames = append(a.transportNames, "http")
-			diag("[agent] http transport ready url=%q tls=%v\n",
-				DefaultURL, tlsCfg != nil)
-		case "quic":
-			tlsCfg, err := BuildTLSConfig(cfg)
-			if err != nil {
-				return nil, err
-			}
-			quicT, err := transport.NewQUICTransport(
-				DefaultURL, a.profile, tlsCfg, a.shaping)
-			if err != nil {
-				return nil, err
-			}
-			a.transports = append(a.transports, quicT)
-			a.transportNames = append(a.transportNames, "quic")
-			diag("[agent] quic transport ready url=%q\n", DefaultURL)
-		case "websocket":
-			url := WebSocketURL
-			if url == "" {
-				url = DefaultURL
-			}
-			if url == "" {
-				return nil, errors.New(
-					"transport=websocket but no callback URL " +
-						"is embedded (WebSocketURL and " +
-						"DefaultURL are both empty)")
-			}
-			tlsCfg, err := BuildTLSConfig(cfg)
-			if err != nil {
-				return nil, err
-			}
-			wsT, err := transport.NewWebSocketTransport(
-				url, a.profile, tlsCfg, a.shaping)
-			if err != nil {
-				return nil, err
-			}
-			a.transports = append(a.transports, wsT)
-			a.transportNames = append(a.transportNames, "websocket")
-			diag("[agent] websocket transport ready url=%q tls=%v\n",
-				url, tlsCfg != nil)
-		case "wireguard":
-			if WireGuardServerPubKey == "" {
-				return nil, errors.New(
-					"transport=wireguard requires " +
-						"WireGuardServerPubKey")
-			}
-			if WireGuardServerAddr == "" {
-				return nil, errors.New(
-					"transport=wireguard requires " +
-						"WireGuardServerAddr")
-			}
-			if WireGuardAgentPrivKey == "" {
-				return nil, errors.New(
-					"transport=wireguard requires " +
-						"WireGuardAgentPrivKey")
-			}
-			if WireGuardTunnelIP == "" {
-				return nil, errors.New(
-					"transport=wireguard requires " +
-						"WireGuardTunnelIP")
-			}
-			tlsCfg, err := BuildTLSConfig(cfg)
-			if err != nil {
-				return nil, err
-			}
-			wgT, err := transport.NewWireGuardTransport(
-				WireGuardServerPubKey,
-				WireGuardServerAddr,
-				WireGuardAgentPrivKey,
-				WireGuardTunnelIP,
-				WireGuardInnerPort,
-				WireGuardServerTunnelIP,
-				a.profile, tlsCfg, a.shaping)
-			if err != nil {
-				return nil, err
-			}
-			a.transports = append(a.transports, wgT)
-			a.transportNames = append(a.transportNames, "wireguard")
-			diag("[agent] wireguard transport ready "+
-				"server=%q tunnel=%q\n",
-				WireGuardServerAddr, WireGuardTunnelIP)
-		case "tcp":
-			return nil, errors.New(
-				"transport 'tcp' must be used alone, via TCPBindAddr")
-		case "tcprev":
-			return nil, errors.New(
-				"transport 'tcprev' must be used alone, via TCPRevTarget")
-		default:
-			return nil, fmt.Errorf("unknown transport: %s", mode)
+		opts := transport.Options{
+			URL:              DefaultURL,
+			WSURL:            WebSocketURL,
+			DNSDomain:        DNSDomain,
+			DNSResolver:      DNSResolver,
+			DoHResolver:      DoHResolver,
+			DoHHeader:        DoHHostHeader,
+			DoHUserAgent:     DoHUserAgent,
+			ICMPHost:         ICMPHost,
+			Profile:          a.profile,
+			Shaping:          a.shaping,
+			WGServerPubKey:   WireGuardServerPubKey,
+			WGServerAddr:     WireGuardServerAddr,
+			WGAgentPrivKey:   WireGuardAgentPrivKey,
+			WGTunnelIP:       WireGuardTunnelIP,
+			WGInnerPort:      WireGuardInnerPort,
+			WGServerTunnelIP: WireGuardServerTunnelIP,
 		}
+		if mode == "http" || mode == "quic" || mode == "websocket" ||
+			mode == "wireguard" || mode == "doh" {
+			tlsCfg, err := BuildTLSConfig(cfg)
+			if err != nil {
+				return nil, err
+			}
+			opts.TLSConfig = tlsCfg
+		}
+		t, err := transport.Build(mode, opts)
+		if err != nil {
+			return nil, err
+		}
+		a.transports = append(a.transports, t)
+		a.transportNames = append(a.transportNames, mode)
 	}
 	a.transportIndex = 0
 	a.transport = a.transports[0]
@@ -475,6 +359,14 @@ func newAgent(cfg Config) (*Agent, error) {
 		len(a.transports))
 	return a, nil
 }
+func timeoutFor(t protocol.Task) time.Duration {
+	n := t.Timeout
+	if n <= 0 || n > 60 {
+		n = 5
+	}
+	return time.Duration(n) * time.Second
+}
+
 func truncate(s string, n int) string {
 	if len(s) <= n {
 		return s

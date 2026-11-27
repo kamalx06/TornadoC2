@@ -17,7 +17,6 @@ before any log call could see them.
 import os
 import sys
 import time
-from pathlib import Path
 from threading import Lock
 
 from .paths import MCP_LOG, ensure_state_dir

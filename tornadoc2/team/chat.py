@@ -26,6 +26,7 @@ first connects is the forensic record of presence.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
@@ -337,6 +338,39 @@ class FileStore:
         self._rescan()
 
     @staticmethod
+    @staticmethod
+    def _seal_text(text: str, path: str = '') -> str:
+        from . import atrest
+        if not atrest.enabled():
+            return text
+        return 'E1:' + base64.b64encode(
+            atrest.encrypt(text.encode('utf-8'), path)).decode('ascii')
+
+    @staticmethod
+    def _unseal_text(line: str, path: str = ''):
+        from . import atrest
+        if not line.startswith('E1:'):
+            return line
+        try:
+            raw = base64.b64decode(line[3:])
+            return atrest.decrypt(raw, path).decode('utf-8')
+        except Exception:
+            return None
+
+    @classmethod
+    def _seal_obj(cls, obj, path: str = '') -> str:
+        return cls._seal_text(json.dumps(obj, ensure_ascii=False), path)
+
+    @classmethod
+    def _unseal_obj(cls, line: str, path: str = ''):
+        text = cls._unseal_text(line, path)
+        if text is None:
+            return None
+        try:
+            return json.loads(text)
+        except ValueError:
+            return None
+
     def is_valid_hash(h: str) -> bool:
         """True when h is exactly 64 lowercase hex characters.
         Called before any path is constructed from the hash, so
@@ -394,9 +428,8 @@ class FileStore:
                 meta_path = metas.get(h)
                 if meta_path:
                     try:
-                        with open(meta_path, 'r',
-                                  encoding='utf-8') as fh:
-                            meta = json.load(fh)
+                        from . import atrest
+                        meta = atrest.load_json(meta_path, {})
                         if isinstance(meta.get('owner'), str):
                             owner = meta['owner']
                         if isinstance(meta.get('ts'), (int, float)):
@@ -455,8 +488,11 @@ class FileStore:
             meta_path = path + '.meta'
             meta_tmp = meta_path + '.tmp'
             try:
+                from . import atrest
+                body = (atrest.encrypt(data, path)
+                        if atrest.enabled() else data)
                 with open(tmp, 'wb') as fh:
-                    fh.write(data)
+                    fh.write(body)
                     fh.flush()
                     os.fsync(fh.fileno())
                 os.replace(tmp, path)
@@ -465,15 +501,12 @@ class FileStore:
                 except OSError:
                     pass
 
-                with open(meta_tmp, 'w', encoding='utf-8') as fh:
-                    json.dump({
-                        'owner': uploaded_by or '',
-                        'ts':    time.time(),
-                        'name':  display_name or '',
-                    }, fh)
-                    fh.flush()
-                    os.fsync(fh.fileno())
-                os.replace(meta_tmp, meta_path)
+                from . import atrest
+                atrest.save_json(meta_path, {
+                    'owner': uploaded_by or '',
+                    'ts':    time.time(),
+                    'name':  display_name or '',
+                })
                 try:
                     os.chmod(meta_path, 0o600)
                 except OSError:
@@ -510,10 +543,12 @@ class FileStore:
         if not self.is_valid_hash(digest):
             return None
         path = os.path.join(self.base_dir, digest)
+        from . import atrest
         try:
             with open(path, 'rb') as fh:
-                return fh.read()
-        except OSError:
+                raw = fh.read()
+            return atrest.decrypt(raw, path) if atrest.enabled() else raw
+        except (OSError, ValueError):
             return None
 
     def delete(self, digest: str, requester: str) -> dict:
@@ -609,6 +644,11 @@ class FileStore:
 
 
 class ChatRoom:
+
+    _seal_text  = staticmethod(FileStore._seal_text)
+    _unseal_text = staticmethod(FileStore._unseal_text)
+    _seal_obj   = classmethod(FileStore._seal_obj.__func__)
+    _unseal_obj = classmethod(FileStore._unseal_obj.__func__)
 
     MAX_MESSAGES = 10000
     MAX_TEXT_LEN = 4096
@@ -755,14 +795,14 @@ class ChatRoom:
         try:
             path = os.path.join(self._persist_dir, 'chat.txt')
             with open(path, 'a', encoding='utf-8') as fh:
-                fh.write(self._render_human(msg, source_ip) + '\n')
+                fh.write(self._seal_text(
+                    self._render_human(msg, source_ip), path) + '\n')
         except OSError:
             pass
         try:
             path = os.path.join(self._persist_dir, 'chat.jsonl')
             with open(path, 'a', encoding='utf-8') as fh:
-                fh.write(json.dumps(msg, ensure_ascii=False)
-                         + '\n')
+                fh.write(self._seal_obj(msg, path) + '\n')
             self._writes_since_compact += 1
             if self._writes_since_compact >= self.COMPACT_EVERY_WRITES:
                 self._writes_since_compact = 0
@@ -835,7 +875,7 @@ class ChatRoom:
         max_id = 0
         for line in keep:
             try:
-                msg = json.loads(line)
+                msg = self._unseal_obj(line, path)
             except (ValueError, TypeError):
                 continue
             if not isinstance(msg, dict):
@@ -867,8 +907,7 @@ class ChatRoom:
         try:
             with open(tmp, 'w', encoding='utf-8') as fh:
                 for msg in messages:
-                    fh.write(json.dumps(msg, ensure_ascii=False)
-                             + '\n')
+                    fh.write(self._seal_obj(msg, path) + '\n')
                 fh.flush()
                 try:
                     os.fsync(fh.fileno())
@@ -1068,7 +1107,7 @@ class ChatRoom:
         parsed = []
         for line in lines[-self.MAX_PERSISTED_LINES:]:
             try:
-                msg = json.loads(line)
+                msg = self._unseal_obj(line, path)
             except (ValueError, TypeError):
                 continue
             if not isinstance(msg, dict):
@@ -1124,3 +1163,56 @@ class ChatRoom:
                 'set_at': time.time(),
             }
             return old, dict(self._topic)
+
+def migrate_persisted(persist_dir: str) -> int:
+    """Seal plaintext chat logs written before at-rest existed.
+
+    Returns the number of files changed. Safe to call at every
+    start; already sealed files are left alone.
+    """
+    from . import atrest
+    if not persist_dir or not atrest.enabled():
+        return 0
+    changed = 0
+    for name in ('chat.jsonl', 'chat.txt'):
+        path = os.path.join(persist_dir, name)
+        if not os.path.isfile(path):
+            continue
+        try:
+            lines = open(path, 'r', encoding='utf-8').read().splitlines()
+        except OSError:
+            continue
+        sealed = []
+        dirty = False
+        for line in lines:
+            if not line:
+                continue
+            if line.startswith('E1:'):
+                sealed.append(line)
+                continue
+            dirty = True
+            if name.endswith('.jsonl'):
+                try:
+                    obj = json.loads(line)
+                except ValueError:
+                    continue
+                sealed.append(ChatRoom._seal_obj(obj, path))
+            else:
+                sealed.append(ChatRoom._seal_text(line, path))
+        if not dirty:
+            continue
+        tmp = path + '.tmp'
+        try:
+            with open(tmp, 'w', encoding='utf-8') as fh:
+                for line in sealed:
+                    fh.write(line + '\n')
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp, path)
+            changed += 1
+        except OSError:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+    return changed

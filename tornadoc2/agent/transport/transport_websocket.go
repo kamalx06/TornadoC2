@@ -1,3 +1,5 @@
+//go:build t_websocket
+
 package transport
 
 import (
@@ -309,3 +311,16 @@ func (t *wsTransport) PostResult(r protocol.Result,
 }
 
 func (t *wsTransport) Close() error { return nil }
+
+func init() {
+	register("websocket", func(o Options) (protocol.Transport, error) {
+		url := o.WSURL
+		if url == "" {
+			url = o.URL
+		}
+		if url == "" {
+			return nil, fmt.Errorf("transport=websocket but no URL")
+		}
+		return NewWebSocketTransport(url, o.Profile, o.TLSConfig, o.Shaping)
+	})
+}

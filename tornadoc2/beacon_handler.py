@@ -27,7 +27,6 @@ Everything else in ``beacon/`` is self-contained.
 """
 
 import argparse
-import base64
 import os
 import signal
 import socket
@@ -36,7 +35,6 @@ import sys
 import threading
 import time
 
-import secrets
 
 from .constants import BEACON_COMMANDS, MAIN_COMMANDS
 from .session_log import SessionLogger           # noqa: F401  (beacon engine)
@@ -1894,7 +1892,9 @@ class BeaconHandler:
     # Build config file
 
     _EVASION_KEYS = (
-        'antisanbox', 'amsi_bypass', 'etw_patch', 'sleep_mask',
+        'antisanbox', 'amsi_bypass', 'etw_patch', 'unhook', 'stomp',
+        'stack_spoof',
+        'sleep_mask',
         'syscall_method', 'string_obfuscation', 'garble', 'upx',
         'ppid_spoof', 'antidebug', 'antivm', 'verbose',
     )

@@ -28,7 +28,7 @@ import os
 import struct
 
 from .. import errors, logging
-from ..dispatch import ToolContext, ToolResult
+from ..dispatch import ToolResult
 
 
 def _text_output(raw) -> str:

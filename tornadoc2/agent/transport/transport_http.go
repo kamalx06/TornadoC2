@@ -1,3 +1,5 @@
+//go:build t_http
+
 package transport
 
 import (
@@ -328,4 +330,10 @@ func extractEnvelope(resp *http.Response,
 	default:
 		return nil
 	}
+}
+
+func init() {
+	register("http", func(o Options) (protocol.Transport, error) {
+		return NewHTTPTransport(o.URL, o.Profile, o.TLSConfig, o.Shaping)
+	})
 }

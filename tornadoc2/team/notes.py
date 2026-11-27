@@ -1,3 +1,12 @@
+from __future__ import annotations
+
+import os
+import threading
+import time
+
+from . import atrest
+
+
 class NotesStore:
     """Per-beacon notes under <base>/bnotes/<bid>.json, plus a
     single engagement-wide list at <base>/notes.json."""
@@ -75,8 +84,7 @@ class NotesStore:
 
     def _load_list(self, path: str) -> list:
         try:
-            with open(path, 'r', encoding='utf-8') as fh:
-                d = json.load(fh)
+            d = atrest.load_json(path, [])
             if not isinstance(d, list):
                 raise ValueError(
                     f'expected list, got {type(d).__name__}')
@@ -98,11 +106,4 @@ class NotesStore:
             return []
 
     def _save_list(self, path: str, lst: list) -> None:
-        tmp = path + '.tmp'
-        with open(tmp, 'w', encoding='utf-8') as fh:
-            json.dump(lst, fh, indent=2)
-        os.replace(tmp, path)
-        try:
-            os.chmod(path, 0o600)
-        except OSError:
-            pass
+        atrest.save_json(path, lst, indent=2)

@@ -1,4 +1,4 @@
-//go:build windows
+//go:build ev_antidebug && windows
 
 package evasion
 
@@ -22,7 +22,7 @@ const (
 	processDebugFlags        = 0x1F
 )
 
-func DebuggerDetected() bool {
+func detectDebugger() bool {
 	signals := 0
 
 	if isDebuggerPresent() {
@@ -111,3 +111,5 @@ func ntQueryDebugFlags() bool {
 	}
 	return flags != 0
 }
+
+func init() { debugFns = append(debugFns, detectDebugger) }

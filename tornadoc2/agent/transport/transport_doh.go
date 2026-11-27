@@ -1,3 +1,5 @@
+//go:build t_doh
+
 package transport
 
 import (
@@ -370,4 +372,14 @@ func (t *dohTransport) PostResult(r protocol.Result,
 func (t *dohTransport) Close() error {
 	t.client.CloseIdleConnections()
 	return nil
+}
+
+func init() {
+	register("doh", func(o Options) (protocol.Transport, error) {
+		if o.DNSDomain == "" {
+			return nil, fmt.Errorf("transport=doh but no DNSDomain")
+		}
+		return NewDoHTransport(o.DNSDomain, o.DoHResolver,
+			o.DoHHeader, o.DoHUserAgent, o.TLSConfig)
+	})
 }

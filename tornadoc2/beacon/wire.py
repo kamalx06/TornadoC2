@@ -30,7 +30,6 @@ it exactly as before. Encryption is opt-in per build.
 
 import base64
 import hashlib
-import json
 import os
 import secrets
 

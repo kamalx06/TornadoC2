@@ -30,7 +30,6 @@ multiple hosts in one call. A single "yes" is too easy to type.
 from __future__ import annotations
 
 import enum
-import sys
 
 
 class ApprovalState(enum.Enum):

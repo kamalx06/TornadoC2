@@ -6,6 +6,9 @@
 mtls_certs/
 tls_certs/
 team_ca/
+armory.pub
+armory.key
+deploy/
 
 
 # ---------------------------------------------------------------------------
@@ -35,7 +38,9 @@ agent/*.exe
 agent/*.dll
 agent/*.so
 agent/*.dylib
-
+go.mod.*
+go.sum
+go.sum*
 beacon/bin/*
 
 # ---------------------------------------------------------------------------

@@ -19,7 +19,6 @@ on the next load, then transitions to ``'running'`` (or
 
 from __future__ import annotations
 
-import json
 import os
 import secrets
 import shutil
@@ -135,9 +134,9 @@ class ListenerManager:
         path = self._store_path
         if not os.path.isfile(path):
             return {}
+        from ..team import atrest
         try:
-            with open(path, 'r', encoding='utf-8') as fh:
-                raw = json.load(fh)
+            raw = atrest.load_json(path, None)
         except (OSError, ValueError) as exc:
             self._log(
                 f"cannot read {path}: {exc} -- starting empty",
@@ -179,29 +178,17 @@ class ListenerManager:
                 for c in self._listeners.values()
             ],
         }
-        body = json.dumps(data, indent=2, sort_keys=True)
+        from ..team import atrest
         path = self._store_path
         d = os.path.dirname(path)
         if d:
             os.makedirs(d, exist_ok=True)
-        tmp = path + '.tmp'
-        with open(tmp, 'w', encoding='utf-8') as fh:
-            fh.write(body)
-            fh.flush()
-            try:
-                os.fsync(fh.fileno())
-            except OSError:
-                pass
-        try:
-            os.chmod(tmp, 0o600)
-        except OSError:
-            pass
         if os.path.isfile(path):
             try:
                 shutil.copy2(path, path + '.bak')
             except OSError:
                 pass
-        os.replace(tmp, path)
+        atrest.save_json(path, data)
 
     def _persist_view(self, cfg):
         """Return the subset of a config that goes to disk."""

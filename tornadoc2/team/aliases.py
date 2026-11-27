@@ -8,7 +8,6 @@ each reconnect by the engine.
 
 from __future__ import annotations
 
-import json
 import os
 import re
 import threading
@@ -25,22 +24,16 @@ class AliasStore:
         os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
 
     def _load(self) -> dict:
+        from . import atrest
         try:
-            with open(self.path, 'r', encoding='utf-8') as fh:
-                d = json.load(fh)
+            d = atrest.load_json(self.path, {})
             return d if isinstance(d, dict) else {}
         except (OSError, ValueError):
             return {}
 
     def _save(self, d: dict) -> None:
-        tmp = self.path + '.tmp'
-        with open(tmp, 'w', encoding='utf-8') as fh:
-            json.dump(d, fh, indent=2, sort_keys=True)
-        os.replace(tmp, self.path)
-        try:
-            os.chmod(self.path, 0o600)
-        except OSError:
-            pass
+        from . import atrest
+        atrest.save_json(self.path, d)
 
     def _entry(self, data: dict, bid: int) -> dict:
         key = str(bid)

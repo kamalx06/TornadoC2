@@ -15,7 +15,6 @@ deadline. This avoids a thundering herd after a restart.
 
 from __future__ import annotations
 
-import json
 import os
 import threading
 import time
@@ -123,9 +122,9 @@ class Scheduler:
     def _load(self):
         if not os.path.isfile(self.path):
             return
+        from ..team import atrest
         try:
-            with open(self.path, 'r', encoding='utf-8') as fh:
-                data = json.load(fh)
+            data = atrest.load_json(self.path, [])
             if isinstance(data, list):
                 for d in data:
                     try:
@@ -137,13 +136,11 @@ class Scheduler:
             pass
 
     def _save(self):
+        from ..team import atrest
         try:
-            os.makedirs(
-                os.path.dirname(self.path) or '.', exist_ok=True)
-            with open(self.path, 'w', encoding='utf-8') as fh:
-                json.dump(
-                    [s.to_dict() for s in self._schedules.values()],
-                    fh, indent=2)
+            atrest.save_json(self.path,
+                             [s.to_dict()
+                              for s in self._schedules.values()])
         except OSError:
             pass
 

@@ -69,7 +69,6 @@ first refuses the next upload.
 from __future__ import annotations
 
 import hashlib
-import json
 import os
 import secrets
 import threading
@@ -91,6 +90,7 @@ class LootStore:
     UPLOAD_CHUNK_SIZE = 4 * 1024 * 1024
     UPLOAD_TTL        = 4 * 3600        # 4 hours
     MAX_INLINE_DOWNLOAD_BYTES = 512 * 1024 * 1024
+    MAX_ENCRYPT_BYTES = 64 * 1024 * 1024
 
     def __init__(self, base_dir: str):
         self.base_dir = base_dir
@@ -215,9 +215,8 @@ class LootStore:
                 meta_path = metas.get(h)
                 if meta_path:
                     try:
-                        with open(meta_path, 'r',
-                                  encoding='utf-8') as fh:
-                            meta = json.load(fh)
+                        from . import atrest as _ar
+                        meta = _ar.load_json(meta_path, {})
                         if isinstance(meta.get('owner'), str):
                             owner = meta['owner']
                         if isinstance(meta.get('ts'), (int, float)):
@@ -270,6 +269,11 @@ class LootStore:
 
         digest = hashlib.sha256(data).hexdigest()
         path = os.path.join(self.base_dir, digest)
+        from . import atrest
+        body = (atrest.encrypt(data, path)
+                if atrest.enabled() and size <= self.MAX_ENCRYPT_BYTES
+                else data)
+        stored = len(body)
 
         with self._lock:
             if digest in self._index:
@@ -283,10 +287,10 @@ class LootStore:
             if len(self._index) >= self.MAX_FILES:
                 raise ValueError(
                     f'loot store full ({self.MAX_FILES} files)')
-            if self._total_bytes + size > self.MAX_TOTAL_BYTES:
+            if self._total_bytes + stored > self.MAX_TOTAL_BYTES:
                 raise ValueError(
                     f'loot store full '
-                    f'({self._total_bytes + size} > '
+                    f'({self._total_bytes + stored} > '
                     f'{self.MAX_TOTAL_BYTES} bytes)')
 
             sp = (source_path or '')[:1024]
@@ -297,7 +301,7 @@ class LootStore:
             meta_tmp = meta_path + '.tmp'
             try:
                 with open(tmp, 'wb') as fh:
-                    fh.write(data)
+                    fh.write(body)
                     fh.flush()
                     os.fsync(fh.fileno())
                 os.replace(tmp, path)
@@ -306,17 +310,14 @@ class LootStore:
                 except OSError:
                     pass
 
-                with open(meta_tmp, 'w', encoding='utf-8') as fh:
-                    json.dump({
-                        'owner':         uploaded_by or '',
-                        'ts':            now,
-                        'name':          display_name or '',
-                        'source_path':   sp,
-                        'source_beacon': sb,
-                    }, fh)
-                    fh.flush()
-                    os.fsync(fh.fileno())
-                os.replace(meta_tmp, meta_path)
+                atrest.save_json(meta_path, {
+                    'owner':         uploaded_by or '',
+                    'ts':            now,
+                    'name':          display_name or '',
+                    'source_path':   sp,
+                    'source_beacon': sb,
+                    'enc':           len(body) != size,
+                })
                 try:
                     os.chmod(meta_path, 0o600)
                 except OSError:
@@ -337,7 +338,7 @@ class LootStore:
                 'source_path':   sp,
                 'source_beacon': sb,
             }
-            self._total_bytes += size
+            self._total_bytes += stored
             return {
                 'sha256':  digest,
                 'size':    size,
@@ -594,23 +595,24 @@ class LootStore:
                     os.chmod(final_path, 0o600)
                 except OSError:
                     pass
-                meta_tmp = meta_path + '.tmp'
+                from . import atrest
+                if atrest.enabled() and actual <= self.MAX_ENCRYPT_BYTES:
+                    raw = open(final_path, 'rb').read()
+                    tmp_enc = final_path + '.enc'
+                    with open(tmp_enc, 'wb') as fh:
+                        fh.write(atrest.encrypt(raw, final_path))
+                    os.chmod(tmp_enc, 0o600)
+                    os.replace(tmp_enc, final_path)
                 now = time.time()
-                with open(meta_tmp, 'w', encoding='utf-8') as fh:
-                    json.dump({
-                        'owner':         owner,
-                        'ts':            now,
-                        'name':          name,
-                        'source_path':   source_path,
-                        'source_beacon': source_beacon,
-                    }, fh)
-                    fh.flush()
-                    os.fsync(fh.fileno())
-                os.replace(meta_tmp, meta_path)
-                try:
-                    os.chmod(meta_path, 0o600)
-                except OSError:
-                    pass
+                atrest.save_json(meta_path, {
+                    'owner':         owner,
+                    'ts':            now,
+                    'name':          name,
+                    'source_path':   source_path,
+                    'source_beacon': source_beacon,
+                    'enc':           atrest.enabled()
+                                     and actual <= self.MAX_ENCRYPT_BYTES,
+                })
             except OSError:
                 raise
 
@@ -724,9 +726,16 @@ class LootStore:
         path = os.path.join(self.base_dir, digest)
         try:
             with open(path, 'rb') as fh:
-                return fh.read()
+                raw = fh.read()
         except OSError:
             return None
+        from . import atrest
+        if raw.startswith((b'T2ENC1\n', b'T2ENC2\n')):
+            try:
+                return atrest.decrypt(raw, path)
+            except ValueError:
+                return None
+        return raw
 
     def stat(self, digest: str):
         """Return a copy of one blob's index entry, or None."""
@@ -845,3 +854,44 @@ class LootStore:
     def count(self) -> int:
         with self._lock:
             return len(self._index)
+
+def migrate_blobs(base_dir: str) -> int:
+    """Encrypt plaintext blobs and sidecars from older revisions.
+
+    Bounded to blobs under the 64 MiB in-memory cap; larger blobs
+    stay plaintext and are reported by the caller.
+    """
+    from . import atrest
+    if not base_dir or not atrest.enabled():
+        return 0
+    changed = 0
+    try:
+        names = os.listdir(base_dir)
+    except OSError:
+        return 0
+    for name in names:
+        path = os.path.join(base_dir, name)
+        if name.endswith('.meta'):
+            try:
+                if atrest.migrate(path):
+                    changed += 1
+            except (OSError, ValueError):
+                pass
+            continue
+        if not LootStore.is_valid_hash(name):
+            continue
+        try:
+            if os.path.getsize(path) > LootStore.MAX_ENCRYPT_BYTES:
+                continue
+            raw = open(path, 'rb').read()
+            if raw.startswith(b'T2ENC1\n'):
+                continue
+            tmp = path + '.enc'
+            with open(tmp, 'wb') as fh:
+                fh.write(atrest.encrypt(raw, path))
+            os.chmod(tmp, 0o600)
+            os.replace(tmp, path)
+            changed += 1
+        except (OSError, ValueError):
+            pass
+    return changed

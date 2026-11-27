@@ -1,4 +1,4 @@
-//go:build windows
+//go:build ev_antivm && windows
 
 package evasion
 
@@ -23,7 +23,7 @@ const (
 	keyRead          = 0x20019
 )
 
-func InVM() bool {
+func detectVM() bool {
 	score := 0
 
 	// High confidence
@@ -289,3 +289,5 @@ func regKeyExists(path string) bool {
 	vmProcRegCloseKey.Call(h)
 	return true
 }
+
+func init() { vmFns = append(vmFns, detectVM) }

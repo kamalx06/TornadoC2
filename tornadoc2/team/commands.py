@@ -58,9 +58,13 @@ COMMANDS = [
         'capability': None,
         'category': None, 'scope': 'main', 'native': False,
     },
+    {'name': 'atrest', 'args': 'status | migrate',
+     'description': 'At-rest coverage report or forced migration.',
+     'capability': 'audit.read.all', 'category': None,
+     'scope': 'main', 'native': False, 'client_op': 'atrest'},
     {
         'name': 'audit', 'aliases': ['tail', 'show', 'read'],
-        'args': '[N] | chat [N]',
+        'args': '[N] | chat [N] | verify [--full]',
         'description': 'read your audit entries (or chat history)',
         'capability': 'audit.read.own',
         'category': None, 'scope': 'main', 'native': False,
@@ -122,6 +126,18 @@ COMMANDS = [
         'capability': 'listener.view',
         'category': None, 'scope': 'main', 'native': False,
         'client_op': 'listeners',
+    },
+    {
+        'name': 'armory', 'aliases': ['arm'],
+        'args': 'list-all | list-installed | show <name> | '
+                'install <name...>|all | uninstall <name...> | update',
+        'description': 'operator-local BOF catalogue. Installs into '
+                       'client/.tornadoc2/armory; `help` shows only this '
+                       'entry, not individual BOFs. Run `armory list-all` '
+                       'to browse.',
+        'capability': 'armory.view',
+        'category': None, 'scope': 'main', 'native': False,
+        'client_op': 'armory',
     },
     {
         'name': 'bofs', 'aliases': ['bf'],
@@ -595,6 +611,86 @@ COMMANDS = [
      'category': 'SESSION TOOLS',
      'scope': 'beacon', 'native': False,
      'client_op': 'graph'},
+    {'name': 'jump', 'aliases': ['jmp'],
+     'args': 'psexec|winrm|wmi|scshell <host> [--listener <id>] '
+             '[--service <name>] [--user <u>] [--pass <p>] '
+             '[--port 5986|5985] [--no-cleanup] [--timeout N]',
+     'description': 'Lateral movement using a fresh stager for a '
+                    'running HTTP listener. Windows only.',
+     'capability': 'beacon.use',
+     'category': 'SESSION TOOLS', 'scope': 'beacon',
+     'native': False, 'client_op': 'jump'},
+    {'name': 'unhook', 'args': '| revert',
+     'description': 'Restore ntdll .text from disk (removes EDR '
+                    'inline hooks) or put the hooked bytes back. '
+                    'Windows, ev_unhook tag.',
+     'capability': 'beacon.use', 'category': 'SESSION TOOLS',
+     'scope': 'beacon', 'native': False, 'client_op': 'unhook'},
+    {'name': 'stomp', 'args': '<shellcode_b64> [--dll name] [--force] | --restore | '
+             '--pe|--bof <path>',
+     'description': 'Write shellcode into an executable section of a '
+                    'signed loaded module and start it. Windows, '
+                    'ev_stomp tag.',
+     'capability': 'beacon.use', 'category': 'SESSION TOOLS',
+     'scope': 'beacon', 'native': False, 'client_op': 'stomp'},
+    {'name': 'fork', 'args': '[--parent]',
+     'description': 'Spawn a second independent beacon copy and '
+                    'leave the parent alive. Windows only.',
+     'capability': 'beacon.use', 'category': 'SESSION TOOLS',
+     'scope': 'beacon', 'native': False, 'client_op': 'fork'},
+    {'name': 'update', 'args': '<url> <sha256> <sig> [--no-restart] | publish <build_id>',
+     'description': 'Download, verify digest+signature and swap the '
+                    'agent binary, keeping a .old rollback copy. '
+                    '`publish` signs a staged build.',
+     'capability': 'beacon.use', 'category': 'SESSION TOOLS',
+     'scope': 'beacon', 'native': False, 'client_op': 'update'},
+    {'name': 'privesc', 'args': 'caps|suid|sudo|ptrace|container|summary',
+     'description': 'Linux local privilege reconnaissance. Read-only.',
+     'capability': 'beacon.use', 'category': 'SESSION TOOLS',
+     'scope': 'beacon', 'native': False, 'client_op': 'privesc'},
+    {'name': 'persist',
+     'args': 'list | add <linux: systemd|cron|profile | windows: '
+             'registry|task[:system]|service> <name> [--path X] | '
+             'remove <method> <name>',
+     'description': 'Boot persistence (Linux: systemd|cron|profile; '
+                    'Windows: registry|task|service). Methods are '
+                    'compiled only with their persist_* tag.',
+     'capability': 'beacon.use',
+     'category': 'SESSION TOOLS', 'scope': 'beacon',
+     'native': False, 'client_op': 'persist'},
+    {'name': 'model', 'args': '[users|shares|services|evidence]',
+     'description': 'Show the stored engagement model.',
+     'capability': 'beacon.list', 'category': 'SESSION TOOLS',
+     'scope': 'main', 'native': False, 'client_op': 'model'},
+    {'name': 'evidence', 'args': '<sha256> <name> <host> [detail] | --loot <digest> [host] [detail]',
+     'description': 'Record an evidence hash with provenance.',
+     'capability': 'beacon.use', 'category': 'SESSION TOOLS',
+     'scope': 'main', 'native': False, 'client_op': 'evidence'},
+    {'name': 'export', 'args': 'ioc|stix|mitre|report [path]',
+     'description': 'Export IOC CSV, STIX 2.1, MITRE map or the '
+                    'Markdown report.',
+     'capability': 'beacon.list', 'category': 'SESSION TOOLS',
+     'scope': 'main', 'native': False, 'client_op': 'export'},
+    {'name': 'bulk', 'args': 'task <ids> <verb> [args] | tag|untag <tag> <ids> '
+                             '| kill <ids>',
+     'description': 'Apply one action to many beacons, audited per '
+                    'beacon.',
+     'capability': 'beacon.use', 'category': 'SESSION TOOLS',
+     'scope': 'main', 'native': False, 'client_op': 'bulk'},
+    {'name': 'timeline',
+     'args': '[<kind> <text>]', 'description':
+     'Engagement timeline. With text, appends an entry.',
+     'capability': 'beacon.list', 'category': 'SESSION TOOLS',
+     'scope': 'main', 'native': False, 'client_op': 'timeline'},
+    {'name': 'findings',
+     'args': '[<severity> <host> <title> | <detail>]',
+     'description': 'List or add findings.',
+     'capability': 'beacon.use', 'category': 'SESSION TOOLS',
+     'scope': 'main', 'native': False, 'client_op': 'findings'},
+    {'name': 'report', 'args': '', 'description':
+     'Markdown engagement report to stdout.',
+     'capability': 'beacon.list', 'category': 'SESSION TOOLS',
+     'scope': 'main', 'native': False, 'client_op': 'report'},
     {'name': 'migrate',
      'args': '--self | <pid> | <process-name> [--method <name>]',
      'description': 'Detach a copy of the agent (--self), or inject '

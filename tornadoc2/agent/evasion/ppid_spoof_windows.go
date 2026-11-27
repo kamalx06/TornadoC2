@@ -68,32 +68,38 @@ func PPIDSpoof() (bool, error) {
 	if os.Getenv("_TNPP") == "1" {
 		return false, nil
 	}
+	_, err := SpawnSpoofed()
+	return err == nil, err
+}
 
+// SpawnSpoofed starts a copy of this binary under a shell-derived
+// parent and returns its PID. The caller decides whether to exit.
+func SpawnSpoofed() (uint32, error) {
 	parentPid, err := findSpoofParent()
 	if err != nil {
-		return false, err
+		return 0, err
 	}
 
 	hParent, err := openProcessForSpoof(parentPid)
 	if err != nil {
-		return false, err
+		return 0, err
 	}
 	defer procCloseHandle.Call(uintptr(hParent))
 
 	attrList, cleanupAttr, err := buildParentAttributeList(hParent)
 	if err != nil {
-		return false, err
+		return 0, err
 	}
 	defer cleanupAttr()
 
 	exePath, err := os.Executable()
 	if err != nil {
-		return false, fmt.Errorf("locate own executable: %w", err)
+		return 0, fmt.Errorf("locate own executable: %w", err)
 	}
 
 	envBlock, err := buildUnicodeEnvBlock()
 	if err != nil {
-		return false, err
+		return 0, err
 	}
 
 	return spawnWithSpoofedParent(exePath, envBlock, attrList)
@@ -174,10 +180,10 @@ func buildUnicodeEnvBlock() ([]uint16, error) {
 }
 
 func spawnWithSpoofedParent(exe string, envBlock []uint16,
-	attrList uintptr) (bool, error) {
+	attrList uintptr) (uint32, error) {
 	cmdLine, err := syscall.UTF16FromString(`"` + exe + `"`)
 	if err != nil {
-		return false, fmt.Errorf("encode command line: %w", err)
+		return 0, fmt.Errorf("encode command line: %w", err)
 	}
 
 	var si startupInfoExW
@@ -197,10 +203,10 @@ func spawnWithSpoofedParent(exe string, envBlock []uint16,
 		uintptr(unsafe.Pointer(&pi)),
 	)
 	if r == 0 {
-		return false, fmt.Errorf("CreateProcessW: %w", errno)
+		return 0, fmt.Errorf("CreateProcessW: %w", errno)
 	}
-
+	pid := pi.ProcessID
 	procCloseHandle.Call(uintptr(pi.Process))
 	procCloseHandle.Call(uintptr(pi.Thread))
-	return true, nil
+	return pid, nil
 }

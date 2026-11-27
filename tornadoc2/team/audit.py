@@ -1,18 +1,19 @@
 """Append-only hash-chained audit log.
 
-Every entry contains SHA-256 of the previous entry. The chain is
-anchored by an HMAC over the last entry, keyed by a per-run secret
-that lives only in memory. At startup the chain is verified; if it
-is broken the server refuses to start (overridable with a flag for
-recovery scenarios).
+Every entry contains SHA-256 of the previous entry. The tail is
+sealed with an HMAC checkpoint and a second anchor file, both keyed
+by a persistent server key in ``audit.key`` (0600). At startup the
+whole chain, affected checkpoints and the anchor are verified; if the
+chain is broken the server refuses to start (overridable with a flag
+for recovery scenarios).
 
-The per-run HMAC key is deliberately ephemeral. It protects against
-offline edits between server runs — an attacker who edits the log
-while the server is down cannot re-seal the chain because they do
-not know the key that will be generated on the next start. It does
-not protect against an attacker who has the key while the server is
-running, which is not part of the threat model (that attacker has
-already compromised the server process).
+The key is persisted so the seal survives restarts, which is what
+makes truncation detectable: deleting the last line without a fresh
+checkpoint leaves the anchor pointing past the file. Set
+``TORNADOC2_AUDIT_KEY`` (base64, 32 bytes) to keep the key off the
+log disk and ``TORNADOC2_AUDIT_ANCHOR`` to put the anchor on another
+volume. An attacker who edits the log while the server is down and
+does not have the key cannot re-seal it.
 """
 
 import hashlib
@@ -40,11 +41,13 @@ class AuditLog:
             self.base_dir, 'combined.log')
         self.checkpoint_path = os.path.join(
             self.base_dir, 'checkpoint.json')
-        self._seal_key = secrets.token_bytes(32)
+        self.anchor_path = (os.environ.get('TORNADOC2_AUDIT_ANCHOR')
+                            or os.path.join(self.base_dir, 'anchor.json'))
         self._lock = threading.Lock()
         self._last_hash = '0' * 64
 
         os.makedirs(self.base_dir, exist_ok=True)
+        self._seal_key = self._load_key()
 
         if os.path.isfile(self.combined_path):
             if verify_on_start:
@@ -64,6 +67,64 @@ class AuditLog:
                 else:
                     print('[AUDIT] verify skipped; no tail hash '
                           'found, starting a new chain')
+
+    def _load_key(self) -> bytes:
+        env = os.environ.get('TORNADOC2_AUDIT_KEY', '').strip()
+        if env:
+            import base64
+            try:
+                raw = base64.b64decode(env, validate=True)
+            except Exception as exc:
+                raise AuditChainError(f'bad TORNADOC2_AUDIT_KEY: {exc}')
+            if len(raw) != 32:
+                raise AuditChainError(
+                    'TORNADOC2_AUDIT_KEY must be 32 bytes')
+            return raw
+        path = os.path.join(self.base_dir, 'audit.key')
+        raw = b''
+        if not os.path.isfile(path):
+            raw = secrets.token_bytes(32)
+            try:
+                fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                             0o600)
+            except FileExistsError:
+                fd = -1
+                raw = b''
+            if fd != -1:
+                try:
+                    os.write(fd, raw)
+                finally:
+                    os.close(fd)
+        if not raw:
+            raw = open(path, 'rb').read()
+        if len(raw) != 32:
+            raise AuditChainError(f'{path} is not a 32-byte key')
+        return raw
+
+    def _mac(self, digest: str) -> str:
+        return hmac.new(self._seal_key, digest.encode(),
+                        hashlib.sha256).hexdigest()
+
+    def _write_anchor(self, last_hash: str) -> None:
+        try:
+            offset = os.path.getsize(self.combined_path)
+        except OSError:
+            offset = 0
+        payload = {'hash': last_hash, 'mac': self._mac(last_hash),
+                   'offset': offset, 'ts': time.time()}
+        for path in (self.checkpoint_path, self.anchor_path):
+            try:
+                tmp = path + '.tmp'
+                with open(tmp, 'w', encoding='utf-8') as fh:
+                    json.dump(payload, fh)
+                    fh.flush()
+                    try:
+                        os.fsync(fh.fileno())
+                    except OSError:
+                        pass
+                os.replace(tmp, path)
+            except OSError:
+                pass
 
     # ------------------------------------------------------------------
     # Write
@@ -117,16 +178,51 @@ class AuditLog:
     # ------------------------------------------------------------------
     # Verify
 
-    def verify(self) -> Tuple[bool, str]:
-        """Walk the chain and return (ok, message)."""
+    def verify(self, full: bool = False) -> Tuple[bool, str]:
+        """Verify the chain and the seals.
+
+        With a valid checkpoint the sealed prefix is trusted via its
+        MAC and only the suffix from the saved offset is walked, so
+        startup stays proportional to new entries rather than the
+        whole log. ``full=True`` walks every line.
+
+        The write lock is held for the duration; an append cannot be
+        observed half-written.
+        """
+        with self._lock:
+            return self._verify_locked(full)
+
+    def _verify_locked(self, full: bool) -> Tuple[bool, str]:
         if not os.path.isfile(self.combined_path):
+            if (os.path.isfile(self.checkpoint_path)
+                    or os.path.isfile(self.anchor_path)):
+                return False, 'log file is missing but a seal exists'
             return True, 'empty'
-        prev = '0' * 64
-        prev_prev = None
+
+        seed, start = '0' * 64, 0
+        legacy = False
+        cp = None
+        if not full and os.path.isfile(self.checkpoint_path):
+            try:
+                with open(self.checkpoint_path, encoding='utf-8') as fh:
+                    cp = json.load(fh)
+            except (OSError, ValueError):
+                cp = None
+            if cp is not None and self._seal_ok(cp, 'checkpoint'):
+                seed = str(cp.get('hash') or '')
+                start = int(cp.get('offset') or 0)
+            else:
+                cp = None
+
+        prev = seed
         count = 0
         try:
+            size = os.path.getsize(self.combined_path)
+            if start > size:
+                return False, 'checkpoint offset is past the log end'
             with open(self.combined_path, 'r',
                       encoding='utf-8', errors='strict') as fh:
+                fh.seek(start)
                 for lineno, line in enumerate(fh, 1):
                     line = line.strip()
                     if not line:
@@ -134,53 +230,74 @@ class AuditLog:
                     try:
                         entry = json.loads(line)
                     except ValueError:
+                        # A writer may have appended after the lock
+                        # in a previous process; only the very last
+                        # line can legitimately be partial.
+                        if fh.tell() == size:
+                            break
                         return False, f'line {lineno}: not JSON'
                     if entry.get('prev') != prev:
                         return False, (
                             f'line {lineno}: prev hash mismatch '
-                            f'(expected {prev[:16]}…, '
-                            f'got {str(entry.get("prev"))[:16]}…)')
+                            f'(expected {prev[:16]}…)')
                     claimed = entry.pop('hash', None)
-                    actual = self._entry_hash(entry)
-                    if claimed != actual:
-                        return False, (
-                            f'line {lineno}: entry hash mismatch')
-                    prev_prev = prev
+                    if claimed != self._entry_hash(entry):
+                        return False, f'line {lineno}: entry hash mismatch'
                     prev = claimed
                     count += 1
         except OSError as exc:
             return False, f'read error: {exc}'
+        if prev != '0' * 64:
+            entry, tail = self._read_tail_entry()
+            if tail != prev:
+                return False, 'tail line is missing from the log'
+            if entry is not None:
+                claimed = entry.get('hash')
+                if self._entry_hash(
+                        {k: v for k, v in entry.items()
+                         if k != 'hash'}) != claimed:
+                    return False, 'tail line was modified'
         self._last_hash = prev
 
-        if os.path.isfile(self.checkpoint_path):
+        for label, path in (('checkpoint', self.checkpoint_path),
+                            ('anchor', self.anchor_path)):
+            if not os.path.isfile(path):
+                continue
             try:
-                with open(self.checkpoint_path, 'r',
-                          encoding='utf-8') as fh:
-                    cp = json.load(fh)
-                cp_hash = cp.get('hash')
-
-                if cp_hash != prev and cp_hash != prev_prev:
-                    return False, (
-                        f'checkpoint hash '
-                        f'{str(cp_hash)[:16]}… does not match '
-                        f'chain tail {prev[:16]}…')
+                with open(path, encoding='utf-8') as fh:
+                    seal = json.load(fh)
             except (OSError, ValueError):
-                pass
+                return False, f'{label} is unreadable'
+            if seal.get('hash') != prev:
+                return False, (
+                    f'{label} hash {str(seal.get("hash"))[:16]}… does '
+                    f'not match chain tail {prev[:16]}…')
+            if not hmac.compare_digest(str(seal.get('mac') or ''),
+                                       self._mac(prev)):
+                if label == 'checkpoint' and not legacy:
+                    legacy = True
+                    continue
+                return False, f'{label} MAC mismatch'
+            if int(seal.get('offset') or 0) != size:
+                return False, f'{label} offset does not match log size'
 
-        return True, f'{count} entries, chain intact'
+        if legacy:
+            self._write_anchor(prev)
+        return True, f'{count} entries verified, chain intact'
+
+    def _seal_ok(self, seal: dict, label: str) -> bool:
+        h = str(seal.get('hash') or '')
+        return bool(h) and hmac.compare_digest(
+            str(seal.get('mac') or ''), self._mac(h))
 
     def _write_checkpoint(self, last_hash: str) -> None:
-        try:
-            mac = hmac.new(
-                self._seal_key, last_hash.encode(),
-                hashlib.sha256).hexdigest()
-            tmp = self.checkpoint_path + '.tmp'
-            with open(tmp, 'w', encoding='utf-8') as fh:
-                json.dump({'hash': last_hash, 'mac': mac,
-                           'ts': time.time()}, fh)
-            os.replace(tmp, self.checkpoint_path)
-        except OSError:
-            pass
+        self._write_anchor(last_hash)
+
+    def flush(self) -> None:
+        """Seal the current tail. Call on graceful shutdown."""
+        with self._lock:
+            if self._last_hash != '0' * 64:
+                self._write_anchor(self._last_hash)
 
     # ------------------------------------------------------------------
     # Helpers
@@ -190,6 +307,36 @@ class AuditLog:
         return ''.join(
             c if c.isalnum() or c in '-_.' else '_'
             for c in name)[:64] or 'unknown'
+
+    def _read_tail_entry(self):
+        """Return (last entry, its hash) or (None, None)."""
+        try:
+            with open(self.combined_path, 'rb') as fh:
+                fh.seek(0, os.SEEK_END)
+                size = fh.tell()
+                block = 4096
+                buf = b''
+                pos = size
+                while pos > 0:
+                    read = min(block, pos)
+                    pos -= read
+                    fh.seek(pos)
+                    buf = fh.read(read) + buf
+                    if buf.count(b'\n') > 1:
+                        break
+        except OSError:
+            return None, None
+        for line in reversed(buf.decode('utf-8', 'replace').splitlines()):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(entry, dict):
+                return entry, entry.get('hash')
+        return None, None
 
     def _read_tail_hash(self) -> Optional[str]:
         """Return the `hash` field of the last well-formed line in

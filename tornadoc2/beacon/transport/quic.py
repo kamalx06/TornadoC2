@@ -38,7 +38,6 @@ try:
 except ImportError:
     _AIOQUIC = False
 
-from .base import Transport
 
 
 class _H3ServerProtocol(QuicConnectionProtocol):

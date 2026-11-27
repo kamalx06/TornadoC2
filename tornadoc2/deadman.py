@@ -1292,12 +1292,11 @@ class DeadmanSwitch:
             if not crypto_erased:
                 workers = max(1, int(self.SHRED_WORKERS))
                 if workers == 1 or len(files) <= 1:
-                    results = [self._shred_file(p) for p in files]
+                    [self._shred_file(p) for p in files]
                 else:
                     with _futures.ThreadPoolExecutor(
                             max_workers=workers) as pool:
-                        results = list(pool.map(
-                            self._shred_file, files))
+                        list(pool.map(self._shred_file, files))
 
             shutil.rmtree(root, ignore_errors=True)
             return not os.path.exists(root)

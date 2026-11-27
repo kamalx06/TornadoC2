@@ -1,4 +1,4 @@
-//go:build windows && arm64
+//go:build (sleep_cronos || sleep_hwbp) && windows && arm64
 
 package evasion
 
@@ -12,4 +12,13 @@ func maskedSleepCronos(ms uint32) error {
 func maskedSleepHWBP(ms uint32) error {
 	time.Sleep(time.Duration(ms) * time.Millisecond)
 	return nil
+}
+
+func init() {
+	if _, ok := maskFns["cronos"]; !ok {
+		maskFns["cronos"] = maskedSleepCronos
+	}
+	if _, ok := maskFns["hwbp"]; !ok {
+		maskFns["hwbp"] = maskedSleepHWBP
+	}
 }

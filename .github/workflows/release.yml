@@ -1,0 +1,59 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  bootstrap:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: build Bootstrap.dll
+        working-directory: tornadoc2/agent
+        shell: pwsh
+        run: |
+          csc /nologo /target:library /out:native/Bootstrap.dll native/Bootstrap.cs
+          if ((Get-Item native/Bootstrap.dll).Length -lt 1024) {
+            throw 'Bootstrap.dll is empty'
+          }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bootstrap
+          path: tornadoc2/agent/native/Bootstrap.dll
+
+  build:
+    needs: bootstrap
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: bootstrap
+          path: tornadoc2/agent/native
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.8'
+      - name: build
+        working-directory: tornadoc2/agent
+        run: |
+          mkdir -p ../../dist
+          for os in linux windows; do
+            CGO_ENABLED=0 GOOS=$os GOARCH=amd64 \
+              go build -trimpath -tags 't_http' \
+              -o "../../dist/beacon_${os}_amd64" ./$os
+            CGO_ENABLED=0 GOOS=$os GOARCH=amd64 \
+              go build -trimpath -tags 't_http' \
+              -o "../../dist/stager_${os}_amd64" ./$os/stager
+          done
+      - name: sbom + checksums
+        run: |
+          ./scripts/sbom.sh dist/sbom.txt
+          (cd dist && sha256sum * > SHA256SUMS)
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+

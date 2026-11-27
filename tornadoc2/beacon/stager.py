@@ -9,10 +9,8 @@ key that is embedded in the stager at build time.
 from __future__ import annotations
 
 import hashlib
-import json
 import os
 import threading
-import time
 
 
 class PayloadRegistry:

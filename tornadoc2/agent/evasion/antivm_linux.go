@@ -1,4 +1,4 @@
-//go:build linux
+//go:build ev_antivm && linux
 
 package evasion
 
@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-func InVM() bool {
+func detectVM() bool {
 	score := 0
 
 	// High confidence
@@ -147,3 +147,5 @@ func vmSpecificPaths() bool {
 	}
 	return false
 }
+
+func init() { vmFns = append(vmFns, detectVM) }

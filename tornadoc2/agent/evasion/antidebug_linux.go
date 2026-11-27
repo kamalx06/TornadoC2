@@ -1,4 +1,4 @@
-//go:build linux
+//go:build ev_antidebug && linux
 
 package evasion
 
@@ -9,7 +9,7 @@ import (
 	"syscall"
 )
 
-func DebuggerDetected() bool {
+func detectDebugger() bool {
 	signals := 0
 
 	if tracerPidNonZero() {
@@ -107,3 +107,5 @@ func parentLooksLikeDebugger() bool {
 	}
 	return false
 }
+
+func init() { debugFns = append(debugFns, detectDebugger) }

@@ -7,7 +7,6 @@ import (
 	"reflect"
 	"runtime"
 	"syscall"
-	"time"
 	"unsafe"
 )
 
@@ -169,25 +168,6 @@ func maskedSleepStub(sleepExAddr uintptr, ms uint32)
 // The dispatcher routes rc4 and aes-ctr to the existing basic mask,
 // cronos and hwbp to their own files, and refuses ekko explicitly
 // so the name never silently degrades to AES-CTR.
-func MaskedSleep(maskType string, ms uint32) error {
-	switch maskType {
-	case "", "none":
-		time.Sleep(time.Duration(ms) * time.Millisecond)
-		return nil
-	case "rc4", "aes-ctr":
-		return maskedSleepBasic(maskType, ms)
-	case "cronos":
-		return maskedSleepCronos(ms)
-	case "hwbp":
-		return maskedSleepHWBP(ms)
-	case "ekko":
-		return fmt.Errorf(
-			"sleep mask %q is not implemented; use 'cronos' or 'hwbp'",
-			maskType)
-	default:
-		return fmt.Errorf("unknown sleep mask %q", maskType)
-	}
-}
 
 // maskedSleepBasic is the pre-existing rc4/aes-ctr path, renamed to
 // make room for the dispatcher above. Body unchanged.

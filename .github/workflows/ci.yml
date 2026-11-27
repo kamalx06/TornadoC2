@@ -1,0 +1,71 @@
+name: ci
+
+on:
+  push:
+    branches: [main, development]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  server-tests:
+    runs-on: ubuntu-latest
+    env:
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install flask cryptography dnslib ruff coverage PySide6-Essentials
+      - run: ruff check tornadoc2 client/tornado_client client/tornadoc2_mcp tests_py scripts
+      - run: coverage run --source=tornadoc2 -m unittest discover -s tests_py -v
+      - run: coverage report --omit='tornadoc2/agent/*' --fail-under=18 | tail -40
+      - run: python scripts/gui-bench.py
+
+  agent-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.8'
+          cache-dependency-path: tornadoc2/agent/go.sum
+      - working-directory: tornadoc2/agent
+        run: |
+          go build -tags 't_http' ./linux
+          go test -race ./protocol ./transport ./extensions ./evasion ./internal/peimg
+          go test -tags update ./internal/update
+          go test -run='^$' -tags 't_http t_dns t_doh t_quic t_websocket t_icmp t_wireguard wasm_host ev_antisanbox ev_antidebug ev_antivm ev_ppid ev_amsi ev_etw sleep_rc4 sleep_aes sleep_cronos sleep_hwbp persist_systemd persist_cron persist_profile persist_registry persist_task persist_service svc_host ev_unhook ev_stomp ev_stackspoof update jump_psexec jump_winrm jump_wmi jump_scshell' ./...
+
+  agent-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.8'
+          cache-dependency-path: tornadoc2/agent/go.sum
+      - name: build bootstrap DLL
+        working-directory: tornadoc2/agent
+        shell: pwsh
+        run: |
+          csc /nologo /target:library /out:native/Bootstrap.dll native/Bootstrap.cs
+          if ((Get-Item native/Bootstrap.dll).Length -lt 1024) {
+            throw 'Bootstrap.dll is empty'
+          }
+      - working-directory: tornadoc2/agent
+        run: |
+          go build -tags 't_http jump_psexec jump_winrm jump_wmi jump_scshell wasm_host persist_registry persist_task persist_service svc_host ev_unhook ev_stomp ev_stackspoof update' ./windows
+          go test ./protocol ./extensions
+
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.8'
+      - working-directory: tornadoc2/agent
+        run: go test -fuzz=FuzzTaskDecode -fuzztime=30s ./protocol
