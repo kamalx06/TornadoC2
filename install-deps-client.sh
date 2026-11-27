@@ -5,48 +5,32 @@ set -uo pipefail
 # --------------------------------------------------------------------
 # TornadoC2 — operator workstation dependency installer
 #
-# Installs the Python packages the operator client needs:
+# Installs what the operator client needs:
 #
 #   * cryptography   — required when the operator config is
 #                      signed (transport.py verifies the config
 #                      signature at load time). Also used by the
 #                      certificate-chain check in
 #                      `operators export`.
-#   * PySide6        — the GUI (`beacon-client.py --gui`). The
-#                      CLI does not import PySide6.
+#   * Node.js 26 LTS  — runs the Electron shell.
+#   * Electron       — built from client/desktop and installed
+#                      read-only under /opt/tornadoc2.
 #
-# And, optionally, the two packages the AI console and the
-# standalone MCP server need. Neither is installed by default:
+# And, optionally:
 #
-#   * httpx          — the HTTP client both the AI console and
-#                      the MCP server use to reach the provider
-#                      API. `--with-ai` installs it.
-#   * mcp            — the Model Context Protocol library the
-#                      standalone server speaks. `--with-mcp`
-#                      installs it and httpx.
+#   * httpx          — the AI console and MCP server HTTP client
+#                      (--with-ai).
+#   * mcp            — the Model Context Protocol library
+#                      (--with-mcp).
 #
-# An operator who never touches the AI feature pays no install
-# cost for either.
+# Electron needs the GTK/NSS/X11 runtime libraries, installed per
+# family below. Mesa/GBM is needed for GPU-less software rendering.
 #
-# And, on Linux, the Qt runtime libraries the PySide6 xcb and
-# wayland platform plugins load against. PySide6's wheel bundles
-# Qt itself but not the host's glibc, X11, Wayland, and OpenGL
-# dependencies.
-#
-# The X11 and Wayland runtime sets are selected independently:
-#
-#   --qt-libs x11       only the xcb platform plugin's deps
-#   --qt-libs wayland   only the wayland platform plugin's deps
-#   --qt-libs both      both
-#   --qt-libs none      neither (the GUI will not launch)
-#
-# The default is autodetected from the current session: a host
-# with WAYLAND_DISPLAY set installs only Wayland; a host with
-# only DISPLAY set installs only X11; a host with neither (a
-# headless install, or an SSH session with no forwarding yet)
-# installs both, on the assumption that the operator may connect
-# a display later.
-#
+# Node is pinned and verified against the publisher's SHASUMS256.txt;
+# an existing Node >= 26 on PATH is reused unless --force-node is
+# passed. Nothing is installed outside /opt/tornadoc2 and the distro
+# package manager.
+
 # The client does NOT need:
 #
 #   * the Go toolchain          (remote builds happen on the server)
@@ -84,10 +68,10 @@ set -uo pipefail
 #
 #   Windows         — not covered by this script. On Windows,
 #                     install Python from python.org and run:
-#                       pip install cryptography PySide6 pyreadline3
+#                       pip install cryptography pyreadline3
 #
 # Robustness contract. A system package that cannot be installed
-# does not abort the run. Each Qt runtime library is tried
+# does not abort the run. Each Electron runtime library is tried
 # individually; failures are recorded and named in the summary.
 # The Python packages are installed via pip, which is authoritative
 # and works on every supported platform regardless of what the
@@ -99,10 +83,6 @@ set -uo pipefail
 
 PIP_REQUIRED=(
     "cryptography"
-)
-
-PIP_GUI=(
-    "PySide6"
 )
 
 PIP_AI=(
@@ -119,38 +99,29 @@ PIP_MCP=(
 INSTALL_GUI=1
 INSTALL_AI=0
 INSTALL_MCP=0
+SKIP_NODE=0
+SKIP_DESKTOP_ENTRY=0
+FORCE_NODE=0
 VENV_PATH=""
 
-# Qt runtime library selection. Empty until autodetected or set by
-# flag. One of: x11, wayland, both, none.
-QT_LIBS=""
-
 usage() {
-    sed -n '2,80p' "$0" | sed 's/^# \{0,1\}//'
-    cat <<EOF
+    sed -n '5,78p' "$0" | sed 's/^# \{0,1\}//'
+    cat <<'EOF'
 
-Usage: $(basename "$0") [options]
+Usage: install-deps-client.sh [options]
 
 Options:
-  --qt-libs <mode>      Which Qt runtime libraries to install.
-                        One of:
-                          x11       only the xcb plugin's deps
-                          wayland   only the wayland plugin's deps
-                          both      both sets
-                          none      neither (the GUI will not
-                                    launch; the CLI still works)
-                        Default: autodetected from the current
-                        session. WAYLAND_DISPLAY set → wayland;
-                        only DISPLAY set → x11; neither → both.
+  --classic-gui         Accepted no-op (the Qt console is gone).
+  --qt-libs <mode>      Accepted no-op. x11, wayland, both, none.
+  --x11, --wayland      Accepted no-op aliases for the above.
+  --no-qt-libs          Accepted no-op alias.
 
-  --x11                 Shorthand for --qt-libs x11
-  --wayland             Shorthand for --qt-libs wayland
-  --no-qt-libs          Shorthand for --qt-libs none
+  --skip-node           Do not install Node.js; require >= 26 on PATH.
+  --force-node          Install the pinned Node even if a suitable
+                        one is already present.
+  --skip-desktop-entry  Do not write the .desktop launcher.
 
-  --no-gui, --minimal   Skip PySide6 and the Qt runtime libraries
-                        entirely. Equivalent to --qt-libs none
-                        plus not installing PySide6. Installs
-                        only what the CLI needs.
+  --no-gui, --minimal   CLI only: no Node and no Electron.
 
   --venv <path>         Install the Python packages into a
                         virtualenv at <path> instead of the system
@@ -177,9 +148,21 @@ EOF
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --skip-node)
+            SKIP_NODE=1; shift ;;
+        --force-node)
+            FORCE_NODE=1; shift ;;
+        --skip-desktop-entry)
+            SKIP_DESKTOP_ENTRY=1; shift ;;
+        --classic-gui|--qt-libs|--x11|--wayland|--no-qt-libs)
+            # Removed with the Qt console; accepted as no-ops.
+            case "$1" in
+                --qt-libs) shift ;;
+                --classic-gui|--x11|--wayland|--no-qt-libs) ;;
+            esac
+            shift ;;
         --no-gui|--minimal)
             INSTALL_GUI=0
-            QT_LIBS="none"
             shift
             ;;
         --with-ai)
@@ -202,7 +185,6 @@ while [[ $# -gt 0 ]]; do
                 exit 1
             fi
             case "$2" in
-                x11|wayland|both|none) QT_LIBS="$2" ;;
                 *)
                     echo "error: --qt-libs value must be one of:" \
                          "x11, wayland, both, none" >&2
@@ -211,9 +193,6 @@ while [[ $# -gt 0 ]]; do
             esac
             shift 2
             ;;
-        --x11)      QT_LIBS="x11"; shift ;;
-        --wayland)  QT_LIBS="wayland"; shift ;;
-        --no-qt-libs) QT_LIBS="none"; shift ;;
         --venv)
             if [[ $# -lt 2 ]]; then
                 echo "error: --venv requires a path" >&2
@@ -245,6 +224,135 @@ say()  { printf '%s[+]%s %s\n' "$C_INFO" "$C_RST" "$*"; }
 ok()   { printf '%s[✓]%s %s\n' "$C_OK"   "$C_RST" "$*"; }
 warn() { printf '%s[!]%s %s\n' "$C_WARN" "$C_RST" "$*" >&2; }
 die()  { printf '%s[x]%s %s\n' "$C_ERR"  "$C_RST" "$*" >&2; exit 1; }
+
+# --------------------------------------------------------------------
+# Electron / Node
+
+NODE_VERSION="26.13.1"
+NODE_BASE="https://nodejs.org/dist/v${NODE_VERSION}"
+APP_ROOT="/opt/tornadoc2"
+
+_have_node() {
+    local v
+    v="$(node --version 2>/dev/null || true)"
+    [[ "$v" =~ ^v(2[6-9]|[3-9][0-9]) ]]
+}
+
+install_node() {
+    if [[ "$FORCE_NODE" -eq 0 ]] && _have_node; then
+        ok "node: $(node --version) on PATH"
+        return 0
+    fi
+    if [[ "$CAN_INSTALL_SYSTEM" -eq 0 ]]; then
+        warn "node >= 26 missing and no root: install Node yourself"
+        return 1
+    fi
+    case "$(uname -m)" in
+        x86_64|amd64) arch=x64 ;;
+        aarch64|arm64) arch=arm64 ;;
+        *) warn "unsupported arch $(uname -m) for Node"; return 1 ;;
+    esac
+    local name="node-v${NODE_VERSION}-linux-${arch}"
+    local tmp; tmp="$(mktemp -d)"
+    say "node: downloading ${NODE_VERSION} (${arch})"
+    if ! curl -fsSL --max-time 120 "$NODE_BASE/$name.tar.xz" \
+            -o "$tmp/node.tar.xz"; then
+        warn "node download failed"; rm -rf "$tmp"; return 1
+    fi
+    if ! curl -fsSL --max-time 30 "$NODE_BASE/SHASUMS256.txt" \
+            -o "$tmp/SHASUMS256.txt"; then
+        warn "SHASUMS256.txt unavailable; refusing an unverified binary"
+        rm -rf "$tmp"; return 1
+    fi
+    local want got
+    want="$(awk -v n="$name.tar.xz" '$2==n{print $1}' "$tmp/SHASUMS256.txt")"
+    got="$(sha256sum "$tmp/node.tar.xz" | awk '{print $1}')"
+    if [[ -z "$want" || "$want" != "$got" ]]; then
+        warn "node checksum mismatch"; rm -rf "$tmp"; return 1
+    fi
+    ok "node: checksum verified"
+    $SUDO mkdir -p "$APP_ROOT"
+    if $SUDO tar -xJf "$tmp/node.tar.xz" -C "$APP_ROOT"; then
+        $SUDO rm -rf "$APP_ROOT/node"
+        $SUDO mv "$APP_ROOT/$name" "$APP_ROOT/node"
+        $SUDO ln -sf "$APP_ROOT/node/bin/node" /usr/local/bin/node
+        $SUDO ln -sf "$APP_ROOT/node/bin/npm" /usr/local/bin/npm
+        $SUDO ln -sf "$APP_ROOT/node/bin/npx" /usr/local/bin/npx
+        rm -rf "$tmp"
+        ok "node: installed under $APP_ROOT/node"
+        return 0
+    fi
+    rm -rf "$tmp"
+    warn "node extraction failed"
+    return 1
+}
+
+install_electron_libs() {
+    [[ "$UNAME_S" == "Linux" ]] || return 0
+    say "electron: runtime libraries"
+    case "$FAMILY" in
+        debian)
+            install_syspkgs libgtk-3-0 libnss3 libxss1 libasound2 \
+                libgbm1 libdrm2 libxshmfence1 libatk-bridge2.0-0 \
+                libcups2 || true
+            ;;
+        rhel)
+            install_syspkgs gtk3 nss libXScrnSaver alsa-lib \
+                mesa-libgbm libdrm libxshmfence at-spi2-atk \
+                cups-libs || true
+            ;;
+        arch)
+            install_syspkgs gtk3 nss libxss alsa-lib mesa libdrm \
+                libxshmfence at-spi2-atk libcups || true
+            ;;
+    esac
+}
+
+install_electron_app() {
+    local src
+    src="$(cd "$(dirname "$0")" && pwd)/client/desktop"
+    if [[ ! -f "$src/package.json" ]]; then
+        warn "client/desktop not found; run from the repository root"
+        return 1
+    fi
+    if [[ "$CAN_INSTALL_SYSTEM" -eq 0 ]]; then
+        warn "no root: the shell is built but not installed"
+        return 1
+    fi
+    say "electron: building the renderer"
+    if ! ( cd "$src" && npm ci --no-audit --no-fund \
+            && npm run build ); then
+        warn "desktop build failed"; return 1
+    fi
+    $SUDO rm -rf "$APP_ROOT/desktop" "$APP_ROOT/electron"
+    $SUDO mkdir -p "$APP_ROOT/desktop"
+    $SUDO cp -a "$src/out" "$src/package.json" "$APP_ROOT/desktop/"
+    $SUDO cp -a "$src/node_modules/electron/dist" "$APP_ROOT/electron"
+    $SUDO cp "$APP_ROOT/electron/chrome-sandbox" \
+        "$APP_ROOT/electron/chrome-sandbox.real" 2>/dev/null || true
+    $SUDO chown root:root "$APP_ROOT/electron/chrome-sandbox" 2>/dev/null || true
+    $SUDO chmod 4755 "$APP_ROOT/electron/chrome-sandbox" 2>/dev/null || true
+    $SUDO tee /usr/local/bin/tornadoc2-desktop >/dev/null <<'LAUNCH'
+#!/bin/sh
+exec /opt/tornadoc2/electron/electron /opt/tornadoc2/desktop "$@"
+LAUNCH
+    $SUDO chmod 755 /usr/local/bin/tornadoc2-desktop
+    ok "electron: installed under $APP_ROOT/desktop"
+
+    if [[ "$SKIP_DESKTOP_ENTRY" -eq 0 ]]; then
+        $SUDO mkdir -p /usr/share/applications
+        $SUDO tee /usr/share/applications/tornadoc2.desktop >/dev/null <<'ENTRY'
+[Desktop Entry]
+Type=Application
+Name=TornadoC2
+Comment=Operator console
+Exec=/usr/local/bin/tornadoc2-desktop
+Terminal=false
+Categories=Network;Security;
+ENTRY
+        ok "electron: desktop entry installed"
+    fi
+}
 
 # --------------------------------------------------------------------
 # Privilege detection
@@ -306,34 +414,12 @@ $(sw_vers -productVersion 2>/dev/null || '')"
 esac
 
 # --------------------------------------------------------------------
-# Autodetect the Qt library selection when the operator did not
-# specify one. See the header for the logic.
-
-if [[ -z "$QT_LIBS" ]]; then
-    if [[ "$INSTALL_GUI" -eq 0 ]]; then
-        QT_LIBS="none"
-    elif [[ "$UNAME_S" != "Linux" ]]; then
-        # macOS and Windows ship the Qt runtime with the wheel.
-        QT_LIBS="none"
-    elif [[ -n "${WAYLAND_DISPLAY:-}" ]]; then
-        QT_LIBS="wayland"
-    elif [[ -n "${DISPLAY:-}" ]]; then
-        QT_LIBS="x11"
-    else
-        # Neither set. A headless server, or an SSH session with
-        # no X forwarding yet. Install both so the GUI works
-        # whichever display the operator connects.
-        QT_LIBS="both"
-    fi
-fi
-
-# --------------------------------------------------------------------
 # Banner
 
 say "os:       $DISTRO_NAME"
 say "family:   $FAMILY"
 if [[ "$INSTALL_GUI" -eq 1 ]]; then
-    say "gui:      yes (--no-gui to skip PySide6)"
+    say "gui:      yes (--no-gui to skip Node/Electron)"
 else
     say "gui:      no"
 fi
@@ -348,46 +434,6 @@ else
     say "mcp:      no  (--with-mcp to install mcp + httpx)"
 fi
 [[ -n "$VENV_PATH" ]] && say "venv:     $VENV_PATH"
-
-# Explain the Qt libs choice, and where it came from.
-if [[ "$INSTALL_GUI" -eq 1 && "$UNAME_S" == "Linux" ]]; then
-    case "$QT_LIBS" in
-        x11)     detail="x11 only" ;;
-        wayland) detail="wayland only" ;;
-        both)    detail="x11 + wayland" ;;
-        none)    detail="none" ;;
-    esac
-    # Was it explicit or autodetected?
-    explicit=0
-    for a in "$@"; do
-        case "$a" in
-            --qt-libs|--x11|--wayland|--no-qt-libs)
-                explicit=1; break ;;
-        esac
-    done
-    if (( explicit )); then
-        say "qt libs:  $detail (from flag)"
-    else
-        case "$QT_LIBS" in
-            wayland) source="WAYLAND_DISPLAY is set" ;;
-            x11)     source="DISPLAY is set, WAYLAND_DISPLAY is not" ;;
-            both)    source="neither WAYLAND_DISPLAY nor DISPLAY is set" ;;
-            *)       source="gui disabled" ;;
-        esac
-        say "qt libs:  $detail (autodetected: $source)"
-    fi
-    if [[ "$QT_LIBS" == "both" ]]; then
-        say "          pass --x11 or --wayland to install one set only"
-    fi
-fi
-
-if [[ "$CAN_INSTALL_SYSTEM" -eq 0 ]]; then
-    warn "no sudo and not running as root — system package installs"
-    warn "will be skipped. pip will handle the Python packages; Qt"
-    warn "runtime libraries will not be installed by this script."
-    warn "If the GUI fails to launch, install them manually with"
-    warn "your package manager or rerun with sudo."
-fi
 
 # --------------------------------------------------------------------
 # Package manager detection
@@ -643,153 +689,6 @@ if [[ -z "$VENV_PATH" ]]; then
 fi
 
 # --------------------------------------------------------------------
-# Qt runtime libraries on Linux
-#
-# Two independent sets, selected by $QT_LIBS. Each is per-family
-# because package names differ across families; each is installed
-# with the per-package retry so one missing name does not abort
-# the transaction for the rest.
-
-if [[ "$INSTALL_GUI" -eq 1 && "$UNAME_S" == "Linux" \
-        && "$QT_LIBS" != "none" ]]; then
-
-    QT_LIBS_TO_INSTALL=()
-
-    if [[ "$QT_LIBS" == "x11" || "$QT_LIBS" == "both" ]]; then
-        say "installing Qt X11 runtime libraries"
-        case "$FAMILY" in
-            debian)
-                QT_LIBS_TO_INSTALL+=(
-                    libgl1
-                    libegl1
-                    libxkbcommon-x11-0
-                    libxcb-cursor0
-                    libxcb-icccm4
-                    libxcb-image0
-                    libxcb-keysyms1
-                    libxcb-randr0
-                    libxcb-render-util0
-                    libxcb-shape0
-                    libxcb-xinerama0
-                    libdbus-1-3
-                    libfontconfig1
-                )
-                ;;
-            rhel)
-                QT_LIBS_TO_INSTALL+=(
-                    mesa-libGL
-                    mesa-libEGL
-                    libxkbcommon-x11
-                    xcb-util-cursor
-                    xcb-util-wm
-                    xcb-util-image
-                    xcb-util-keysyms
-                    xcb-util-renderutil
-                    libXrandr
-                    libXinerama
-                    dbus-libs
-                    fontconfig
-                )
-                ;;
-            arch)
-                QT_LIBS_TO_INSTALL+=(
-                    mesa
-                    libxkbcommon-x11
-                    xcb-util-cursor
-                    xcb-util-wm
-                    xcb-util-image
-                    xcb-util-keysyms
-                    xcb-util-renderutil
-                    libxrandr
-                    libxinerama
-                    dbus
-                    fontconfig
-                )
-                ;;
-            *)
-                warn "unrecognised Linux family ($FAMILY); skipping"
-                warn "X11 Qt runtime libraries. If the GUI fails to"
-                warn "launch, install libGL, libEGL,"
-                warn "libxkbcommon-x11, and the libxcb-* family with"
-                warn "your package manager."
-                ;;
-        esac
-    fi
-
-    if [[ "$QT_LIBS" == "wayland" || "$QT_LIBS" == "both" ]]; then
-        say "installing Qt Wayland runtime libraries"
-        case "$FAMILY" in
-            debian)
-                QT_LIBS_TO_INSTALL+=(
-                    libwayland-client0
-                    libwayland-cursor0
-                    libwayland-egl1
-                    libxkbcommon0
-                    libgl1
-                    libegl1
-                    libdbus-1-3
-                    libfontconfig1
-                    qt6-wayland
-                )
-                ;;
-            rhel)
-                QT_LIBS_TO_INSTALL+=(
-                    wayland
-                    libxkbcommon
-                    mesa-libGL
-                    mesa-libEGL
-                    dbus-libs
-                    fontconfig
-                    qt6-qtwayland
-                )
-                ;;
-            arch)
-                QT_LIBS_TO_INSTALL+=(
-                    wayland
-                    libxkbcommon
-                    mesa
-                    dbus
-                    fontconfig
-                    qt6-wayland
-                )
-                ;;
-            *)
-                warn "unrecognised Linux family ($FAMILY); skipping"
-                warn "Wayland Qt runtime libraries. If the GUI fails"
-                warn "to launch under Wayland, install"
-                warn "libwayland-client, libxkbcommon, libGL, and the"
-                warn "Qt6 wayland platform plugin with your package"
-                warn "manager."
-                ;;
-        esac
-    fi
-
-    if (( ${#QT_LIBS_TO_INSTALL[@]} > 0 )); then
-        # Deduplicate — the two lists overlap on the GL / dbus /
-        # fontconfig packages, and installing a package twice is
-        # harmless but noisy.
-        declare -A _seen=()
-        QT_UNIQUE=()
-        for p in "${QT_LIBS_TO_INSTALL[@]}"; do
-            [[ -n "${_seen[$p]:-}" ]] && continue
-            _seen[$p]=1
-            QT_UNIQUE+=("$p")
-        done
-        unset _seen
-
-        install_syspkgs "${QT_UNIQUE[@]}"
-
-        if (( ${#FAILED_SYSPKGS[@]} > 0 )); then
-            warn "some Qt runtime libraries could not be installed;"
-            warn "the GUI may fall back to QT_QPA_PLATFORM=offscreen"
-            warn "or fail to launch. See the summary at the end."
-        else
-            ok "Qt runtime libraries installed"
-        fi
-    fi
-fi
-
-# --------------------------------------------------------------------
 # Python packages
 
 say "installing Python packages"
@@ -832,22 +731,6 @@ for pkg in "${PIP_REQUIRED[@]}"; do
         warn "still loads; a signed config raises at load time."
     fi
 done
-
-if [[ "$INSTALL_GUI" -eq 1 ]]; then
-    if "$PYTHON_BIN" -c "import PySide6" 2>/dev/null; then
-        ok "python: PySide6 importable"
-    else
-        say "python: installing PySide6 (this may take a minute)"
-        if "${PIP_CMD[@]}" install --quiet "${PIP_FLAGS[@]}" PySide6; then
-            ok "python: PySide6 installed"
-        else
-            PIP_FAILED+=("PySide6")
-            warn "pip install PySide6 failed — the CLI still works;"
-            warn "--gui will not launch. Retry with:"
-            warn "    ${PIP_CMD[*]} install ${PIP_FLAGS[*]} PySide6"
-        fi
-    fi
-fi
 
 if [[ "$INSTALL_AI" -eq 1 ]]; then
     for pkg in "${PIP_AI[@]}"; do
@@ -942,15 +825,6 @@ else
     warn "refused at load time"
 fi
 
-if [[ "$INSTALL_GUI" -eq 1 ]]; then
-    if "$PYTHON_BIN" -c "import PySide6" 2>/dev/null; then
-        ver="$("$PYTHON_BIN" -c 'import PySide6; print(PySide6.__version__)')"
-        ok "PySide6 $ver  (--gui available)"
-    else
-        warn "PySide6 not importable — --gui will not launch"
-    fi
-fi
-
 if [[ "$INSTALL_AI" -eq 1 ]]; then
     if "$PYTHON_BIN" -c "import httpx" 2>/dev/null; then
         ver="$("$PYTHON_BIN" -c 'import httpx; print(httpx.__version__)')"
@@ -980,9 +854,9 @@ if (( ${#FAILED_SYSPKGS[@]} > 0 )); then
         say "    $p"
     done
     say "the client itself is unaffected — pip covers the Python"
-    say "side. Qt runtime library gaps affect --gui only; install"
-    say "the missing names with your package manager if the GUI"
-    say "fails to launch."
+    say "side. Electron runtime library gaps affect --gui only;"
+    say "install the missing names with your package manager if"
+    say "the GUI fails to launch."
 fi
 
 if (( ${#PIP_FAILED[@]} > 0 )); then
@@ -998,6 +872,16 @@ fi
 # --------------------------------------------------------------------
 # Summary
 
+if [[ "$INSTALL_GUI" -eq 1 ]]; then
+    if [[ "$SKIP_NODE" -eq 0 ]]; then
+        install_node || warn "continuing without a managed Node"
+    elif ! _have_node; then
+        warn "--skip-node set but no Node >= 26 on PATH"
+    fi
+    install_electron_libs
+    install_electron_app
+fi
+
 printf '\n'
 say "client dependency installation complete"
 if [[ -n "$VENV_PATH" ]]; then
@@ -1006,26 +890,11 @@ if [[ -n "$VENV_PATH" ]]; then
     say "    source $VENV_PATH/bin/activate"
 fi
 
-if [[ "$INSTALL_GUI" -eq 1 && "$UNAME_S" == "Linux" ]]; then
-    say "Qt runtime libraries selected: $QT_LIBS"
-    if [[ "$QT_LIBS" == "x11" ]]; then
-        say "  the GUI will use the xcb platform plugin (X11)"
-        say "  on a Wayland session it will fall back through XWayland"
-    elif [[ "$QT_LIBS" == "wayland" ]]; then
-        say "  the GUI will use the wayland platform plugin"
-        say "  on a pure X11 session launch the client with:"
-        say "      QT_QPA_PLATFORM=xcb python3 beacon-client.py ..."
-    elif [[ "$QT_LIBS" == "both" ]]; then
-        say "  both plugin sets installed; the GUI auto-selects"
-    elif [[ "$QT_LIBS" == "none" ]]; then
-        say "  neither plugin set installed; --gui will not launch"
-    fi
-fi
-
 say "run the client with:"
 say "    python3 beacon-client.py -c <your>.cfg"
 if [[ "$INSTALL_GUI" -eq 1 ]]; then
     say "    python3 beacon-client.py -c <your>.cfg --gui"
+    say "    (Electron shell)"
 fi
 if [[ "$INSTALL_AI" -eq 1 ]]; then
     say "run the AI console with:"

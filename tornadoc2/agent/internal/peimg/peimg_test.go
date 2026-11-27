@@ -72,3 +72,14 @@ func TestNoExecutableSection(t *testing.T) {
 		t.Fatal("expected no-executable error")
 	}
 }
+
+func FuzzHeaders(f *testing.F) {
+	f.Add(build(0x2000, 0x1000))
+	f.Add([]byte{})
+	f.Add([]byte("MZ"))
+	f.Fuzz(func(t *testing.T, raw []byte) {
+		if _, _, _, err := Layout(raw); err == nil {
+			_, _, _ = ExecutableSection(raw, 16)
+		}
+	})
+}

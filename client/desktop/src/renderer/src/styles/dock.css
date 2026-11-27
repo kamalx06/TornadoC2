@@ -1,0 +1,154 @@
+/* Workspace chrome. Structure comes from react-resizable-panels; this
+   file only skins it with tokens and keeps every pane dense. */
+
+.dock {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  background: var(--bg);
+}
+.dock > [data-workspace] { height: 100%; }
+.dock [data-workspace-layout] { height: 100%; }
+
+.dock-tabset {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  background: var(--bg-panel);
+  border: 1px solid var(--line);
+}
+.dock-tabset[data-tabset-maximized='true'] { border-color: var(--line-strong); }
+
+.dock-header {
+  display: flex;
+  align-items: stretch;
+  flex: 0 0 auto;
+  min-height: var(--pane-head);
+  background: var(--bg-raised);
+  border-bottom: 1px solid var(--line);
+}
+.dock-tabs {
+  display: flex;
+  align-items: stretch;
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+}
+.dock-tabs::-webkit-scrollbar { display: none; }
+
+.dock-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 190px;
+  padding: 0 7px 0 9px;
+  border: 0;
+  border-right: 1px solid var(--line);
+  background: transparent;
+  color: var(--text-2);
+  font-size: var(--fs-11);
+  white-space: nowrap;
+  cursor: pointer;
+  user-select: none;
+}
+.dock-tab:hover { background: var(--bg-hover); color: var(--text); }
+.dock-tab[data-tab-selected='true'] {
+  background: var(--bg-panel);
+  color: var(--text);
+  box-shadow: inset 0 -2px 0 var(--cyan);
+}
+.dock-glyph { color: var(--text-3); font-size: var(--fs-10); }
+.dock-tab[data-tab-selected='true'] .dock-glyph { color: var(--cyan); }
+.dock-tab-title { overflow: hidden; text-overflow: ellipsis; }
+
+.dock-toolbar {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 1px;
+  padding: 0 4px;
+  color: var(--text-3);
+}
+.dock-slot {
+  font: var(--fs-10)/1 var(--mono);
+  text-transform: uppercase;
+  letter-spacing: var(--track);
+  padding-right: 5px;
+  opacity: 0.55;
+}
+.dock-tool {
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--r-1);
+  background: transparent;
+  color: var(--text-3);
+  font-size: 11px;
+  cursor: pointer;
+}
+.dock-tool:hover { background: var(--bg-hover); color: var(--text); }
+.dock-tool[aria-pressed='true'] { color: var(--cyan); }
+
+.dock-panels {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+.dock-content {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.dock-content[hidden] { display: none; }
+.dock-content > .view { flex: 1; min-height: 0; }
+
+.dock-split { background: var(--bg); }
+.dock [data-separator] {
+  flex: 0 0 4px;
+  background: var(--bg);
+  transition: background-color var(--dur-1) var(--ease);
+}
+.dock [data-separator]:hover,
+.dock [data-separator='active'] { background: var(--cyan); }
+.dock [data-separator][aria-orientation='vertical'] { cursor: col-resize; }
+.dock [data-separator][aria-orientation='horizontal'] { cursor: row-resize; }
+
+.dock-drop { background: var(--cyan); }
+.dock-drag {
+  background: var(--bg-raised);
+  border: 1px solid var(--cyan);
+  border-radius: var(--r-1);
+  color: var(--text);
+  font-size: var(--fs-11);
+  padding: 4px 8px;
+}
+
+.dock .pane-head { min-height: var(--pane-head); padding: 0 var(--pad); }
+.dock .pane-head .pane-title { display: none; }
+.dock .inspector {
+  height: 100%;
+  border-left: 0;
+  background: transparent;
+}
+.dock .log { flex: 1; height: auto; border-top: 0; }
+.dock-filter {
+  flex: 1 1 90px;
+  min-width: 60px;
+  max-width: 190px;
+  height: 22px;
+  font-size: var(--fs-11);
+}
+.dock .empty-state { height: 100%; }
+
+.detached { padding: 0; }

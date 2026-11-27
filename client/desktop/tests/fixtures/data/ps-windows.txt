@@ -1,0 +1,5 @@
+PID      COMMAND
+System           4
+svchost.exe      892
+explorer.exe     4412
+powershell.exe   8120

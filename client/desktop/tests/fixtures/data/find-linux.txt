@@ -1,0 +1,7 @@
+/var/www
+/var/www/robots.txt
+/var/www/site
+/var/www/site/index.html
+/var/www/site/assets
+/var/www/site/assets/app.js
+/var/www/site/deep/extra.txt

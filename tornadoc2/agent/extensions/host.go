@@ -200,6 +200,14 @@ func (h *Host) Load(ctx context.Context, name string,
 		!bytes.Equal(raw[4:8], []byte{1, 0, 0, 0}) {
 		return Info{}, errors.New("not a WASM 1.0 module")
 	}
+	min, ok, err := scanSections(raw)
+	if err != nil {
+		return Info{}, err
+	}
+	if ok && min > MemoryPages {
+		return Info{}, fmt.Errorf(
+			"module declares %d pages; max %d", min, MemoryPages)
+	}
 	sum := sha256.Sum256(raw)
 	h.mu.Lock()
 	if h.closed {
@@ -332,4 +340,80 @@ func validName(name string) error {
 		}
 	}
 	return nil
+}
+
+// scanSections walks the section table and rejects absurd entry
+// counts: wazero allocates for a declared vector before it validates
+// the section body, so a five-byte header can otherwise reserve
+// gigabytes. It also returns the smallest declared memory minimum.
+func scanSections(raw []byte) (uint32, bool, error) {
+	p := 8
+	var min uint32
+	found := false
+	for p < len(raw) {
+		id := raw[p]
+		p++
+		size, n := uleb(raw[p:])
+		if n == 0 {
+			return 0, found, nil
+		}
+		p += n
+		if id != 0 {
+			if count, n := uleb(raw[p:]); n > 0 && count > 1_000_000 {
+				return 0, false, fmt.Errorf(
+					"section %d declares %d entries", id, count)
+			}
+		}
+		if size > uint32(len(raw)-p) {
+			return 0, found, nil
+		}
+		body := raw[p : p+int(size)]
+		p += int(size)
+		if id != 5 {
+			continue
+		}
+		q := 0
+		count, n := uleb(body)
+		if n == 0 || count == 0 || count > 64 {
+			return 0, found, nil
+		}
+		q += n
+		for i := uint32(0); i < count && q < len(body); i++ {
+			flags := body[q]
+			q++
+			if flags > 1 {
+				return 0, found, nil
+			}
+			v, n := uleb(body[q:])
+			if n == 0 {
+				return 0, found, nil
+			}
+			q += n
+			if !found || v < min {
+				min, found = v, true
+			}
+			if flags == 1 {
+				_, n = uleb(body[q:])
+				if n == 0 {
+					return 0, found, nil
+				}
+				q += n
+			}
+		}
+	}
+	return min, found, nil
+}
+
+func uleb(b []byte) (uint32, int) {
+	var v uint32
+	for i, c := range b {
+		if i > 4 {
+			return 0, 0
+		}
+		v |= uint32(c&0x7f) << (7 * i)
+		if c&0x80 == 0 {
+			return v, i + 1
+		}
+	}
+	return 0, 0
 }

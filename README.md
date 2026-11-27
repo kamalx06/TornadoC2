@@ -57,7 +57,8 @@ loss, or legal consequences arising from the use of this project.
 - [Staged Payloads](#staged-payloads)
 - [Remote Build](#remote-build)
 - [Operator Reference](#operator-reference)
-- [GUI Operator Console](#gui-operator-console)
+- [Desktop console (Electron)](#desktop-console-electron)
+- [GUI parity and cutover](docs/gui-parity.md)
 - [AI Operator Console and MCP Server](#ai-operator-console-and-mcp-server)
 - [In-Memory Execution](#in-memory-execution)
 - [BOF Registry](#bof-registry)
@@ -149,7 +150,7 @@ available in the current version.
 </p>
 
 <p align="center">
-  <em>The PySide6 operator console. Beacon table on top, log and
+  <em>The operator console. Beacon table on top, log and
   chat on the bottom, one command bar for both. The terminal REPL
   is the reference implementation; the GUI is a presentation layer
   over the same <code>Client</code> methods.</em>
@@ -396,7 +397,7 @@ The rest of this document describes how it works. This section describes why it 
   Telegram (an operator manages their own hooks; an admin manages
   every hook), and a multi-line paste mode for the script verbs.
 - **Three operator frontends plus an MCP bridge.** The terminal
-  REPL is the default and the reference implementation. A PySide6
+  REPL is the default and the reference implementation. An Electron
   (Qt 6) GUI is opt-in with `--gui`. An AI console —
   `beacon-client.py ai` — drives the same `Client` methods through
   an agent loop backed by the operator's own LLM provider
@@ -465,7 +466,7 @@ BOF and .NET assembly execution are Windows-only.
 | **Session graph** | Engagement map of shared user/domain/subnet, relay and process parentage, privilege, elevation, integrity and session · Text modes `tree`, `flat`, `summary`, `path` and a JSON mode for the GUI graph · Privilege collected at every check-in |
 | **Desktop notifications** | New beacon check-in, kill-deadline proximity, scheduled-task completion · Backends: `notify-send`, `terminal-notifier`, AppleScript, `ntfy.sh` |
 | **Infrastructure** | `scripts/redirector.py` emits hardened nginx (SNI passthrough or TLS termination), Caddy and Cloudflare Worker configs with a host allowlist and 421 default · listener health prober (TLS + `/health`, 3-strike `ok→degraded→down`, cert expiry, history, `listener-health` webhook, `listeners health` / `health --probe`) |
-| **GUI console** | Virtualised tables (10k rows; `scripts/gui-bench.py` gates render and scroll), bounded background runner with timeouts, multi-select bulk bar, fuzzy palette with recents, toasts, light/compact modes, editable keybindings, saved workspace and `--safe` start |
+| **GUI console** | Virtualised tables (10k rows, virtualised), bounded background runner with timeouts, multi-select bulk bar, fuzzy palette with recents, toasts, light/compact modes, editable keybindings, saved workspace and `--safe` start |
 | **AI console and MCP server** | `beacon-client.py ai` opens an agent loop backed by the operator's own provider — `anthropic`, `openai`, `openrouter`, `gemini`, `groq`, `ollama`, `claude_code`, or `claude_code`'s one-shot synthesis mode. Configuration lives at `<repo>/client/.tornadoc2/ai.json` (0600) on the workstation and never leaves it; `ai config` and GUI `Edit › AI settings` edit it without hand-written JSON. Forty-three tools across three tiers — 16 read-only, 18 safe-mutation, 9 approval-gated. Every Tier-3 call (`kill_beacon`, `killall_beacons`, `run_bof`, `creds_reveal`, `creds_validate`, file transfer, screenshot) prompts for a per-tool confirmation word before dispatch; `kill_beacon` requires the exact beacon ID, `killall_beacons` requires `yes` followed by the match count. The `mcp_allow_verbs` and `mcp_allow_bofs` allowlists bound the AI's mutation scope; a verb not on the list is refused by the dispatcher before the task reaches the queue. `python -m tornadoc2_mcp` exposes the Tier-1 and Tier-2 tools over stdio for external MCP clients — the Tier-3 tools are deliberately absent because the approval prompt has nowhere to appear in the MCP protocol. Listener lifecycle is fully exposed (list, get, create, start, stop, update, delete); create and delete are gated by `mcp_allow_listener_create` / `mcp_allow_listener_delete`, both `false` by default. **No server-side change**: the AI console and MCP server consume the same `.cfg` the CLI does |
 
 **Not supported:**Interactive streaming sessions or plugin execution
@@ -1001,17 +1002,18 @@ not executed. `viewer` and `guardian` have no access.
 
 ### Assurance and release
 
-- 100 tests: RBAC, listeners, routes, armory, at-rest encryption and
-  AAD, lockout, audit chain/anchors, model and export injection,
-  redirector templates, listener health and the engagement model;
-  headless Qt tests cover the model, bulk bar, theming and state.
-  `go test` covers protocol, transport, WASM, PE parsing and update
-  signing.
-- `scripts/gui-bench.py` gates the 10k-row render and scroll budgets;
+- 128 server tests cover RBAC, listeners, routes, armory, at-rest
+  encryption and AAD, lockout, audit chain/anchors, model and export
+  injection, redirector templates, listener health, the engagement
+  model and a bridge-frame mutation corpus. `go test` covers protocol,
+  transport, WASM, PE and COFF parsing and update signing, plus fuzz
+  targets for COFF, PE, WASM and tasks.
+- The desktop job runs an npm audit, a WCAG token-contrast audit,
+  typecheck, vitest, axe and an Xvfb smoke;
   `scripts/atrest-status.py` reports unsealed files.
 - `.github/workflows/ci.yml` runs server tests, race-enabled Go tests
   on Linux, a Windows build with the full tag matrix (Jump, WASM,
-  persistence, stomp, unhook, spoof, update), and a protocol fuzz pass.
+  persistence, stomp, unhook, spoof, update), and four 30 s fuzz runs.
 - `VERSION`, `CHANGELOG.md`, `.github/workflows/release.yml` and
   `scripts/sbom.sh` provide tag-driven, checksummed releases with an
   SBOM.
@@ -3229,25 +3231,15 @@ match the token on the child.
   other build tooling. It talks to the team server over mTLS. The
   build wizard reads the QUIC listener's port from the server's
   `/identify` response when it needs to default a QUIC callback URL.
-- **PySide6** — required only for `--gui`. The CLI does not import
-  it. Install with `pip install PySide6`; the wheel bundles the Qt
-  runtime, so no system Qt packages are needed on macOS or
-  Windows. On Linux the GUI runs on X11 and Wayland; the platform
-  is selected automatically from `WAYLAND_DISPLAY` and `DISPLAY`
-  at startup — see [GUI Operator Console › Platform
-  selection](#platform-selection). The `xcb` plugin loads the
-  host's `libGL`, `libEGL`, `libxkbcommon-x11`, and the `libxcb-*`
-  family; the `wayland` plugin loads `libwayland-client0`,
-  `libwayland-cursor0`, `libwayland-egl1`, and `qt6-wayland`.
-  `install-deps-client.sh` autodetects the current session and
-  installs the matching set on Debian-, RHEL-, and Arch-derived
-  systems; `--x11`, `--wayland`, and `--qt-libs both` override the
-  detection, and `--no-gui` skips both the GUI and the runtime
-  libraries. The GUI exits with a clear `qt.qpa.plugin: Could not
-  load the Qt platform plugin "xcb"` (or the equivalent `wayland`
-  message) when they are absent. A headless host can still import
-  PySide6 for a smoke test with `QT_QPA_PLATFORM=offscreen`. CI uses
-  `PySide6-Essentials` and runs the headless GUI tests and benchmark.
+- **Node.js 26 LTS and Electron** — required only for `--gui`. The CLI
+  never imports them. `install-deps-client.sh` installs a pinned,
+  checksum-verified Node, the Electron GTK/NSS runtime libraries per
+  family, builds the shell and installs it under `/opt/tornadoc2` with
+  a desktop entry. `--no-gui` skips all of it; `--skip-node` reuses an
+  existing Node; the retired `--classic-gui`/`--x11`/`--wayland`/
+  `--qt-libs` flags are accepted as no-ops. `chrome-sandbox` is set
+  4755 root by the installer; a per-user run without that bit needs
+  `--no-sandbox`.
 - **`httpx`** (`pip install httpx`) — required only for the AI
   console (`beacon-client.py ai`) and the standalone MCP server
   (`python -m tornadoc2_mcp`). The CLI and GUI do not import it.
@@ -3277,7 +3269,7 @@ the default:
 
     python beacon-client.py -c alice.cfg
 
-The PySide6 GUI is opt-in with `--gui`:
+The Electron GUI is opt-in with `--gui` (`--gui-classic` is an accepted alias):
 
     python beacon-client.py -c alice.cfg --gui
 
@@ -3403,20 +3395,16 @@ script is idempotent.
 
 **Operator workstation** — `install-deps-client.sh`. Installs
 `cryptography` (used by `transport.py` to verify a signed config)
-and, unless `--no-gui` / `--minimal` is passed, `PySide6` plus the
-Qt runtime libraries the `xcb` and `wayland` platform plugins load
-against on Linux. No Go, no Donut, no UPX, no Rust — remote builds
-happen on the server.
+and, unless `--no-gui` / `--minimal` is passed, Node plus Electron and
+the GTK/NSS runtime libraries. No Go, no Donut, no UPX, no Rust —
+remote builds happen on the server.
 
 ```bash
-./install-deps-client.sh                        # CLI + GUI; Qt libs
-                                                #   autodetected from the session
-./install-deps-client.sh --no-gui               # CLI only; no PySide6, no Qt libs
-./install-deps-client.sh --x11                  # force the xcb runtime set
-./install-deps-client.sh --wayland              # force the wayland runtime set
-./install-deps-client.sh --qt-libs both         # install both, useful when
-                                                #   the session type is uncertain
-./install-deps-client.sh --qt-libs none         # GUI installs PySide6 but no
+./install-deps-client.sh                        # CLI + GUI (Node + Electron)
+./install-deps-client.sh --no-gui               # CLI only; no Node, no Electron
+./install-deps-client.sh --skip-node            # reuse an existing Node >= 26
+./install-deps-client.sh --skip-desktop-entry   # no launcher entry
+./install-deps-client.sh --classic-gui          # accepted no-op
                                                 #   system libs (advanced)
 ./install-deps-client.sh --venv ~/.tornadoc2-venv
                                                 # into a venv, avoids PEP 668
@@ -3427,12 +3415,8 @@ The `--venv` flag is the recommended path on a workstation that
 already carries its own Python environment; a virtualenv sidesteps
 Debian's `externally-managed-environment` check entirely.
 
-The `--x11`, `--wayland`, `--qt-libs both`, and `--qt-libs none`
-flags control which Qt runtime libraries the installer pulls.
-Without any of them the installer autodetects from the current
-session: a `WAYLAND_DISPLAY` host installs the Wayland set, a
-`DISPLAY`-only host installs the X11 set, and a host with neither
-installs both so the GUI works whichever display the operator
+The retired `--x11`, `--wayland`, `--qt-libs` and `--classic-gui`
+flags are accepted as no-ops now that the shell is Electron-only.
 connects later. The banner names the selected set and, on
 autodetection, the environment variable the choice was derived
 from.
@@ -5258,11 +5242,10 @@ in daemon mode](#running-in-daemon-mode).
 The operator client offers a role-filtered command catalogue, fetched
 from the server at banner time. Two frontends dispatch that
 catalogue: the terminal REPL, invoked with no extra flag, and the
-PySide6 (Qt 6) GUI, invoked with `--gui`. The command list below is
-shared by both; the GUI renders the same verbs in a window with a
-beacon tree, a tabbed Log/Chat pane, and a native build form. See
-[GUI Operator Console](#gui-operator-console) for the layout and
-the shortcuts.
+Electron shell, invoked with `--gui`. The command list below is
+shared by both; the shell renders the same verbs with a virtualised
+target table, panes, and dialogs. See
+[Desktop console (Electron)](#desktop-console-electron).
 
 | Command | Description |
 |---------|-------------|
@@ -5580,417 +5563,51 @@ the modal with the full source in one call, then the follow-up
 
 ---
 
-## GUI Operator Console
+## Desktop console (Electron)
 
-The `--gui` flag launches a PySide6 (Qt 6) operator console in
-place of the terminal REPL. It is a presentation layer only: the
-CLI is the backend, and every action the GUI performs is a call
-into the same `Client` instance the terminal client uses. There is
-no second protocol implementation, no second dispatch table, and
-no second task-queue consumer. The window uses a GitHub-dark-
-inspired theme applied through a single `Palette` class so every
-widget picks up the same colours without per-widget styling.
+`--gui` starts the Electron shell. It is a presentation layer only:
+the renderer never sees PEMs, passwords or HTTP. A supervised Python
+bridge (`client/tornado_client/bridge.py`) owns the client and exposes
+an allowlisted, zod-validated method set over a local socket.
 
-    python beacon-client.py -c alice.cfg --gui
+**Security baseline.** `sandbox` and `contextIsolation` on, no Node in
+the renderer, only the preload touches `ipcRenderer`, `app://` bundle
+protocol, strict CSP, permission handler denies by default, navigation
+and window opening denied, bridge socket `0700/0600` with a peer-UID
+check and a 32-byte token, packaged binaries fused (no `RunAsNode`, no
+`NODE_OPTIONS`, ASAR-only + integrity).
 
-<p align="center">
-  <img src="demo/gui.png"
-       alt="TornadoC2 operator console"
-       width="900">
-</p>
+**Develop**
 
-**Performance model.** The beacon table is a virtualised
-`QAbstractTableModel` over a `QTableView`: only visible rows are
-painted, so a 10k-ghost engagement scrolls at ~1 ms/frame and a full
-refresh stays under ~100 ms. `scripts/gui-bench.py` measures both and
-CI fails the build on a regression. Every network call runs on a
-bounded worker queue (8 in flight, per-task timeout, visible errors);
-no slot calls the transport directly.
-
-**Operator ergonomics.** `Ctrl+K` opens a fuzzy-ranked command palette
-with recents that searches the role-filtered catalogue and live
-targets; the header carries a connection chip, online/offline pill and role
-badge; the status bar shows operator, role and clock; the target
-list has a privilege column (`user`, `admin`, `root`, `system`,
-with `!` for an elevated token) plus tooltips for parent, integrity
-and fingerprint. Every panel uses the same spacing, focus rings and
-dialog grammar. Selecting two or more targets raises a bulk bar
-(task, tag, kill with confirmation), all audited per beacon. Exports
-and the report viewer run off the main thread and write `0600`.
-
-**Workspace.** Geometry, splitter, tab, filter, theme and keybindings
-persist under `client/.tornadoc2/gui-state.json`. `--gui --safe`
-starts without restoring them or enabling refresh. **Edit →
-Keybindings…** rebinds the main shortcuts with duplicate detection;
-**View** has light and compact modes. Failures surface as corner
-toasts instead of modal interruptions.
-
-**The Graph tab** draws the engagement as rounded nodes grouped by
-privilege, user, domain, subnet or session. Privilege colours,
-elevated rings, relay-parent edges and hover details mirror the
-text model, with Refresh and Fit controls.
-
-**The AI panel.** A resident tab beside Log, Chat and Listeners
-runs the same agent loop on its own asyncio thread, so beacon
-work is never blocked by a model call. It keeps the transcript
-across turns, has Send/Stop/Reset, and uses the Settings dialog.
-T3 approvals still open the normal modal prompt.
-
-**The Listeners panel.** A dedicated tab lists every listener
-(id, name, type, bind, status, profiles, creator) and offers a
-protocol-aware create/edit dialog, Start, Stop and Delete, a 5 s
-status refresh, and the same `Client` listener methods the REPL
-uses. Cert and profile pickers come from the server. Host and port
-are locked while a listener runs, mirroring the server rule. A HEALTH
-column carries the prober state and a certificate-expiry tooltip.
-
-**What it is not.** The GUI is not a different client. The CLI
-remains the reference implementation. Every protocol change, every
-new verb, every fix lands in `tornado_client/repl.py` as before and
-is picked up by the GUI without modification. The only coupling
-between the two is a small dispatch shim that maps each top-level
-command to the same `Client._cmd_*` method the CLI's main loop
-calls.
-
-### How the delegation works
-
-The GUI is not a parallel implementation. Three substitutions in
-`gui.py` are the entire bridge:
-
-1. **stdout bridge.** `sys.stdout` and `sys.stderr` are replaced
-   with `_GuiStream`, a queue-backed `TextIOBase`, *before*
-   `tornado_client.repl` is imported. Because `repl._COLOR` is
-   computed at import time from `sys.stdout.isatty()`, the swap
-   makes `_COLOR` False and the `CLR` dict all empty strings. Every
-   line the CLI prints arrives in the Log tab as plain text, and
-   the GUI applies its own colour tags based on line shape — `✓`,
-   `✗`, `──`, `[!]`.
-
-2. **`input()` interception.** `builtins.input` is replaced with a
-   modal dialog on the main thread. The command worker thread
-   blocks on a `threading.Event` until the dialog closes, so the
-   CLI's synchronous call graph — `_cmd_killall`'s confirmation,
-   `_cmd_forget`'s prompt, `_read_multiline`'s paste loop — runs
-   unchanged.
-
-3. **`getpass.getpass()` interception.** Replaced with a masked
-   modal. The password never appears in the widget history or the
-   Log tab.
-
-Because the swap happens before import, there is no GUI-specific
-dispatch table. Every `_cmd_*` method the CLI calls is reached
-through the identical code path.
-
-### Password prompt before the GUI exists
-
-`Transport.__init__` prompts for the operator password via
-`getpass.getpass()` when the config carries `password_required:
-true`. That call happens in `main_gui` *before* `GuiApp` is
-constructed — and therefore before the GUI's normal `getpass`
-interceptor is installed. The standard library falls back to
-reading stdin when there is no TTY, which silently produces no
-password under a GUI launch and every subsequent request is
-rejected with `password_required`.
-
-`_early_getpass` closes this window: it opens a `QDialog` against
-the already-running `QApplication`, reads the password, and
-returns. `QApplication` is created before the transport is
-constructed, so the dialog has a valid event loop to run in
-without a second `QApplication`. The reordering is what makes the
-GUI's password prompt work at all — Qt permits exactly one
-`QApplication` per process, and it must exist before any widget.
-
-### Chat is not the CLI's chat loop
-
-The CLI's `_cmd_chat` is a synchronous loop that blocks the
-calling thread on `input()`. Running it in the GUI would lock the
-operator out of the Log tab for as long as they were in chat.
-
-The GUI takes a different approach: `_GuiChat` starts a
-long-poll thread at GUI startup and keeps it running until
-shutdown. Messages land in the Chat tab whether or not the
-operator is looking at it. Typing in the Chat tab routes the line
-to a dedicated chat worker thread; typing in the Log tab routes
-it to the command worker. The two never block each other, and the
-CLI's synchronous `_cmd_chat` is never invoked from the GUI.
-
-The CLI is unaffected. `repl.py` keeps its synchronous loop; a
-CLI client still uses it.
-
-### Tab routing
-
-The input bar is a single widget, but where the typed line goes
-depends on the active tab:
-
-| Active tab | Route | Busy state |
-|------------|-------|------------|
-| Log | Command worker thread | Always enabled — commands queue behind the running one and dispatch in order |
-| Chat | Chat worker thread | Always enabled — chat is never blocked by a running command |
-
-Submission is always accepted. The command queue is unbounded and processes in FIFO order; a slow blocking verb (`execute-assembly`, `hashdump`, a large upload) delays the queued follow-ups but does not block typing. The status bar carries the local queue depth alongside the on-wire task count so an operator can see the backlog. This matches the CLI's behaviour, where `_dispatch_task` returns as soon as the server acks the task and the operator can type the next command immediately.
-
-The prompt reflects the tab and, in chat mode, the active DM
-peer: `#1001 ›`, `chat ›`, or `chat→bob ›`. Switching tabs fires
-`_on_tab_change`, which calls `_update_input_prompt` and
-`_update_input_state`.
-
-### Undo / redo
-
-The input bar carries Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z undo-redo,
-wired by `_enable_undo`. The undo stack is per-widget, so it
-follows whichever tab is active — an operator's last few edits
-are almost always on the same tab they are looking at.
-
-### Build dialog
-
-`build` with no arguments opens a native Qt form
-(`_BuildDialog(QDialog)`) instead of the CLI wizard. The form is
-dynamic: the transport selector changes which endpoint fields
-appear, the target OS selector filters the transport list (SMB
-appears only for Windows, ICMP only for Linux), and the
-output-format selector controls whether stager fields and the
-inject toggle are shown. Field values live in a plain Python dict
-(`self._v`) created once in `__init__`; the form is rebuilt by
-reading from that dict, so a transport switch never loses an
-entered value.
-
-`build -c <file.json>` bypasses the form entirely and hands the
-file to `Client._cmd_build`, the same parser the CLI uses.
-
-Two JSON entry points share the same `Client._cmd_build` path the
-CLI uses. The main window's menu bar carries a **Build from JSON
-config…** item: it opens a file picker and hands the selected file
-straight to `_cmd_build`, bypassing the form entirely. The build
-dialog itself carries a **Load config…** button: it opens the same
-file picker and populates the form's fields from the selected file,
-leaving the operator free to adjust values before submitting.
-
-Both paths are thin wrappers around the CLI's existing config
-parser. Neither re-implements config validation, field naming, or
-transport-consistency checks — a config that the CLI would refuse is
-refused with the same error message in the GUI.
-
-### Layout
-
-The window is divided into four regions:
-
-| Region | Contents |
-|--------|----------|
-| Header (top) | App wordmark, live `host:port`, role badge, colour-coded online/offline pill |
-| Sidebar (left) | Beacon tree with `ID`, `ALIAS`, `USER@HOST`, `PLATFORM`, `LAST`, `VIEW` columns; search box; `Attach` / `Detach` / `Refresh` buttons; right-click context menu |
-| Main pane (right) | Tabbed `Log` and `Chat`, driven by the same streams the CLI writes to stdout |
-| Input bar (bottom) | Single-line command entry with a `Send` button. Repurposed as the chat input while the CLI's chat loop is running |
-| Status bar | Left: beacon id, liveness, sleep interval. Right: wall clock |
-
-A rough sketch of the layout:
-
-```text
-┌──────────────────────────────────────────────────────────────────────┐
-│ ◈ TORNADOC2   c2.example.com:12341                 ● online  ADMIN  │
-├──────────────────────┬───────────────────────────────────────────────┤
-│  BEACONS · 3 / 4     │  ┌─ Log ─┬─ Chat ─┐                          │
-│  [search…]           │  │                                              │
-│  ● #1001 dc01        │  │  ✓ connected                                 │
-│    alice@WIN-DEV     │  │  ✓ beacon #1001 attached                     │
-│  ● #1002             │  │  queued 3f8a1c2d                             │
-│    bob@WIN-SRV2      │  │  ✓ ls  0.42s                                 │
-│  ○ #1003             │  │    C:\Users\alice                            │
-│    root@srv-linux    │  │    C:\Users\Public                           │
-│                      │  │                                              │
-│  [Attach] [Detach]   │  └──────────────────────────────────────────────┘
-│  [Refresh]           │  #1001 › ls C:\Users\alice          [ Send ]   │
-├──────────────────────┴───────────────────────────────────────────────┤
-│  beacon #1001 · alive · sleep=60s                        14:32:07    │
-└──────────────────────────────────────────────────────────────────────┘
+```bash
+cd client/desktop
+npm ci
+npm run dev
+npm run typecheck && npm test
 ```
 
-### Behaviour
+`TORNADOC2_PYTHON`, `TORNADOC2_REPO` and `--config`/`TORNADOC2_CFG`
+point it at the interpreter, tree and config. `--safe` starts without
+background polling; any view can be detached into its own window.
 
-- **stdout bridge.** `sys.stdout` and `sys.stderr` are replaced with
-  a queue-backed stream before `tornado_client.repl` is imported, so
-  `repl._COLOR` computes to `False` and the `CLR` dict is empty. Every
-  line the CLI prints arrives in the Log tab without ANSI escapes.
-  The GUI applies its own colour tags based on line shape — `✓`,
-  `✗`, `──`, `[!]`, and so on.
-- **`input()` interception.** The CLI's confirmation prompts
-  (`killall`, `forget`, `halt`, the wizards) arrive as modal dialogs
-  on the main thread. The worker thread blocks on an `Event` until
-  the dialog closes, so the CLI's synchronous call graph is preserved.
-- **`getpass.getpass()` interception.** Password prompts use a masked
-  modal. The password never appears in the widget history.
-- **Chat mode.** The CLI's `_cmd_chat` runs a synchronous loop that
-  calls `input()` with a prompt beginning `[chat`. The GUI detects
-  that prefix and reroutes the call to the input bar instead of a
-  modal: the operator types chat messages in place, and the worker
-  unblocks when Send is pressed. When the chat loop exits, the bar
-  reverts to command mode. DM mode, `/me`, `/topic`, `/file`,
-  `/history`, and the rest of the client-side slash commands are
-  unchanged — they run inside the CLI's own chat loop.
-- **Chat rendering.** `Client._chat_render` and
-  `Client._chat_render_topic` are overridden to route to the Chat
-  tab instead of stdout. Day separators, per-operator colouring,
-  `@mention` highlighting, DM direction tags, and the pinned-topic
-  banner are all rendered by the GUI, using the same message dicts
-  the CLI would have printed.
-- **Build form.** `build` with no arguments opens a native form
-  that collects the same fields the CLI wizard does and hands the
-  resulting payload to `Client._do_remote_build`. `build -c
-  <file.json>` still goes through the CLI's own config parser
-  unchanged.
-- **Clipboard.** Copy and paste follow terminal conventions — see
-  [Copy and paste](#copy-and-paste) below for the priority order
-  and the reason Ctrl+C has three behaviours.
-- **Beacon tree.** Auto-refreshes every four seconds while idle. The
-  sidebar header shows live/stale counts for the currently loaded
-  set; every column carries a full-identity tooltip so an operator
-  can hover a truncated `USER@HOST` cell and read the complete
-  `machine_id`, `identity_role`, and platform tuple without opening
-  a detail pane. The `VIEW` column shows other operators attached
-  to the same beacon, matching the CLI's `beacons` output. The
-  search box filters on the currently loaded rows; the column
-  headers sort. Right-clicking a row offers `Attach`, `Show info`,
-  `Set alias…`, `Kill`, and `Forget`.
+**Packaging.** `npm run dist` builds AppImage/deb/rpm (or NSIS/MSI on
+Windows) with the Python client as extra resources; `scripts/afterPack.mjs`
+flips the Electron fuses and `electron-updater` consumes the signed
+GitHub feed. Signing uses `CSC_LINK`/`CSC_KEY_PASSWORD` (Windows) and
+`electron-builder`'s Linux signing hooks; artifacts go out with
+`SHA256SUMS`. `.github/workflows/desktop.yml`
+runs typecheck, tests and a production build.
 
-### Keyboard shortcuts
+**Status:** phase D — release verification complete. The full matrix
+passes: renderer/server tests, axe, CSP, contrast, budget, viewport
+matrix, both Go builds, AppImage with checksums and fuses read from the
+extracted image. Phase 17.1 remains complete (COFF/PE/WASM and bridge
+fuzz corpora, Node 26 LTS, Electron 45). The parity matrix has no red
+rows; `--gui-classic` remains an alias.
 
-| Shortcut | Action |
-|----------|--------|
-| `Enter` | Submit the current line, or send a chat message in chat mode |
-| `Up` / `Down` | Command history (independent of the CLI's readline history) |
-| `Ctrl+C` | Copy the current selection if one exists; otherwise clear the input bar. Context-dependent — see [Copy and paste](#copy-and-paste) |
-| `Ctrl+Shift+C` | Copy the current selection only; no clear fallback. Matches the terminal's copy convention |
-| `Ctrl+V` / `Ctrl+Shift+V` | Paste. Natively routed to the focused widget; falls back to the input bar when a read-only view holds focus — see [Copy and paste](#copy-and-paste) |
-| `Ctrl+Z` / `Ctrl+Y` / `Ctrl+Shift+Z` | Undo / redo in the input bar |
-| `Ctrl+B` | Open the build form |
-| `Ctrl+T` | Enter chat |
-| `Ctrl+L` | Clear the Log tab |
-| `Ctrl+1` / `Ctrl+2` | Switch to the Log or Chat tab |
-| `Ctrl+Q` | Quit (prompts for confirmation) |
-| `F5` | Refresh the beacon list |
-
-### Copy and paste
-
-The three clipboard keys follow terminal conventions rather than
-menu conventions, because an operator with `pyexec --stdin` habits
-expects the terminal shape.
-
-**Ctrl+C is context-dependent.** Priority order:
-
-1. If a focused editable widget has a selection, that selection is
-   copied — the same behaviour the widget's own Ctrl+V handler
-   would produce.
-2. Otherwise, if the active Log or Chat tab has a selection, that
-   is copied. The inactive tab is not consulted; its selection is
-   not visible to the operator and should not be silently copied.
-3. Otherwise, if the input bar contains text, Ctrl+C clears it —
-   matching the CLI's Ctrl+C-at-prompt behaviour.
-4. Otherwise, no-op. Ctrl+C never quits. `Ctrl+Q` is quit.
-
-**Ctrl+Shift+C** forces the copy path only. It skips the clear
-fallback, so an operator who knows the clipboard is empty gets a
-no-op rather than a wiped input line.
-
-**Ctrl+V and Ctrl+Shift+V** route to the focused editable widget
-using its own `paste()` method. Read-only views (the Log and Chat
-tabs, the beacon tree) are not treated as paste targets. If no
-editable widget holds focus, the keystroke is consumed by the
-read-only view and the clipboard contents are not delivered
-anywhere — paste while the Log tab is focused and nothing happens.
-
-All four shortcuts are bound with `ApplicationShortcut` context, so
-they fire even when a modal dialog holds focus. `Ctrl+C` on the
-build dialog's URL field copies the field's selection; `Ctrl+V`
-pastes into it. The dialog's own behaviour is not overridden,
-because the focused-widget branch in each handler calls the
-widget's native method.
-
-### What the GUI deliberately omits
-
-- **Readline history and tab completion.** These are terminal
-  features; the GUI keeps its own command history but does not
-  provide completion. A future revision can wire
-  `Client._compute_matches()` into a `QCompleter` on the input
-  bar.
-- **Live rendering of tables** (`beacons`, `tasks`, `loot list`,
-  `creds list`). The Log tab shows them as text. A future revision
-  can promote them to native widgets.
-- **Inline ANSI in the Log tab.** The GUI strips escape sequences
-  and applies its own tags. Copying from the Log tab yields clean
-  text.
-
-### Platform selection
-
-The GUI runs on X11 and Wayland without configuration. At import
-time it inspects `WAYLAND_DISPLAY` and `DISPLAY` and sets
-`QT_QPA_PLATFORM` accordingly:
-
-- A session with `WAYLAND_DISPLAY` set (a native Wayland session, or
-  a Wayland session with XWayland in the mix) selects
-  `wayland;xcb`. The semicolon-separated form is Qt's built-in
-  fallback syntax: try the Wayland plugin, fall through to `xcb` if
-  the runtime does not carry it.
-- A session with only `DISPLAY` set (pure X11, or an SSH session
-  with X11 forwarding) selects `xcb`.
-- A session with neither (a headless host running the GUI under
-  `offscreen`) leaves `QT_QPA_PLATFORM` unset and lets Qt decide.
-
-`setdefault` is used rather than assignment, so an operator who
-wants to force one backend can `export QT_QPA_PLATFORM=xcb` (or
-`=wayland`) before launching and the choice is preserved.
-
-Wayland requires the compositor's client libraries. On a desktop
-install of Debian 13, Ubuntu, or Fedora they are already present.
-On a minimal server image, `install-deps-client.sh` installs
-`libwayland-client0`, `libwayland-cursor0`, `libwayland-egl1`, and
-`qt6-wayland` alongside the xcb runtime libraries.
-
-### OpenGL backend
-
-The GUI forces `LIBGL_ALWAYS_SOFTWARE=1` at import time. On a host
-without a GPU-backed EGL/GLX display — a VM, a headless SSH session
-with X11 forwarding, a container — Qt probes the hardware driver
-first and prints
-
-```
-libEGL warning: egl: failed to create dri2 screen
-```
-
-on every launch, then falls back to software rendering and runs
-normally. Setting the variable skips the failed probe. The
-assignment uses `setdefault`, so an operator with a working GPU can
-`export LIBGL_ALWAYS_SOFTWARE=0` before launching the client and
-hardware rendering is preserved.
-
-### Failure modes
-
-Three failure modes are worth naming:
-
-- **`ModuleNotFoundError: No module named 'PySide6'`.** The
-  interpreter cannot find PySide6. Install with `pip install
-  PySide6`. A venv or `--venv` install must be activated before
-  launching the client; a system install may need
-  `--break-system-packages` on Debian 12+.
-- **`qt.qpa.plugin: Could not load the Qt platform plugin
-  "xcb"`** (or the equivalent `wayland` message). The interpreter
-  has PySide6 but the system Qt runtime libraries are missing. On
-  Debian-derived systems:
-  `apt install libgl1 libegl1 libxkbcommon-x11-0
-  libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1
-  libxcb-randr0 libxcb-render-util0 libxcb-shape0
-  libxcb-xinerama0 libwayland-client0 libwayland-cursor0
-  libwayland-egl1 qt6-wayland`. `install-deps-client.sh` installs
-  this set on Debian / RHEL / Arch. A headless host can still
-  import PySide6 for a smoke test with `QT_QPA_PLATFORM=offscreen`.
-- **`qt.qpa.xcb: could not connect to display`** (or the equivalent
-  `wayland` message). The runtime libraries are present but there
-  is no display socket. Use `ssh -X`, a VNC session, or run the
-  GUI on the machine with the display.
-
-The CLI is unaffected by all three. When the GUI fails to start,
-the error is printed to the original stderr (restored before exit)
-so it is visible even when the stdout bridge is already active.
-
----
+Design rules and the primitive inventory live in
+`client/desktop/DESIGN.md`; feature code uses tokens only and
+`npm run audit:contrast` fails on a stray colour.
 
 ## AI Operator Console and MCP Server
 
@@ -11767,9 +11384,13 @@ swallowed and the session continues.
 
 | Error | Cause | Fix |
 |-------|-------|-----|
-| `ModuleNotFoundError: No module named 'PySide6'` | PySide6 is not installed in the interpreter running the client | `pip install PySide6`. On Debian 12+ or Homebrew Python, either add `--break-system-packages` or install into a venv with `./install-deps-client.sh --venv ~/.tornadoc2-venv` |
+| `Electron shell not built` | `client/desktop` has no `node_modules`/`out` and no installed launcher | `cd client/desktop && npm ci && npm run build`, or run `install-deps-client.sh` |
+| `chrome-sandbox` permission error | The sandbox helper is not setuid root (run from source) | `sudo chown root:root chrome-sandbox && sudo chmod 4755 chrome-sandbox`, or pass `--no-sandbox` |
 | `qt.qpa.plugin: Could not load the Qt platform plugin "xcb"` (or `"wayland"`) | The system Qt runtime libraries are missing | Debian: `apt install libgl1 libegl1 libxkbcommon-x11-0 libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-shape0 libxcb-xinerama0 libwayland-client0 libwayland-cursor0 libwayland-egl1 qt6-wayland`. The same set is installed by `install-deps-client.sh` |
-| `qt.qpa.xcb: could not connect to display` (or `qt.qpa.wayland:`) | PySide6 loaded but there is no display socket | Use `ssh -X`, a VNC session, or run the GUI on a machine with a display. For a smoke test only, `QT_QPA_PLATFORM=offscreen` permits import without a display |
+| `Missing X server or $DISPLAY` | Electron started without a display | Use `ssh -X`, a VNC session, or `xvfb-run` |
+| Update banner never appears | Dev run, `TORNADOC2_NO_UPDATE=1`, or no GitHub release | Check the release feed; updates only run in a packaged build |
+| `Frame latency is negative` in the terminal | Benign Chromium compositor statistic | Ignore; use `npm run dev:headless` with `--disable-gpu` in CI |
+| `the Python bridge is not running` | `python3` cannot import `flask`/`cryptography`, or the wrong interpreter | Run `install-deps-client.sh`, or set `TORNADOC2_PYTHON` to a venv with the client deps |
 | `could not set up the TLS transport` printed before the GUI | Config PEM material is malformed | Re-export the config on the server |
 
 ### The audit chain refuses to start

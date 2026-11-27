@@ -1,0 +1,134 @@
+/* Design tokens. Dark is the product; light is a courtesy mode.
+   Every foreground token below is contrast-checked by
+   `npm run audit:contrast` against its documented surface. */
+
+:root {
+  color-scheme: dark;
+
+  /* surfaces — near-black, one step of separation per layer */
+  --bg: #04060a;
+  --bg-sunken: #020406;
+  --bg-panel: #080c12;
+  --bg-raised: #0d131b;
+  --bg-hover: #121a24;
+  --overlay: rgb(0 0 0 / 62%);
+
+  /* structure */
+  --line: #141d28;
+  --line-strong: #24313f;
+
+  /* text */
+  --text: #e9f1f8;
+  --text-2: #93a4b5;
+  --text-3: #6f8093;
+
+  /* signal — neon only for marks, values and state */
+  --cyan: #22e0ff;
+  --cyan-soft: #0a2b36;
+  --green: #35ff9e;
+  --green-soft: #06291b;
+  --red: #ff3b5c;
+  --red-soft: #2c0a10;
+  --amber: #ffb020;
+  --amber-soft: #2a1c04;
+  --violet: #b18cff;
+  --violet-soft: #1d1433;
+  --on-accent: #04060a;
+
+  /* aliases kept until the dock migration finishes */
+  --bg-soft: var(--bg-panel);
+  --border: var(--line-strong);
+  --border-soft: var(--line);
+  --text-muted: var(--text-2);
+  --text-faint: var(--text-3);
+  --accent: var(--cyan);
+  --accent-soft: var(--cyan-soft);
+  --ok: var(--green);
+  --warn: var(--amber);
+  --err: var(--red);
+
+  /* type */
+  --ui: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace;
+  --fs-10: 10px;
+  --fs-11: 11px;
+  --fs-12: 12px;
+  --fs-13: 13px;
+  --fs-14: 14px;
+  --fs-16: 16px;
+  --fs-20: 20px;
+  --lh-tight: 1.25;
+  --lh-body: 1.45;
+  --lh-mono: 1.55;
+  --track: 0.12em;
+
+  /* density — compact is the operator default, cozy the comfortable one */
+  --row: 24px;
+  --gap: 6px;
+  --pad: 10px;
+  --pad-y: 6px;
+  --control-h: 24px;
+  --pane-head: 30px;
+
+  /* shape and motion */
+  --r-1: 3px;
+  --r-2: 5px;
+  --r-3: 8px;
+  --r: var(--r-1);
+  --sp: var(--gap);
+  --dur-1: 90ms;
+  --dur-2: 150ms;
+  --dur-3: 220ms;
+  --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+  --focus: var(--cyan);
+  --focus-ring: 0 0 0 2px color-mix(in srgb, var(--focus) 72%, transparent);
+  --shadow-1: 0 4px 14px rgb(0 0 0 / 45%);
+  --shadow-2: 0 18px 50px rgb(0 0 0 / 60%);
+}
+
+html[data-density='cozy'] {
+  --row: 28px;
+  --gap: 8px;
+  --pad: 12px;
+  --pad-y: 8px;
+  --control-h: 28px;
+  --pane-head: 34px;
+}
+
+html[data-density='dense'] {
+  --row: 21px;
+  --gap: 4px;
+  --pad: 8px;
+  --pad-y: 4px;
+  --control-h: 22px;
+  --pane-head: 26px;
+}
+
+html[data-theme='light'] {
+  color-scheme: light;
+  --bg: #f4f6f9;
+  --bg-sunken: #eceff4;
+  --bg-panel: #ffffff;
+  --bg-raised: #e9edf3;
+  --bg-hover: #dde4ec;
+  --overlay: rgb(16 24 32 / 38%);
+  --line: #d7dfe8;
+  --line-strong: #aab6c4;
+  --text: #101820;
+  --text-2: #44515f;
+  --text-3: #5c6976;
+  --cyan: #076f8c;
+  --cyan-soft: #dcf3f9;
+  --green: #067a4a;
+  --green-soft: #dcf5e9;
+  --red: #c11b3a;
+  --red-soft: #fbe2e7;
+  --amber: #8a5a00;
+  --amber-soft: #fbf0d8;
+  --violet: #6b3fd4;
+  --violet-soft: #ece5fd;
+  --on-accent: #ffffff;
+  --focus-ring: 0 0 0 2px color-mix(in srgb, var(--focus) 55%, transparent);
+  --shadow-1: 0 4px 14px rgb(16 24 32 / 12%);
+  --shadow-2: 0 18px 50px rgb(16 24 32 / 18%);
+}

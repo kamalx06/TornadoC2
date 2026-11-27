@@ -1,0 +1,2 @@
+/var/www/robots.txt
+/var/www/site/index.html

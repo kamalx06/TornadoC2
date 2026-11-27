@@ -1,0 +1,74 @@
+name: desktop
+
+on:
+  push:
+    branches: [main, development]
+    paths: ['client/desktop/**', '.github/workflows/desktop.yml']
+  pull_request:
+    paths: ['client/desktop/**']
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: client/desktop
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '26'
+          cache: npm
+          cache-dependency-path: client/desktop/package-lock.json
+      - run: npm ci --no-audit --no-fund
+      - run: npm audit --audit-level=high
+      - run: npm run audit:contrast
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - name: renderer bundle present
+        run: test -s out/renderer/index.html
+      - run: npm run budget
+      - name: xvfb smoke
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq xvfb libgtk-3-0 libnss3 libasound2t64 || sudo apt-get install -y -qq libasound2
+          ./scripts/smoke.sh
+          xvfb-run -a node scripts/viewport-smoke.mjs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-build
+          path: client/desktop/out
+
+  package:
+    if: github.ref == 'refs/heads/development'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: client/desktop
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '26'
+          cache: npm
+          cache-dependency-path: client/desktop/package-lock.json
+      - run: npm ci --no-audit --no-fund
+      - run: npm audit --audit-level=high
+      - run: npm run audit:contrast
+      - run: npm run build
+      - run: npm run budget
+      - run: npx electron-builder --linux deb rpm AppImage --publish never
+      - name: checksums
+        run: (cd dist && sha256sum * > SHA256SUMS)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-packages
+          path: |
+            client/desktop/dist/*.deb
+            client/desktop/dist/*.rpm
+            client/desktop/dist/*.AppImage
+            client/desktop/dist/SHA256SUMS

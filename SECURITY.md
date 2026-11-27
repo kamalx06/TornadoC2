@@ -437,8 +437,8 @@ attack the operator.
 - **Handler-side direct dependencies.** The handler's Python
   dependencies are `flask`, `cryptography`, `dnslib`, `aioquic`,
   `simple-websocket`, and `pyroute2`. The operator client
-  additionally depends on `cryptography`, and optionally on
-  `PySide6` for the GUI. The same reasoning applies.
+  additionally depends on `cryptography`, and the GUI on Node 20+
+  and Electron. The same reasoning applies.
 
 - **Build-script compromise.** `install-go-build.sh` downloads
   `garble` at a pinned version. A report that the pin has been
@@ -654,7 +654,7 @@ on top of Flask/Werkzeug, general bugs are expected. Examples:
 - A multi-transport build (`http,dns`, `http,doh`, `dns,doh`)
   that does not rotate to the next transport when it should, or
   that rotates when it should not.
-- GUI rendering glitches, PySide6 startup failures, or
+- GUI rendering glitches, Electron startup failures, or
   input-routing bugs in the Log or Chat tabs.
 - Help text, completion, or UI glitches.
 
@@ -674,10 +674,9 @@ For these, **open a regular GitHub Issue** (without the
   SMB or TCP.
 - For C2 profile bugs: the profile name, the shaping block, and
   whether the build-time validation passed.
-- For GUI bugs: the Qt platform plugin in use (`xcb`, `wayland`,
-  or `offscreen`), the PySide6 version
-  (`python -c "import PySide6; print(PySide6.__version__)"`),
-  and whether the same command works through the CLI.
+- For GUI bugs: the Electron and Node versions, the platform in
+  use, whether the shell was installed or run from source, and
+  whether the same command works through the CLI.
 
 ---
 

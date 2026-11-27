@@ -121,3 +121,25 @@ func TestUnloadReload(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func FuzzLoad(f *testing.F) {
+	for _, name := range []string{"echo.wasm", "no_run.wasm",
+		"bad_import.wasm"} {
+		if raw, err := os.ReadFile("testdata/" + name); err == nil {
+			f.Add(raw)
+		}
+	}
+	f.Add([]byte{})
+	f.Add([]byte("\x00asm\x01\x00\x00\x00"))
+	h, err := New(context.Background())
+	if err != nil {
+		f.Fatal(err)
+	}
+	defer h.Close(context.Background())
+	f.Fuzz(func(t *testing.T, raw []byte) {
+		if len(raw) > 2<<20 {
+			return
+		}
+		_, _ = h.Load(context.Background(), "f", raw)
+	})
+}

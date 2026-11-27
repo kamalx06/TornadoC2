@@ -1,0 +1,4 @@
+Proto  Local Address                Remote Address               State
+tcp    0.0.0.0:22                   0.0.0.0:0                    LISTEN
+tcp6   :::443                       :::0                         LISTEN
+udp    10.0.0.5:53                  8.8.8.8:53                   ESTABLISHED

@@ -152,6 +152,11 @@ class RouteTest(TempState):
                                 json={}).get_json()
         row = [x for x in body['listeners'] if x['id'] == lid][0]
         self.assertEqual(row['state'], 'down')
+        self.assertEqual(row['health'], 'down')
+        self.assertEqual(row['status'], 'stopped')
+        self.assertIn('host', row)
+        self.assertIn('port', row)
+        self.assertIn('tls', row)
         self.assertIn('down', events)
         self.assertIsInstance(row['cert_days_left'], int)
         probe = self.client.post('/api/v1/listeners/health/probe',

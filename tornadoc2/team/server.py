@@ -4760,7 +4760,12 @@ class OperatorListener:
             st = self.health.status(cfg.get('id', ''))
             rows.append({
                 'id': cfg.get('id'), 'name': cfg.get('name'),
-                'type': cfg.get('type'), 'state': st['state'],
+                'type': cfg.get('type'), 'host': cfg.get('host'),
+                'port': cfg.get('port'), 'status': cfg.get('status'),
+                'tls': (cfg.get('tls') or {}).get('mode', ''),
+                'profiles': list(cfg.get('profiles') or []),
+                'created_by': cfg.get('created_by'),
+                'state': st['state'], 'health': st['state'],
                 'last_ok': st['last_ok'],
                 'last_error': st['last_error'],
                 'probe_ms': st['probe_ms'],

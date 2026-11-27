@@ -140,18 +140,14 @@ not fit the project's direction.
   WASM extensions.
 - `wireguard-tools` — the `wg` command, used once on the team
   server to generate the WireGuard keypair on first launch.
-- **PySide6** (`pip install PySide6`) — required only for the
-  `--gui` operator console. The CLI does not import it. The
-  wheel bundles the Qt 6 runtime; on Linux the `xcb` and
-  `wayland` platform plugins load against the host's system
-  libraries (`libGL`, `libEGL`, `libxkbcommon-x11`, the
-  `libxcb-*` family, `libwayland-*`). `install-deps-client.sh`
-  autodetects the session and installs the matching set on
-  Debian-, RHEL-, and Arch-derived systems.
+- **Node.js 26 LTS and Electron** — the `--gui` operator console
+  lives in `client/desktop`. The CLI never imports it.
+  `install-deps-client.sh` installs the pinned Node, builds the
+  shell and installs it under `/opt/tornadoc2`.
 
-  The CLI is unaffected if PySide6 is missing. A headless host
-  can import PySide6 for a smoke test with
-  `QT_QPA_PLATFORM=offscreen`.
+  The CLI is unaffected if Electron is absent; `--gui` exits with
+  the build hint. For the desktop tree run
+  `cd client/desktop && npm ci && npm run typecheck && npm test`.
 
 ### Cloning and running
 
@@ -161,8 +157,6 @@ cd <repo-dir>
 pip install flask cryptography dnslib
 # optional transports:
 pip install aioquic simple-websocket pyroute2
-# optional GUI:
-pip install PySide6
 python tornadoc2.py --beacon-port 8881
 ```
 
@@ -178,12 +172,12 @@ The operator client has two frontends. The CLI is the default:
 
     python beacon-client.py -c alice.cfg
 
-The PySide6 GUI is opt-in with `--gui`:
+The Electron GUI is opt-in with `--gui`:
 
     python beacon-client.py -c alice.cfg --gui
 
-Both dispatch through the same `Client` methods. A change to the
-CLI's dispatch table is picked up by the GUI without modification.
+`--gui-classic` is still accepted as an alias. Both frontends reach
+the same `Client` through the bridge; a protocol change lands once.
 
 ### Running a build
 
@@ -204,10 +198,9 @@ Before opening a pull request:
 2. **Run both the wizard and the config-file build path.** A
    change to `builder.py` should be exercised through both. The
    `tornadoc2/beacon_handler.py` wizard, the
-   `tornado_client/repl.py` wizard, and the
-   `tornado_client/gui.py` build form are three separate entry
-   points to the same builder; a change to any of them should be
-   visible through all three.
+   `tornado_client/repl.py` wizard, and the desktop `BuildDialog`
+   are separate entry points to the same builder; a change to any
+   should be visible through all three.
 3. **Start the handler and check in a beacon.** A change to the
    listener, engine, a transport, or the pivot model should be
    exercised against a live agent built from the change.
@@ -270,7 +263,7 @@ Examples:
 - A profile whose `placement.kind` is `header` or `cookie`
   behaves correctly on HTTP and QUIC but produces unparsed
   responses on WebSocket.
-- GUI rendering glitches, PySide6 startup failures, or input-routing
+- GUI rendering glitches, Electron startup failures, or input-routing
   bugs in the Log or Chat tabs.
 - Help text, completion, or UI glitches.
 
@@ -291,7 +284,7 @@ Include:
   whether the build-time validation passed. If the profile
   validated but the agent failed at runtime, include the profile
   JSON.
-- For GUI bugs: the Qt platform plugin in use (`xcb`, `wayland`,
+- For GUI bugs: the Electron version, Node version, the platform in use,
   or `offscreen`), whether the same command works through the CLI,
   and any Qt diagnostic output on the client's stderr.
 
@@ -866,7 +859,7 @@ of them.
 | `beacon_handler.py` | One CLI flag per listener port plus one `start()` call |
 
 The operator client — `tornado_client/repl.py` and
-`tornado_client/gui.py` — needs no change at all. The client talks
+`client/desktop` — needs no change at all. The client talks
 to the server API; the transport is a server-to-agent concern. The
 build wizards in those two files do need one line per new transport
 (a display label and a `transport_mode` value in the transport
@@ -1030,7 +1023,7 @@ Three separate wizard entry points reference the transport list:
 
 - `beacon_handler.py` — the local console's `beacon-build` wizard.
 - `tornado_client/repl.py` — the remote client's `_build_wizard`.
-- `tornado_client/gui.py` — the PySide6 GUI's `_BuildDialog`.
+- `client/desktop` → `BuildDialog.tsx`.
 
 Each needs one entry per new transport (a display label and a
 `transport_mode` value). If the transport is platform-specific

@@ -76,4 +76,118 @@
   exports are signed like HTTP exports, and the client's signed
   projection now excludes the embedded signer key.
 
+- Desktop packaging: AppImage/deb/rpm and NSIS/MSI targets, fused
+  binaries, bundled Python tree, signed GitHub auto-update, icon, and
+  an installer that provisions Node + Electron under /opt/tornadoc2.
+
+- GUI cutover: Electron is the default console, PySide6 deprecated
+  behind `--gui-classic` with a parity matrix. Added chat send,
+  per-beacon notes and listener start/stop/probe in the shell.
+
+- Shell 16.1: listener create/edit/delete with certificate and profile
+  pickers, capability-gated controls, native dialogs, bridge
+  validation for listener writes.
+
+- Shell 16.2: build dialog with digest verification, chunked
+  upload/download jobs, progress, cancel and loot capture.
+
+- Shell 16.3: interactive shell, SOCKS proxy, BOF/assembly runners,
+  credential list/reveal, notes list/clear, audit verify, AI provider
+  settings, graph zoom/pan/clustering, palette-key rebinding.
+
+- GUI removal: `gui.py`, `--gui-classic` internals, PySide6 and the Qt
+  installer blocks deleted; Electron is the only GUI. Desktop tests
+  replace the Qt test files; parity doc archived.
+
+- Shell 16.5 close-out: advanced build options and config import;
+  parity matrix complete, packaging refreshed.
+
+- Fuzz targets and corpora for COFF, PE, WASM and bridge frames; COFF
+  header validation is now a first-class package used by the loader.
+- Node 26 LTS, Electron 45, React 19, Vite 8, Zod 4 and refreshed
+  tooling; hardened fuses, custom window controls, CSP inline-style fix
+  and generous IPC timeouts for long actions.
+
+- Desktop install reliability: Electron's lazy binary download is
+  driven by a postinstall guard, install scripts are explicitly
+  trusted, minimatch is overridden to a patched release (audit clean),
+  headless dev/preview scripts, and CSP fixes for the Vite preamble.
+
+- Console design foundations: pitch-black token palette, tested
+  AA/AAA contrast pairs, three density levels, type ramp, focus rings,
+  motion budget and reusable toolbar/field/status/empty/key/split
+  primitives. CI now fails on contrast regressions or stray colours.
+
+- Console dock: persisted four-pane workspace, draggable/tabbed
+  panels, edge split drops, maximize/collapse, reset, corrupt-layout
+  recovery, keyboard tab moves and capability-filtered rail/palette.
+  Layouts normalise on read; panel content survives tab moves. Targets
+  became a table-semantics grid and the event log got filter/follow/
+  copy controls.
+
+- Shell phase: profile presets with custom tracking, labelled quick
+  actions, live status metrics and clock, a branded connect gate with
+  recent configs, role-aware session handoff, double-click maximize and
+  detached windows on their own dock key. Disconnect now broadcasts to
+  every window. A renderer error boundary and preload-race guard keep a
+  blank window from being the failure mode.
+
+- Inventory phase: derived severity and sortable columns, roster
+  selection (arrows/shift/space/select-all), inline alias editing with
+  F2, and an inspector rebuilt into collapsible identity/session/
+  execution/payload/notes/transfer/pivot/danger sections with 30 s
+  clipboard copy. Prompt inputs gained labels.
+
+- Terminal and screen phase: task/shell transport with catalogue
+  completion, per-target session transcripts, history, raw toggle,
+  transcript save and local wait interrupt; screen pane with zoom/pan,
+  interval capture, 32 MB 0600 binary save and inline failures.
+  Workspace upgrades now backfill panels missing from older layouts.
+
+- Typed data-grid phase: one virtualised grid primitive with
+  sort/filter/raw toggle/auto-refresh; process, connection and file
+  parsers with Linux/Windows fixtures and a 5000-row cap; PID-to-process
+  correlation, capability-gated kill/download and file breadcrumbs with
+  parent navigation. Collection is argv-based, never shell-concatenated.
+
+- Topology phase: canvas force graph with typed edge classes, legend,
+  cluster aggregation above 500 sessions with drill-down, 2k state,
+  cursor-anchored zoom, pan/drag, minimap, hover cards and inspector
+  selection sync. Rendering capped at 2500 nodes / 6000 links.
+
+- Listener phase: full-width listener grid with state, TLS, cert
+  expiry, health glyphs and sparklines; creation/editing in a side
+  sheet; inline probe patches without reload; capability-gated
+  start/stop/delete. The health endpoint now includes bind/state/TLS
+  metadata and a `health` alias.
+
+- Coordination phase: grouped chat with day rules, own-message marks
+  and retry-on-failure; merged capped event ring for bridge/task/audit
+  with level/source/search filters, pause and export; retained job list
+  with stale detection, failure text and confirmed cancel.
+
+- Hardening phase: lazy pane/dialog chunks with a suspension skeleton,
+  enforced entry/chunk/CSS/asset/source-map budgets, vendor chunk
+  splitting, CSP assertions with object/form denial, axe on gate, empty,
+  populated and pane states, and a four-viewport 200 % overflow smoke.
+
+- Taxonomy phase: six fixed panel groups with a keyboard group rail,
+  curated profile sets, one-time layout migration with backup, Assets
+  health badge, and Inspector execution moved into the Terminal with
+  transcript subscription and command prefill.
+
+- Armory fix: `_armory_shell` now binds every `_armory_*` helper and
+  `ARMORY_BASE` by introspection, fixing the missing attribute/method
+  crash; regressions cover binding, signed cache verification, bad
+  signatures, fetch URL construction and catalogue listing.
+
+- Login phase: session-launcher gate with live bridge readiness,
+  drag-and-drop config validation through `webUtils.getPathForFile`,
+  step rail, last-session recall, focused error recovery and a
+  single-column narrow layout.
+
+- Release verification: complete renderer/server/axe/CSP/contrast/
+  budget/viewport/Go/installer matrix, AppImage build with checksum and
+  fuse assertion read from the extracted image.
+
 All earlier changes are in git history.

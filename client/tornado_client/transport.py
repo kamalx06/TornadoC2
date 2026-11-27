@@ -270,7 +270,17 @@ class Transport:
                 'available')
         if not pw:
             raise RuntimeError('empty password')
+        self.set_password(pw)
 
+    def set_password(self, pw: str) -> None:
+        """Derive and install the request HMAC key from a password.
+
+        Split out of the prompt so a frontend with its own dialog
+        (the Electron bridge) can seed the key before the first
+        request.
+        """
+        if not pw:
+            raise RuntimeError('empty password')
         algo = self.cfg.get('auth_algo') or 'pbkdf2-sha256'
         params = self.cfg.get('auth_params') or {}
 

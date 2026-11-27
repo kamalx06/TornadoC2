@@ -1,0 +1,5 @@
+PID      COMMAND
+1        /sbin/init splash
+412      /usr/lib/systemd/systemd-journald
+931      /usr/bin/sshd -D
+2044     /usr/bin/python3 -m http.server 8000

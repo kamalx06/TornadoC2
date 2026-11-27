@@ -18,11 +18,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: pip install flask cryptography dnslib ruff coverage PySide6-Essentials
+      - run: pip install flask cryptography dnslib ruff coverage httpx
       - run: ruff check tornadoc2 client/tornado_client client/tornadoc2_mcp tests_py scripts
       - run: coverage run --source=tornadoc2 -m unittest discover -s tests_py -v
       - run: coverage report --omit='tornadoc2/agent/*' --fail-under=18 | tail -40
-      - run: python scripts/gui-bench.py
 
   agent-linux:
     runs-on: ubuntu-latest
@@ -68,4 +67,8 @@ jobs:
         with:
           go-version: '1.25.8'
       - working-directory: tornadoc2/agent
-        run: go test -fuzz=FuzzTaskDecode -fuzztime=30s ./protocol
+        run: |
+          go test -run xxx -fuzz=FuzzTaskDecode -fuzztime=30s ./protocol
+          GOOS=linux go test -run xxx -fuzz=FuzzValidate -fuzztime=30s ./internal/coff
+          GOOS=linux go test -run xxx -fuzz=FuzzHeaders -fuzztime=30s ./internal/peimg
+          GOOS=linux go test -run xxx -fuzz=FuzzLoad -fuzztime=30s ./extensions
