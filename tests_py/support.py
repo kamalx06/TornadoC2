@@ -38,12 +38,24 @@ def ensure_certs():
 class TempState(unittest.TestCase):
     """Isolate writes into a temporary directory."""
 
+    AT_REST_ENV = ('TORNADOC2_AT_REST_KEY_FILE',
+                   'TORNADOC2_AT_REST_MARKER',
+                   'TORNADOC2_AT_REST_KEY')
+
     def setUp(self):
         ensure_certs()
+        self._env_saved = {}
+        for name in self.AT_REST_ENV:
+            self._env_saved[name] = os.environ.pop(name, None)
         self._tmp = tempfile.TemporaryDirectory()
         self._old = os.getcwd()
         os.chdir(self._tmp.name)
 
     def tearDown(self):
+        for name, value in getattr(self, '_env_saved', {}).items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
         os.chdir(self._old)
         self._tmp.cleanup()

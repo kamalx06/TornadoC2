@@ -45,6 +45,7 @@ loss, or legal consequences arising from the use of this project.
 - [Threat Model](#threat-model)
 - [Architecture](#architecture)
 - [Listener Management](#listener-management)
+- [Redirectors and listener health](#redirectors-and-listener-health)
 - [Transports](#transports)
 - [Pivot Transports](#pivot-transports)
 - [Requirements & Installation](#requirements--installation)
@@ -901,15 +902,53 @@ On kill or kill-deadline:
 `jump <method> <host>` asks the server for a fresh stager for a
 running TLS HTTP listener, then delivers and starts it:
 
-- `psexec` — copy to `ADMIN$`, create/start/delete a service.
+- `psexec` — copy to `ADMIN$`, create/start/delete a service. The
+  stager is built with `svc_host`, so the SCM sees a service that
+  reports RUNNING instead of killing it with 1053.
 - `winrm` — WSMan upload and remote invocation (5986 TLS, 5985 plain).
-- `wmi` — `Win32_Process.Create` via `wmic`, temp payload under `%TEMP%`.
+- `wmi` — `Win32_Process.Create`; `wmic` first, PowerShell CIM fallback
+  on hosts where `wmic` is gone. Temp payload under `%TEMP%`.
 - `scshell` — remote SCM `ChangeServiceConfig` path swap and restore.
 
 Credentials come from the current token or `--user/--pass`
 (`LogonUser` with new credentials, reverted afterwards). Cleanup is
 default; `--no-cleanup` keeps the service and payload. Each method is
 compiled only with its `jump_*` tag. Jump requires a TLS HTTP listener.
+`scshell` defaults to the `WebClient` service; override with
+`--service`.
+
+### Redirectors and listener health
+
+Never expose the listener directly. `scripts/redirector.py` renders a
+hardened front:
+
+```bash
+# SNI allowlist at L4, no certificate on the redirector
+scripts/redirector.py --kind nginx --tls passthrough \
+  --host c2.example --upstream https://10.0.0.5:443
+
+# Host allowlist with TLS termination and a 421 default server
+scripts/redirector.py --kind nginx --tls terminate --cert /etc/ssl/c2.pem \
+  --key /etc/ssl/c2.key --host c2.example --upstream https://10.0.0.5:443
+
+# Caddy (terminate) or Cloudflare Worker
+scripts/redirector.py --kind caddy --tls terminate --cert /etc/ssl/c2.pem \
+  --key /etc/ssl/c2.key --host c2.example --upstream https://10.0.0.5:443
+scripts/redirector.py --kind cloudflare \
+  --host c2.example --upstream https://10.0.0.5:443
+```
+
+`--check` runs `nginx -t` or `caddy validate` when installed, `--out`
+writes the config 0600, and any other host gets 421 instead of the
+listener.
+
+The server probes each running HTTP listener every 60 s: TLS handshake,
+then `GET /health`, measured. Three failures move it `ok → degraded →
+down`, a success recovers it, and a change fires the `listener-health`
+webhook. `listeners health` shows state, recent errors and certificate
+days left; `listeners health --probe <id>` forces one (manage
+capability). The GUI listener table shows the same state as a coloured
+column.
 
 ### Armory
 
@@ -938,7 +977,12 @@ not executed. `viewer` and `guardian` have no access.
   that key is required to restore a backup. Files from older
   revisions are read as plaintext and re-written encrypted; set
   `TORNADOC2_AT_REST=off` to opt out, or `TORNADOC2_AT_REST_KEY` to
-  supply the key from outside the backup.
+  supply the key from outside the backup. The server resolves the key
+  and marker against the repository `logs/` directory, never the
+  working directory. Each path is bound as AEAD
+  data, so files cannot be swapped. `atrest status` (admin) lists any
+  plaintext leftover; `atrest migrate` forces a re-seal, while startup
+  migrates once behind a key-fingerprint marker.
 - `audit verify` walks the suffix after the sealed checkpoint;
   `audit verify --full` re-walks everything (run it on a schedule).
 - **Audit seal key and anchor** are written to `logs/audit/audit.key`
@@ -957,12 +1001,17 @@ not executed. `viewer` and `guardian` have no access.
 
 ### Assurance and release
 
-- `tests_py/` covers RBAC, listeners, routes, armory, at-rest
-  encryption, lockout and the engagement model; `go test` covers
-  protocol, transport, WASM and evasion.
+- 100 tests: RBAC, listeners, routes, armory, at-rest encryption and
+  AAD, lockout, audit chain/anchors, model and export injection,
+  redirector templates, listener health and the engagement model;
+  headless Qt tests cover the model, bulk bar, theming and state.
+  `go test` covers protocol, transport, WASM, PE parsing and update
+  signing.
+- `scripts/gui-bench.py` gates the 10k-row render and scroll budgets;
+  `scripts/atrest-status.py` reports unsealed files.
 - `.github/workflows/ci.yml` runs server tests, race-enabled Go tests
-  on Linux, a Windows build with every Jump/WASM tag, and a protocol
-  fuzz pass.
+  on Linux, a Windows build with the full tag matrix (Jump, WASM,
+  persistence, stomp, unhook, spoof, update), and a protocol fuzz pass.
 - `VERSION`, `CHANGELOG.md`, `.github/workflows/release.yml` and
   `scripts/sbom.sh` provide tag-driven, checksummed releases with an
   SBOM.
@@ -981,10 +1030,26 @@ not executed. `viewer` and `guardian` have no access.
 
 ### Feature-pruned builds
 
-Transport, evasion, sleep-mask, WASM and Jump code is selected by build
-tags. An HTTP-only build links no QUIC, WireGuard, DNS, WebSocket or
-wazero code; `tags=all` restores the full agent. Stagers always exclude
-WASM, BOF, .NET, PE-loader and Jump code.
+Optional code is selected at compile time. A default HTTP build links
+no QUIC, WireGuard, DNS, or wazero code; `tags=all` restores everything
+and is the only build that should be treated as "full" in a size or
+feature comparison. Stagers always exclude WASM, BOF, .NET, PE-loader
+and Jump code.
+
+| Group | Tags |
+|---|---|
+| Transports | `t_http`, `t_dns`, `t_doh`, `t_quic`, `t_websocket`, `t_icmp`, `t_wireguard`, `tls_utls` |
+| Features | `wasm_host`, `feat_bof`, `feat_dotnet`, `feat_pe_loader`, `update`, `svc_host` |
+| Evasion | `ev_antisanbox`, `ev_antidebug`, `ev_antivm`, `ev_ppid`, `ev_amsi`, `ev_etw`, `ev_unhook`, `ev_stomp`, `ev_stackspoof` |
+| Sleep masks | `sleep_rc4`, `sleep_aes`, `sleep_cronos`, `sleep_hwbp` |
+| Persistence | `persist_systemd`, `persist_cron`, `persist_profile`, `persist_registry`, `persist_task`, `persist_service` |
+| Jump | `jump_psexec`, `jump_winrm`, `jump_wmi`, `jump_scshell` |
+
+`install-go-build.sh` takes the set through `BUILD_TAGS` (default
+`t_http`, `all` expands to the full list) and prints every pruned
+optional feature. The builder derives the same tags from its config,
+so a wizard build and a script build cannot drift. CI compiles every
+tag individually and the full matrix.
 
 ### Windows post-exploitation
 
@@ -1001,7 +1066,15 @@ WASM, BOF, .NET, PE-loader and Jump code.
   per build with `stack_spoof: false`.
 - `unhook` (tag `ev_unhook`) restores `ntdll!` `.text` from
   disk, removing EDR inline hooks before execution.
-- `stomp` (`ev_stomp`) avoids new private executable memory and supports `--restore` / `--force`.
+- `stomp` (`ev_stomp`) writes shellcode into a signed module's
+  executable section, `--restore` puts the original bytes back,
+  `--force` allows a second stomp, and `--pe <path>` / `--bof <path>`
+  run those payload kinds in-process.
+- `fork [--parent]` starts a second beacon; `--parent` also spoofs the
+  parent process.
+- `update` verifies an ECDSA signature as well as the digest and keeps
+  a `.old` rollback copy; `update publish <build_id>` signs a staged
+  build server-side.
 - `fork [--parent]` produces a second beacon without killing the first; `--parent` spawns under a shell-derived parent.
 - `update` verifies the payload digest and keeps a rollback copy.
 
@@ -1039,7 +1112,10 @@ aggressive combinations.
 ### What this tool does not claim
 
 TornadoC2 does **not** claim to evade EDR, AMSI, ScriptBlock
-logging, memory forensics, or TLS fingerprinting.
+logging, memory forensics, or TLS fingerprinting. Unhooking, module
+stomping and call-stack spoofing raise the cost of a scan and a
+thread-start heuristic; they are not a guarantee, and each is opt-in
+or switchable per build.
 
 The sleep mask is not an EDR bypass. It encrypts the executable
 segment during the wait, which raises the cost of a memory scan
@@ -3170,7 +3246,8 @@ match the token on the child.
   libraries. The GUI exits with a clear `qt.qpa.plugin: Could not
   load the Qt platform plugin "xcb"` (or the equivalent `wayland`
   message) when they are absent. A headless host can still import
-  PySide6 for a smoke test with `QT_QPA_PLATFORM=offscreen`.
+  PySide6 for a smoke test with `QT_QPA_PLATFORM=offscreen`. CI uses
+  `PySide6-Essentials` and runs the headless GUI tests and benchmark.
 - **`httpx`** (`pip install httpx`) — required only for the AI
   console (`beacon-client.py ai`) and the standalone MCP server
   (`python -m tornadoc2_mcp`). The CLI and GUI do not import it.
@@ -3273,7 +3350,14 @@ target platforms still compile.
 ```bash
 ./install-go-build.sh                    # operate on ./tornadoc2/agent
 ./install-go-build.sh <path>             # operate on <path>
+
+BUILD_TAGS=all ./install-go-build.sh     # full agent, every optional tag
+BUILD_TAGS='t_http jump_psexec ev_unhook' ./install-go-build.sh
 ```
+
+`BUILD_TAGS` defaults to `t_http`; the script prints the exact set and
+every optional feature it pruned. See
+[Feature-pruned builds](#feature-pruned-builds) for the tag list.
 
 | Variable | Default | Read by | Effect |
 |----------|---------|---------|--------|
@@ -4451,6 +4535,11 @@ profile's toggles one key at a time.
   "inject": false,
   "inject_method": "default",
 
+  "wasm_extensions": false,
+  "jump_methods": "",
+  "persistence": "",
+  "tags": "",
+
   "evasion": {
     "antisanbox": true,
     "amsi_bypass": true,
@@ -4463,6 +4552,9 @@ profile's toggles one key at a time.
     "ppid_spoof": true,
     "antidebug": true,
     "antivm": true,
+    "unhook": true,
+    "stomp": false,
+    "stack_spoof": true,
     "verbose": false
   },
 
@@ -4518,6 +4610,13 @@ profile's toggles one key at a time.
 | `stage_name` | string | payload name to fetch — **required for stager builds** | stager only |
 | `stage_key_hex` | string | 64-char hex AES-256 key, blank = auto | stager only |
 | `inject` | bool | `true` enables a second build pass that embeds loader-wrapped shellcode for `migrate <pid>`; `false` (default) leaves the agent with `migrate --self` only | all, except `output_format: "stager"` |
+| `wasm_extensions` | bool | `true` links the WASM extension host (`wasm_host`); excluded from stagers | all, except stagers |
+| `jump_methods` | string | Comma list of `psexec`, `winrm`, `wmi`, `scshell`; each adds its `jump_*` tag | Windows only |
+| `persistence` | string | Comma list of `systemd`, `cron`, `profile` (Linux) or `registry`, `task`, `service` (Windows); each adds its `persist_*` tag | matching OS |
+| `tags` | string | Extra build tags, or `all` to expand the full set. Previewed by the installer | all |
+| `unhook` | bool | `true` links `ev_unhook` and restores `ntdll` `.text` at start | Windows |
+| `stomp` | bool | `true` links the `stomp` verb (`ev_stomp`) | Windows |
+| `stack_spoof` | bool | `true` (default) links `ev_stackspoof`; set `false` to opt out | Windows |
 | `inject_method` | string | `default` or `apc`. Selects the build-time default for `migrate <pid>` when the operator does not pass `--method`. `default` is `CreateRemoteThread` / `ptrace`. `apc` is remote APC injection and requires `inject: true` and `target_os: "windows"`. `threadpool`, `fiber`, and `callback` are refused with a specific error naming the correct verb | all, except `output_format: "stager"` |
 
 **Loader behaviour:**
@@ -5450,6 +5549,17 @@ the modal with the full source in one call, then the follow-up
 | `note` / `note set <text>` / `note clear` | Per-beacon notes |
 | `graph [tree\|flat\|summary\|path <a> <b>]` | Engagement-wide session graph |
 | `export [path]` | Export session to HTML transcript |
+| `fork [--parent]` | Start a second independent beacon; `--parent` spawns it under a shell-derived parent |
+| `stomp <b64> \| --restore \| --pe <path> \| --bof <path>` | Run shellcode inside a signed loaded module; `--restore` reverts, `--pe`/`--bof` run those payloads in-process |
+| `unhook [revert]` | Restore `ntdll` `.text` from disk, or put the hooked bytes back |
+| `update <url> <sha256> <sig> \| update publish <build_id>` | Verify and swap the binary with a rollback copy |
+| `persist list \| add <method> <name> \| remove <method> <name>` | Boot persistence (Linux `systemd`/`cron`/`profile`; Windows `registry`/`task`/`service`, `task:system`) |
+| `privesc caps\|suid\|sudo\|ptrace\|container\|summary` | Linux privilege reconnaissance |
+| `model [users\|shares\|services\|evidence]` | Show the stored engagement model |
+| `evidence <sha256> <name> <host> \| --loot <digest>` | Record an evidence hash with provenance |
+| `export ioc\|stix\|mitre\|report [path]` | Write a deliverable (0600) |
+| `bulk task <ids> <verb> \| tag\|untag <tag> <ids> \| kill <ids>` | Apply one action to many beacons, audited per beacon |
+| `atrest status\|migrate` | Report plaintext leftovers or force a re-seal |
 | `migrate --self \| <pid> \| <name> [--method <name>]` | Detach a copy of the agent (`--self`), or inject the agent's embedded shellcode into a foreign process by PID or executable basename; the session survives on the new process. `--method default` uses `CreateRemoteThread` on Windows or `ptrace` on Linux; `--method apc` uses remote APC injection on Windows. When `--method` is absent the build-time default is used |
 | `hashdump [<outdir>]` | Windows: read SAM + SYSTEM hives and decrypt locally. Tries `secretsdump` first, then falls back to a native pure-Python parser. Linux: merge `/etc/passwd` and `/etc/shadow` into `unshadow(8)` format |
 | `enablepriv <args>` | List, enable, or disable Windows token privileges on the current process |
@@ -5489,14 +5599,31 @@ widget picks up the same colours without per-widget styling.
        width="900">
 </p>
 
-**Operator ergonomics.** `Ctrl+K` opens a command palette that
-searches the role-filtered command catalogue and live targets; the
-header carries a connection chip, online/offline pill and role
+**Performance model.** The beacon table is a virtualised
+`QAbstractTableModel` over a `QTableView`: only visible rows are
+painted, so a 10k-ghost engagement scrolls at ~1 ms/frame and a full
+refresh stays under ~100 ms. `scripts/gui-bench.py` measures both and
+CI fails the build on a regression. Every network call runs on a
+bounded worker queue (8 in flight, per-task timeout, visible errors);
+no slot calls the transport directly.
+
+**Operator ergonomics.** `Ctrl+K` opens a fuzzy-ranked command palette
+with recents that searches the role-filtered catalogue and live
+targets; the header carries a connection chip, online/offline pill and role
 badge; the status bar shows operator, role and clock; the target
 list has a privilege column (`user`, `admin`, `root`, `system`,
 with `!` for an elevated token) plus tooltips for parent, integrity
 and fingerprint. Every panel uses the same spacing, focus rings and
-dialog grammar.
+dialog grammar. Selecting two or more targets raises a bulk bar
+(task, tag, kill with confirmation), all audited per beacon. Exports
+and the report viewer run off the main thread and write `0600`.
+
+**Workspace.** Geometry, splitter, tab, filter, theme and keybindings
+persist under `client/.tornadoc2/gui-state.json`. `--gui --safe`
+starts without restoring them or enabling refresh. **Edit →
+Keybindings…** rebinds the main shortcuts with duplicate detection;
+**View** has light and compact modes. Failures surface as corner
+toasts instead of modal interruptions.
 
 **The Graph tab** draws the engagement as rounded nodes grouped by
 privilege, user, domain, subnet or session. Privilege colours,
@@ -5514,7 +5641,8 @@ T3 approvals still open the normal modal prompt.
 protocol-aware create/edit dialog, Start, Stop and Delete, a 5 s
 status refresh, and the same `Client` listener methods the REPL
 uses. Cert and profile pickers come from the server. Host and port
-are locked while a listener runs, mirroring the server rule.
+are locked while a listener runs, mirroring the server rule. A HEALTH
+column carries the prober state and a certificate-expiry tooltip.
 
 **What it is not.** The GUI is not a different client. The CLI
 remains the reference implementation. Every protocol change, every
@@ -11558,6 +11686,10 @@ swallowed and the session continues.
 | `certificate verify failed` | The `server_cert_sha256` pin does not match the peer certificate | Re-export the config on the server |
 | HTTP 503 | Multiplayer is off | Run `multiplayer on` on the local console |
 | `[password_invalid]` | Wrong password, or the client and server clocks are more than 5 minutes apart | Retry; if correct, check NTP on both sides |
+| `[locked]` | Five bad password HMACs | Wait 30 s |
+| `Missing Authority Key Identifier` | Client or server cert predates the AKI extension (OpenSSL 3 rejects the chain) | Restart the server: the leaf is reissued and operators are logged for re-export; re-export each config |
+| `alice.cfg is readable by group/other` | The file was copied or written with a loose umask | `chmod 600 alice.cfg`; exports write 0600 already |
+| Startup prints `cannot authenticate … key may have changed` and the file becomes `.corrupt` | `logs/at_rest.key` is missing or differs from the one that sealed the file | Restore the key from a backup; otherwise start empty and re-add. `atrest status` lists leftovers |
 | `[session_expired]` | The session exceeded the 12-hour TTL | Restart the client — the server has already dropped the record |
 | `[unknown_operator]` | The certificate is valid but the operator was removed | `operators add <name> <role>` from the local console |
 | `[revoked]` | The operator was explicitly revoked | `operators add` to restore |

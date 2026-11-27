@@ -171,7 +171,8 @@ class Transport:
                 'config signer key is not an ECDSA public key')
 
         signed = {k: v for k, v in cfg.items()
-                  if k != 'config_signature_b64'}
+                  if k not in ('config_signature_b64',
+                               'config_signer_pubkey_pem')}
         canonical = _json.dumps(
             signed, sort_keys=True,
             separators=(',', ':')).encode('utf-8')

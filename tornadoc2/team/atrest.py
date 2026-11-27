@@ -62,6 +62,7 @@ def key() -> bytes:
         if _cached and _cached[0] == path:
             return _cached[1]
         os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
+        raw = b''
         if not os.path.isfile(path):
             raw = secrets.token_bytes(_KEY_BYTES)
             try:
@@ -134,7 +135,12 @@ def decrypt(raw: bytes, path: str = '') -> bytes:
         body = base64.b64decode(raw[len(_MAGIC_V1):])
         if len(body) < 13:
             raise AtRestError('truncated encrypted file')
-        return AESGCM(key()).decrypt(body[:12], body[12:], _AAD_V1)
+        try:
+            return AESGCM(key()).decrypt(body[:12], body[12:], _AAD_V1)
+        except Exception as exc:
+            raise AtRestError(
+                f'{path}: cannot authenticate v1 blob ({exc}); the '
+                f'key may have changed or the file is damaged') from exc
     if not raw.startswith(_MAGIC):
         return raw
     body = base64.b64decode(raw[len(_MAGIC):])
@@ -147,7 +153,10 @@ def decrypt(raw: bytes, path: str = '') -> bytes:
                                          _AAD_PREFIX + cand)
         except Exception as exc:
             last = exc
-    raise AtRestError(f'cannot authenticate {path}: {last}')
+    detail = str(last) or type(last).__name__
+    raise AtRestError(
+        f'cannot authenticate {path}: {detail}; the key may have '
+        f'changed or the file is damaged')
 
 
 def read_bytes(path: str) -> bytes:

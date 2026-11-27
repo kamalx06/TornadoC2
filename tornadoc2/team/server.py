@@ -345,6 +345,25 @@ class OperatorListener:
         self._jump_guard = threading.Lock()
         self._jump_max = 8
 
+        # State paths are anchored to the repository, not the
+        # working directory, so keys, markers and stores always
+        # agree. The environment override is only for tests.
+        _logs_dir = _os.path.normpath(_os.path.join(
+            _os.path.dirname(_os.path.abspath(__file__)),
+            '..', '..', 'logs'))
+        _os.makedirs(_logs_dir, exist_ok=True)
+
+        def _state(name):
+            return _os.path.join(_logs_dir, name)
+
+        if not _os.environ.get('TORNADOC2_AT_REST_KEY_FILE'):
+            _os.environ['TORNADOC2_AT_REST_KEY_FILE'] = _state(
+                'at_rest.key')
+        if not _os.environ.get('TORNADOC2_AT_REST_MARKER'):
+            _os.environ['TORNADOC2_AT_REST_MARKER'] = _state(
+                '.atrest-v2')
+        self._warn_missing_at_rest_key(_logs_dir)
+
         try:
             from .build_manager import BuildManager
             handler = getattr(engine, 'handler', None)
@@ -355,26 +374,24 @@ class OperatorListener:
         except Exception:
             self.build_manager = None
 
-        self.chat = ChatRoom(
-            persist_dir=constants.CHAT_LOG_DIR)
+        self.chat = ChatRoom(persist_dir=_state('chat'))
 
         try:
-            self.loot = LootStore(constants.LOOT_DIR)
+            self.loot = LootStore(_state('lootstore'))
         except Exception:
             self.loot = None
 
-        _logs_dir = _os.path.join(
-            _os.path.dirname(_os.path.abspath(__file__)),
-            '..', '..', 'logs')
         try:
-            self.engagement = Engagement(
-                _os.path.join(_logs_dir, 'engagement.json'))
+            self.engagement = Engagement(_state('engagement.json'))
         except SchemaError as exc:
             print(f"[ENGAGEMENT] {exc}; upgrade the server or move "
                   f"the file aside", flush=True)
             raise
-        except Exception:
-            self.engagement = Engagement()
+        except Exception as exc:
+            print(f"[ENGAGEMENT] init failed ({exc}); starting empty",
+                  flush=True)
+            self.engagement = Engagement.memory(
+                _state('engagement.json'))
         try:
             self.aliases = AliasStore(
                 _os.path.join(_logs_dir, 'aliases.json'))
@@ -4705,6 +4722,29 @@ class OperatorListener:
                     f"cas={len(out['cas'])}"))
         return jsonify({**out, 'audit_id': audit_id})
 
+    @staticmethod
+    def _warn_missing_at_rest_key(logs_dir) -> None:
+        key = _os.environ.get('TORNADOC2_AT_REST_KEY_FILE', '')
+        if key and _os.path.isfile(key):
+            return
+        if _os.environ.get('TORNADOC2_AT_REST', 'on').lower() in (
+                'off', '0', 'false', 'no'):
+            return
+        try:
+            sealed = any(
+                open(_os.path.join(logs_dir, n), 'rb').read(6)
+                in (b'T2ENC1', b'T2ENC2')
+                for n in ('creds.json', 'notes.json',
+                          'engagement.json', 'aliases.json',
+                          'webhooks.json', 'schedules.json')
+                if _os.path.isfile(_os.path.join(logs_dir, n)))
+        except OSError:
+            sealed = False
+        if sealed:
+            print('[AT-REST] sealed state exists but the key is '
+                  'missing; a new key will quarantine it. Restore '
+                  f'{key} to read it.', flush=True)
+
     def _fire_health(self, event, payload) -> None:
         if self.webhooks is None:
             return
@@ -6297,8 +6337,10 @@ class OperatorListener:
         state += ['listeners.json']
         try:
             moved = len(_atrest.migrate_all(state))
-            moved += _chat.migrate_persisted(constants.CHAT_LOG_DIR)
-            moved += _loot.migrate_blobs(constants.LOOT_DIR)
+            moved += _chat.migrate_persisted(
+                _os.path.join(logs_dir, 'chat'))
+            moved += _loot.migrate_blobs(
+                _os.path.join(logs_dir, 'lootstore'))
             _atrest.mark_migrated()
             if moved:
                 print(f"[AT-REST] encrypted {moved} state file(s)",

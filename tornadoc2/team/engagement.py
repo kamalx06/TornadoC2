@@ -100,6 +100,17 @@ class Engagement:
         self._data = self._blank()
         self._load()
 
+    @classmethod
+    def memory(cls, path='logs/engagement.json'):
+        """Unbacked store, for when the file cannot be opened."""
+        obj = cls.__new__(cls)
+        obj.path = path
+        obj._lock = threading.RLock()
+        obj._dirty = False
+        obj._last_save = 0.0
+        obj._data = cls._blank()
+        return obj
+
     @staticmethod
     def _blank() -> dict:
         return {'schema': SCHEMA, 'hosts': {}, 'findings': [],

@@ -4619,6 +4619,24 @@ class BeaconHandler:
                     'auth_params', {'iters': 200_000})
                 cfg['auth_salt'] = entry.get('auth_salt', '')
 
+            signer = getattr(self, 'signer', None)
+            if signer is not None:
+                try:
+                    import base64 as _b64cfg
+                    canonical = _json.dumps(
+                        cfg, sort_keys=True,
+                        separators=(',', ':')).encode('utf-8')
+                    cfg['config_signature_b64'] = (
+                        _b64cfg.b64encode(signer.sign(canonical))
+                        .decode('ascii'))
+                    cfg['config_signer_pubkey_pem'] = signer.public_pem
+                except Exception as exc:
+                    print(f"{c['yellow']}[TEAM] config signing "
+                          f"failed: {exc}{c['end']}")
+            else:
+                print(f"{c['yellow']}[TEAM] config signing "
+                      f"skipped: no signer{c['end']}")
+
             blob = _json.dumps(cfg, indent=2)
             raw_bytes = blob.encode('utf-8')
             digest = _hl.sha256(raw_bytes).hexdigest()

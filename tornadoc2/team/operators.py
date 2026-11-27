@@ -52,6 +52,19 @@ _RESERVED_OPERATOR_NAMES = frozenset({
 })
 
 
+def _has_aki(path: str) -> bool:
+    try:
+        from cryptography import x509
+        from cryptography.x509.oid import ExtensionOID
+        with open(path, 'rb') as fh:
+            cert = x509.load_pem_x509_certificate(fh.read())
+        cert.extensions.get_extension_for_oid(
+            ExtensionOID.AUTHORITY_KEY_IDENTIFIER)
+        return True
+    except Exception:
+        return False
+
+
 class OperatorRegistry:
 
     SCRYPT_N = 1 << 17      # 131072 — 128 MiB per derivation
@@ -112,6 +125,40 @@ class OperatorRegistry:
         self._ca_pubkey = None
         self._ca_pubkey_lock = threading.Lock()
         os.makedirs(self.base_dir, exist_ok=True)
+        try:
+            self.reissue_legacy_certs()
+        except Exception as exc:
+            print(f'[TEAM] cert reissue skipped: {exc}', flush=True)
+
+    def reissue_legacy_certs(self) -> None:
+        """Re-mint operator certs that predate the AKI extension.
+
+        OpenSSL 3 refuses a chain whose leaf has no Authority Key
+        Identifier while the CA carries a Subject Key Identifier.
+        Re-minting creates a new key, so those operators must
+        re-export their config; the warning names them.
+        """
+        with self._lock:
+            try:
+                data = self._load()
+            except Exception:
+                return
+        stale = []
+        for name in data:
+            try:
+                cert = self.paths_for(name)['cert']
+            except Exception:
+                continue
+            if cert and os.path.isfile(cert) and not _has_aki(cert):
+                stale.append(name)
+        for name in stale:
+            try:
+                self._mint_cert(name)
+                print(f'[TEAM] reissued cert for {name} (missing AKI); '
+                      f're-export their config', flush=True)
+            except Exception as exc:
+                print(f'[TEAM] could not reissue {name}: {exc}',
+                      flush=True)
 
     def _name_lock(self, name: str) -> threading.Lock:
         with self._name_locks_guard:
@@ -227,7 +274,14 @@ class OperatorRegistry:
         """
         if (os.path.isfile(self.server_cert)
                 and os.path.isfile(self.server_key)):
-            return
+            if _has_aki(self.server_cert):
+                return
+            # Pre-AKI certs fail OpenSSL 3 verification.
+            for p in (self.server_cert, self.server_key):
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
         self.ensure_ca()
         csr = os.path.join(self.ca_dir, 'server.csr')
         ext = os.path.join(self.ca_dir, 'server.ext')
@@ -237,6 +291,8 @@ class OperatorRegistry:
                 'keyUsage=critical,digitalSignature,keyEncipherment\n'
                 'extendedKeyUsage=serverAuth\n'
                 'subjectAltName=DNS:localhost,IP:127.0.0.1\n'
+                'subjectKeyIdentifier=hash\n'
+                'authorityKeyIdentifier=keyid:always\n'
             )
         try:
             self._openssl([
@@ -602,6 +658,8 @@ class OperatorRegistry:
                 'basicConstraints=critical,CA:FALSE\n'
                 'keyUsage=critical,digitalSignature,keyEncipherment\n'
                 'extendedKeyUsage=clientAuth\n'
+                'subjectKeyIdentifier=hash\n'
+                'authorityKeyIdentifier=keyid:always\n'
             )
         with open(cnf, 'w', encoding='utf-8') as fh:
             fh.write(

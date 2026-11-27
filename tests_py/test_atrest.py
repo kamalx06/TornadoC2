@@ -57,6 +57,17 @@ class AtRestTest(TempState):
             b'T2ENC1\n' + base64.b64encode(nonce + blob))
         self.assertEqual(atrest.load_json('old.json', {}), {'old': 1})
 
+    def test_v1_wrong_key_is_atrest_error(self):
+        import base64
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        nonce = b'1' * 12
+        blob = AESGCM(b'k' * 32).encrypt(nonce, b'{}',
+                                         b'tornadoc2/atrest/v1')
+        open('bad.json', 'wb').write(
+            b'T2ENC1\n' + base64.b64encode(nonce + blob))
+        with self.assertRaises(atrest.AtRestError):
+            atrest.load_json('bad.json', {})
+
     def test_disabled(self):
         os.environ['TORNADOC2_AT_REST'] = 'off'
         atrest.save_json('c.json', {'z': 3})

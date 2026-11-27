@@ -434,6 +434,47 @@ QLabel#statusPill[state="stopped"] {{
     color: {Palette.TEXT_MUTED}; border: 1px solid {Palette.BORDER};
 }}
 
+/* ── Target header ────────────────────────────────────── */
+QFrame#targetHeader {{
+    background: transparent;
+    border-bottom: 1px solid {Palette.BORDER_SOFT};
+}}
+QLabel#paneDot {{ color: {Palette.ACCENT}; font-size: 8pt; }}
+QLabel#paneTitle {{
+    color: {Palette.TEXT};
+    font-size: 9.5pt;
+    font-weight: 700;
+    letter-spacing: 1.6px;
+}}
+QLabel#countPill {{
+    color: {Palette.ACCENT};
+    background: {Palette.ACCENT_SOFT};
+    border: 1px solid {Palette.BORDER};
+    border-radius: 9px;
+    padding: 0 8px;
+    font-size: 8.5pt;
+    font-weight: 700;
+}}
+QPushButton#iconGhost {{
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    color: {Palette.TEXT_MUTED};
+    font-size: 12pt;
+    padding: 0;
+}}
+QPushButton#iconGhost:hover {{
+    color: {Palette.TEXT};
+    background: {Palette.BG_HOVER};
+    border-color: {Palette.BORDER};
+}}
+QFrame#bulkBar {{
+    background: {Palette.BG_SOFT};
+    border: 1px solid {Palette.BORDER};
+    border-radius: 6px;
+    padding: 4px 8px;
+}}
+
 /* ── Tree (beacon list) ───────────────────────────────── */
 QTreeWidget {{
     background: {Palette.BG_PANEL};
@@ -459,6 +500,36 @@ QTreeWidget::item:hover {{
 }}
 QHeaderView {{
     background: {Palette.BG_SOFT};
+}}
+/* ── Target table (virtualised view) ──────────────────── */
+QTableView {{
+    background: {Palette.BG_PANEL};
+    border: 1px solid {Palette.BORDER_SOFT};
+    border-radius: 6px;
+    outline: 0;
+    padding: 2px 0;
+    gridline-color: transparent;
+}}
+QTableView::item {{
+    padding: 6px 8px;
+    border-bottom: 1px solid {Palette.BORDER_SOFT};
+    color: {Palette.TEXT};
+}}
+QTableView::item:selected {{
+    background: {Palette.ACCENT_SOFT};
+    color: {Palette.TEXT};
+    border-left: 2px solid {Palette.ACCENT};
+}}
+QTableView::item:hover {{ background: {Palette.BG_HOVER}; }}
+QTableView QHeaderView::section {{
+    background: transparent;
+    color: {Palette.TEXT_FAINT};
+    border: none;
+    border-bottom: 1px solid {Palette.BORDER};
+    padding: 6px 8px;
+    font-size: 8pt;
+    font-weight: 700;
+    letter-spacing: 0.8px;
 }}
 QHeaderView::section {{
     background: {Palette.BG_SOFT};
@@ -4314,76 +4385,76 @@ class GuiApp(QMainWindow):
         lay.setContentsMargins(Sp.L, Sp.M, Sp.L, Sp.S)
         lay.setSpacing(Sp.S)
 
-        # ── Toolbar row ──────────────────────────────────────
-        head = QHBoxLayout()
-        head.setSpacing(Sp.S)
+        # ── Header card ──────────────────────────────────────
+        header = QFrame()
+        header.setObjectName('targetHeader')
+        hl = QVBoxLayout(header)
+        hl.setContentsMargins(0, 0, 0, Sp.S)
+        hl.setSpacing(Sp.S)
 
-        # A small accent dot before the section label. Same
-        # visual grammar as the ◈ in the brand strip — a
-        # coloured glyph on the left of a text label marks a
-        # region the eye should land on.
+        top = QHBoxLayout()
+        top.setSpacing(Sp.S)
         dot = QLabel('\u25cf')
-        dot.setStyleSheet(
-            f'color: {Palette.ACCENT}; font-size: 8pt; '
-            f'background: transparent;')
-        head.addWidget(dot)
+        dot.setObjectName('paneDot')
+        top.addWidget(dot)
 
         lbl = QLabel('TARGETS')
-        lbl.setObjectName('sectionLabel')
-        head.addWidget(lbl)
+        lbl.setObjectName('paneTitle')
+        top.addWidget(lbl)
 
         self.beacon_count_lbl = QLabel('0')
-        self.beacon_count_lbl.setObjectName('countBadge')
-        head.addWidget(self.beacon_count_lbl)
+        self.beacon_count_lbl.setObjectName('countPill')
+        top.addWidget(self.beacon_count_lbl)
 
-        head.addSpacing(Sp.M)
+        top.addStretch(1)
+        refresh = QPushButton('\u21bb')
+        refresh.setObjectName('iconGhost')
+        refresh.setToolTip('Refresh targets  (F5)')
+        refresh.setFixedSize(26, 26)
+        refresh.clicked.connect(self._refresh_beacons_async)
+        top.addWidget(refresh)
+        hl.addLayout(top)
+
+        row = QHBoxLayout()
+        row.setSpacing(Sp.S)
 
         self.search_entry = QLineEdit()
-        self.search_entry.setPlaceholderText('search targets…')
         self.search_entry.textChanged.connect(
             lambda _t: self._on_search_change())
-
         glyph = QLabel('\u2315')
         glyph.setFont(_f_ui(11))
-
         search_wrap = _FocusFrame(self.search_entry, name='searchBox')
         search_lay = QHBoxLayout(search_wrap)
         search_lay.setContentsMargins(0, 0, 6, 0)
         search_lay.setSpacing(0)
         search_lay.addWidget(glyph)
         search_lay.addWidget(self.search_entry, 1)
-        search_wrap.setMaximumWidth(340)
-        search_wrap.setMinimumWidth(220)
-        head.addWidget(search_wrap)
-
-        head.addStretch(1)
+        search_wrap.setMaximumWidth(420)
+        row.addWidget(search_wrap, 1)
 
         attach = QPushButton('Attach')
         attach.setObjectName('primary')
         attach.setToolTip('Attach to the selected target  (Enter)')
         attach.clicked.connect(self._attach_selected)
-        head.addWidget(attach)
+        row.addWidget(attach)
 
         detach = QPushButton('Detach')
+        detach.setObjectName('ghost')
         detach.setToolTip('Release the current target')
         detach.clicked.connect(lambda: self._submit('detach'))
-        head.addWidget(detach)
+        row.addWidget(detach)
+        hl.addLayout(row)
 
-        refresh = QPushButton('↻')
-        refresh.setObjectName('ghost')
-        refresh.setToolTip('Refresh the target list  (F5)')
-        refresh.clicked.connect(self._refresh_beacons_async)
-        head.addWidget(refresh)
-
-        lay.addLayout(head)
+        self.search_entry.setPlaceholderText('filter by id, host or user')
+        lay.addWidget(header)
 
         # ── Beacon table ─────────────────────────────────────
         self.beacon_model = BeaconModel()
         self.tree = _BeaconView()
         self.tree.setModel(self.beacon_model)
         self.tree.set_empty_text(
-            'waiting for beacons\n'
-            'the list updates every few seconds')
+            'no targets yet\n'
+            'they appear here on their first check-in')
         self.tree.setSelectionBehavior(
             QTableView.SelectionBehavior.SelectRows)
         self.tree.setSelectionMode(
@@ -4399,6 +4470,7 @@ class GuiApp(QMainWindow):
         self.tree.doubleClicked.connect(
             lambda *_: self._attach_selected())
         self.tree.setTextElideMode(Qt.TextElideMode.ElideMiddle)
+        self.tree.verticalHeader().setDefaultSectionSize(28)
 
         # Column sizing. USER@HOST stretches to fill the rest;
         # everything else sizes to its content so a header like
@@ -4418,7 +4490,8 @@ class GuiApp(QMainWindow):
 
         lay.addWidget(self.tree, 1)
 
-        self.bulk_bar = QWidget()
+        self.bulk_bar = QFrame()
+        self.bulk_bar.setObjectName('bulkBar')
         bl = QHBoxLayout(self.bulk_bar)
         bl.setContentsMargins(0, 0, 0, 0)
         self.bulk_count = QLabel('0 selected')

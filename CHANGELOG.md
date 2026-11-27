@@ -64,4 +64,16 @@
   Cloudflare) and a listener health prober with states, cert expiry,
   history, webhook and client/GUI display.
 
+- Fixed startup abort on an unreadable encrypted engagement: at-rest
+  errors are now `AtRestError`, the file is quarantined, and the server
+  falls back to an in-memory store. At-rest key and marker paths are
+  repository-absolute with a clear warning when sealed state exists but
+  the key is missing.
+
+- Certificates carry Subject/Authority Key Identifier, and pre-AKI
+  server and operator certs are reissued on start, fixing OpenSSL 3
+  `Missing Authority Key Identifier` handshakes. Local-console config
+  exports are signed like HTTP exports, and the client's signed
+  projection now excludes the embedded signer key.
+
 All earlier changes are in git history.

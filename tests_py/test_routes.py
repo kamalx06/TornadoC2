@@ -163,6 +163,21 @@ class RouteTest(TempState):
         self.assertEqual(probe.status_code, 200)
         self.assertEqual(probe.get_json()['state'], 'ok')
 
+    def test_bad_engagement_does_not_block_start(self):
+        path = os.path.join(ROOT, 'logs', 'engagement.json')
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        open(path, 'wb').write(b'T2ENC1\nAAAA')
+        o = OperatorListener(
+            self.engine, '127.0.0.1', 0, OperatorRegistry(),
+            self.audit, self._multiplayer())
+        try:
+            self.assertEqual(o.engagement.hosts(), [])
+            self.assertTrue(os.path.isfile(path + '.corrupt'))
+        finally:
+            o.health.stop()
+        self.assertTrue(os.path.isabs(
+            os.environ.get('TORNADOC2_AT_REST_KEY_FILE', '')))
+
     def test_audit_verify_route(self):
         self.audit.write('a', 'admin', '1', 'x')
         r = self.client.post('/api/v1/audit/verify', json={})

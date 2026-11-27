@@ -64,6 +64,22 @@ class EngagementTest(TempState):
         with self.assertRaises(Exception):
             Engagement('logs/engagement.json')
 
+    def test_wrong_key_blob_quarantined(self):
+        import os
+        os.makedirs('logs', exist_ok=True)
+        open('logs/engagement.json', 'wb').write(b'T2ENC1\nAAAA')
+        e = Engagement('logs/engagement.json')
+        self.assertEqual(e.hosts(), [])
+        self.assertTrue(os.path.exists(
+            'logs/engagement.json.corrupt'))
+        self.assertEqual(e.dataset_hash(),
+                         Engagement.memory().dataset_hash())
+
+    def test_memory_store_works(self):
+        e = Engagement.memory()
+        e.add_finding('t', 'low', 'h', 'd', 'x')
+        self.assertEqual(len(e.findings()), 1)
+
     def test_corrupt_file_kept_aside(self):
         import os
         os.makedirs('logs', exist_ok=True)
